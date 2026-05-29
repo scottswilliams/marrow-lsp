@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/marrow-lsp-core",
+    "crates/marrow-lsp",
 ]
 
 [workspace.package]
@@ -25,3 +26,9 @@ marrow-schema = { path = "../marrow/crates/marrow-schema" }
 marrow-store = { path = "../marrow/crates/marrow-store", features = ["native"] }
 marrow-run = { path = "../marrow/crates/marrow-run" }
 marrow-project = { path = "../marrow/crates/marrow-project" }
+
+# The LSP wire types. Pinned to the exact version tower-lsp 0.20 re-exports so the
+# server and the core link one lsp-types and exchange the same `Diagnostic`, `Url`,
+# and `Position` without a conversion layer. Bump in lockstep with tower-lsp.
+lsp-types = "=0.94.1"
+tower-lsp = "0.20"

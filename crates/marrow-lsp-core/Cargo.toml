@@ -11,3 +11,10 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+lsp-types.workspace = true
+marrow-syntax.workspace = true
+marrow-check.workspace = true
+marrow-project.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

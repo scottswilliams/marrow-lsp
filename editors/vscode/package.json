@@ -1,0 +1,67 @@
+{
+  "name": "marrow",
+  "displayName": "Marrow",
+  "description": "Language support for the Marrow .mw language, backed by the marrow-lsp server.",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "publisher": "marrow",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scottswilliams/marrow-lsp"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:marrow",
+    "workspaceContains:**/marrow.json"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "marrow",
+        "aliases": [
+          "Marrow"
+        ],
+        "extensions": [
+          ".mw"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "marrow",
+        "scopeName": "source.marrow",
+        "path": "./syntaxes/marrow.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Marrow",
+      "properties": {
+        "marrow.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the `marrow-lsp` server binary. When empty, the extension uses the bundled `./server/marrow-lsp` if present, otherwise the dev build at `../../target/debug/marrow-lsp`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}
