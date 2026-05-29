@@ -1,0 +1,5 @@
+{
+  "sourceRoots": ["src"],
+  "run": { "defaultEntry": "shelf::sample::main" },
+  "store": { "backend": "native", "dataDir": ".marrow/data" }
+}

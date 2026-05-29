@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/marrow-lsp-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/scottswilliams/marrow-lsp"
+authors = ["Marrow contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# The canonical marrow crates. Path dependencies during local development; switch
+# to a single pinned git revision once marrow is published so every crate moves
+# together and the analysis surface cannot drift between commits.
+[workspace.dependencies]
+marrow-syntax = { path = "../marrow/crates/marrow-syntax" }
+marrow-check = { path = "../marrow/crates/marrow-check" }
+marrow-schema = { path = "../marrow/crates/marrow-schema" }
+marrow-store = { path = "../marrow/crates/marrow-store", features = ["native"] }
+marrow-run = { path = "../marrow/crates/marrow-run" }
+marrow-project = { path = "../marrow/crates/marrow-project" }
