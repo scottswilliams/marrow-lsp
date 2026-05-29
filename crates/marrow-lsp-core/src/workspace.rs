@@ -8,8 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
-use marrow_check::{AnalysisSnapshot, ProjectSources, analyze_project};
+use marrow_check::{ProjectSources, analyze_project};
 use marrow_project::{ProjectConfig, parse_config};
+
+pub use marrow_check::AnalysisSnapshot;
 
 use crate::documents::Documents;
 

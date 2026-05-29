@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
-use marrow_lsp_core::workspace::{Workspace, url_to_path};
+use marrow_lsp_core::positions::{LineIndex, Position as CorePosition};
+use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
+use marrow_lsp_core::{hover, symbols};
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, jsonrpc};
@@ -104,6 +106,9 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -152,4 +157,112 @@ impl LanguageServer for Backend {
         // A closed buffer's problems no longer apply to the editor's view.
         self.client.publish_diagnostics(url, Vec::new(), None).await;
     }
+
+    async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
+        let position = params.text_document_position_params;
+        let url = position.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+
+        let mut state = self.state.lock().await;
+        // The cursor's byte offset comes from this buffer's index, so a request
+        // that arrives before the debounced recompute still maps correctly.
+        let Some(offset) = state
+            .documents
+            .get(&url)
+            .map(|document| document.index.offset(to_core_position(position.position)))
+        else {
+            return Ok(None);
+        };
+
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        let Some(snapshot) = ensure_snapshot(workspace, documents, &path) else {
+            return Ok(None);
+        };
+        Ok(hover::hover(snapshot, &path, offset))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> jsonrpc::Result<Option<DocumentSymbolResponse>> {
+        let url = params.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+
+        let mut state = self.state.lock().await;
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        let Some(snapshot) = ensure_snapshot(workspace, documents, &path) else {
+            return Ok(None);
+        };
+        let Some(analyzed) = snapshot.files.iter().find(|file| file.path == path) else {
+            return Ok(None);
+        };
+
+        // Outline against the open buffer's index when present, else the parse's
+        // own text rebuilt into an index, so selection ranges land on the buffer.
+        let outline = match documents.get(&url) {
+            Some(document) => symbols::document_symbols(&analyzed.parsed.file, &document.index),
+            None => symbols::document_symbols(
+                &analyzed.parsed.file,
+                &LineIndex::new(read_to_string(&path)),
+            ),
+        };
+        Ok(Some(DocumentSymbolResponse::Nested(outline)))
+    }
+
+    async fn symbol(
+        &self,
+        _: WorkspaceSymbolParams,
+    ) -> jsonrpc::Result<Option<Vec<SymbolInformation>>> {
+        let mut state = self.state.lock().await;
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        // Workspace symbols need a project; recompute against any open buffer to
+        // resolve one, then flatten its modules.
+        let Some(file) = documents.urls().filter_map(url_to_path).next() else {
+            return Ok(workspace
+                .latest()
+                .map(|snapshot| symbols::workspace_symbols(&snapshot.program)));
+        };
+        let Some(snapshot) = ensure_snapshot(workspace, documents, &file) else {
+            return Ok(None);
+        };
+        Ok(Some(symbols::workspace_symbols(&snapshot.program)))
+    }
+}
+
+fn to_core_position(position: Position) -> CorePosition {
+    CorePosition {
+        line: position.line,
+        character: position.character,
+    }
+}
+
+/// The cached analysis, recomputing it once against `file` if none exists yet, so
+/// a request that arrives before any debounced recompute still has a snapshot. A
+/// file outside any project yields `None`.
+fn ensure_snapshot<'a>(
+    workspace: &'a mut Workspace,
+    documents: &Documents,
+    file: &std::path::Path,
+) -> Option<&'a AnalysisSnapshot> {
+    if workspace.latest().is_none() {
+        let _ = workspace.recompute(file, documents);
+    }
+    workspace.latest()
+}
+
+fn read_to_string(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
 }

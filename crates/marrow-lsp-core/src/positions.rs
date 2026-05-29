@@ -82,6 +82,21 @@ impl LineIndex {
         byte
     }
 
+    /// The document text this index was built over.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The LSP range a UTF-8 byte span covers, with both ends mapped through
+    /// [`Self::position`]. Marrow spans carry byte offsets; clients want UTF-16
+    /// ranges, and routing every span through here keeps that mapping in one place.
+    pub fn range(&self, start_byte: usize, end_byte: usize) -> lsp_types::Range {
+        lsp_types::Range {
+            start: to_lsp_position(self.position(start_byte)),
+            end: to_lsp_position(self.position(end_byte)),
+        }
+    }
+
     /// The largest character boundary at or before `byte` (which must be within
     /// `0..=text.len()`).
     fn floor_char_boundary(&self, mut byte: usize) -> usize {
@@ -89,6 +104,15 @@ impl LineIndex {
             byte -= 1;
         }
         byte
+    }
+}
+
+/// Map this crate's [`Position`] to the LSP wire position. The two are the same
+/// shape; the wrapper type keeps the UTF-16 contract documented on [`Position`].
+fn to_lsp_position(position: Position) -> lsp_types::Position {
+    lsp_types::Position {
+        line: position.line,
+        character: position.character,
     }
 }
 

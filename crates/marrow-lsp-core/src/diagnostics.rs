@@ -8,11 +8,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Range, Url};
+use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Url};
 use marrow_check::{AnalysisSnapshot, CheckDiagnostic};
 use marrow_syntax::{Severity, SourceSpan};
 
-use crate::positions::{LineIndex, Position};
+use crate::positions::LineIndex;
 
 /// The diagnostic `source` an editor shows beside each Marrow problem.
 pub const SOURCE: &str = "marrow";
@@ -37,7 +37,7 @@ pub fn diagnostic_to_lsp(
         None => message.to_string(),
     };
     Diagnostic {
-        range: span_to_range(span, index),
+        range: index.range(span.start_byte, span.end_byte),
         severity: Some(severity_to_lsp(severity)),
         code: Some(NumberOrString::String(code.to_string())),
         source: Some(SOURCE.to_string()),
@@ -97,20 +97,6 @@ fn check_diagnostic_to_lsp(diagnostic: &CheckDiagnostic, index: &LineIndex) -> D
         None,
         index,
     )
-}
-
-fn span_to_range(span: SourceSpan, index: &LineIndex) -> Range {
-    Range {
-        start: to_lsp_position(index.position(span.start_byte)),
-        end: to_lsp_position(index.position(span.end_byte)),
-    }
-}
-
-fn to_lsp_position(position: Position) -> lsp_types::Position {
-    lsp_types::Position {
-        line: position.line,
-        character: position.character,
-    }
 }
 
 fn severity_to_lsp(severity: Severity) -> DiagnosticSeverity {

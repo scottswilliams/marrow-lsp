@@ -124,6 +124,82 @@ fn initialize_then_open_erroring_buffer_publishes_a_diagnostic() {
     let _ = server.0.kill();
 }
 
+#[test]
+fn hover_over_a_typed_expression_returns_a_marrow_code_block() {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let response = recv(&mut stdout);
+    assert_eq!(
+        response["result"]["capabilities"]["hoverProvider"], true,
+        "the server should advertise hover support"
+    );
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    // A clean buffer for the fixture's module path: a function whose parameter `n`
+    // is an int, used on the last line.
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let clean = "module shelf::sample\n\npub fn answer(n: int): int\n    return n\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+
+    // Hover over the `n` in `return n` on line 3 (zero-based), character 11.
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 3, "character": 11 }
+            }
+        }),
+    );
+
+    let hover = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert_eq!(
+        hover["result"]["contents"]["value"], "```marrow\nint\n```",
+        "hovering the int parameter should render its type as a marrow block"
+    );
+
+    let _ = server.0.kill();
+}
+
 /// Read notifications until a non-empty `publishDiagnostics` for `uri` arrives,
 /// returning its first diagnostic. Recomputes are debounced, so an initial empty
 /// publish for other open files may precede it.
@@ -143,4 +219,17 @@ fn wait_for_diagnostic(reader: &mut impl BufRead, uri: &str, timeout: Duration) 
         }
     }
     panic!("no diagnostic published within the timeout");
+}
+
+/// Read messages until the response with `id` arrives, skipping the interleaved
+/// diagnostic notifications a recompute publishes.
+fn wait_for_response(reader: &mut impl BufRead, id: i64, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let message = recv(reader);
+        if message["id"] == id {
+            return message;
+        }
+    }
+    panic!("no response for request {id} within the timeout");
 }
