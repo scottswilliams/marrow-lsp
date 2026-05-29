@@ -32,6 +32,10 @@ green. Keep tests next to the behavior they describe.
 Prefer changes whose impact is proportionate to their size. Avoid large rewrites that do not
 earn their cost.
 
+### Parallelize for Velocity
+Run independent work concurrently, not serially — batch independent tool calls and, in workflows,
+fan out file-disjoint lanes. When work is needlessly serial, refactor to make it parallel.
+
 ### Anti-Slop & No Documentation Sediment
 No agentic slop in code or docs. Delete stale content rather than shuffle it; do not preserve
 obsolete names, formats, examples, or transition shims for their own sake. When the design
