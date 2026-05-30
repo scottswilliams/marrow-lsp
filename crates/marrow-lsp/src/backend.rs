@@ -580,7 +580,7 @@ impl LanguageServer for Backend {
     }
 
     /// Classify the document's cached lex into semantic tokens. Reads only the
-    /// cached lex and position index — no parse, no recompute.
+    /// cached lex, parse, and position index — no recompute.
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
@@ -590,7 +590,11 @@ impl LanguageServer for Backend {
         let Some(document) = state.documents.get(&url) else {
             return Ok(None);
         };
-        let data = semantic_tokens::semantic_tokens(&document.lexed, &document.index);
+        let data = semantic_tokens::semantic_tokens(
+            &document.lexed,
+            &document.parsed.file,
+            &document.index,
+        );
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
             data,
