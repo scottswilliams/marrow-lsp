@@ -317,12 +317,11 @@ impl LanguageServer for Backend {
         let index = workspace
             .binding_index_cached()
             .expect("ensured just above");
-        let docs = hover::symbol_docs(snapshot, index, &path, offset);
-        Ok(hover::hover_with_live(
+        Ok(hover::hover_with_index(
             snapshot,
+            index,
             &path,
             offset,
-            docs.as_deref(),
             reader.as_ref(),
         ))
     }

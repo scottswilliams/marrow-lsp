@@ -1,27 +1,68 @@
-//! Hover: the type of the expression under the cursor, as a `marrow` code block.
+//! Hover: the checked fact under the cursor, as a `marrow` code block.
 //!
 //! An editor sends a byte offset (already converted from an LSP position by the
-//! document's [`LineIndex`](crate::positions::LineIndex)); this asks the checker
-//! for the type there with [`marrow_check::type_at`] and renders it as a fenced
-//! `marrow` block so the client shows it with `.mw` syntax highlighting. The type
-//! comes only from the checker — this module never re-infers anything.
+//! document's [`LineIndex`](crate::positions::LineIndex)); this renders resolved
+//! function symbols from the binding index, or asks the checker for the expression
+//! type there with [`marrow_check::type_at`]. The rendered code is fenced as
+//! `marrow` so the client shows it with `.mw` syntax highlighting. The facts come
+//! only from the checker — this module never re-infers anything.
 
 use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use marrow_check::{AnalysisSnapshot, BindingIndex, SymbolKind, SymbolRef, type_at};
+use marrow_check::{
+    AnalysisSnapshot, BindingIndex, CheckedFunction, SymbolKind, SymbolRef, build_binding_index,
+    type_at,
+};
 use marrow_store::backend::Presence;
-use marrow_syntax::{Declaration, EnumDecl, EnumMember, ResourceDecl, ResourceMember, SourceSpan};
+use marrow_syntax::{
+    Declaration, EnumDecl, EnumMember, FunctionDecl, Keyword, ParamMode, ResourceDecl,
+    ResourceMember, SourceSpan, TokenKind, lex_source,
+};
 
 use crate::store::{Availability, StoreReader, StoredValue, saved_path_at};
 use crate::types::render_type;
 
-/// The hover for byte `offset` in `file`, or `None` when no type covers it.
+/// The hover for byte `offset` in `file`, or `None` when no known symbol or type
+/// covers it.
 ///
 /// The file must be one the snapshot analyzed; a path it does not know (or an
 /// offset no expression covers) yields `None`, so the editor shows nothing.
 pub fn hover(snapshot: &AnalysisSnapshot, file: &Path, offset: usize) -> Option<Hover> {
-    hover_with_live(snapshot, file, offset, None, None)
+    let index = build_binding_index(snapshot);
+    hover_with_index(snapshot, &index, file, offset, None)
+}
+
+/// The hover for byte `offset`, using `index` for resolved symbol facts and
+/// `reader` for optional live stored data.
+pub fn hover_with_index(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+    reader: Option<&StoreReader>,
+) -> Option<Hover> {
+    if let Some(value) = function_hover(snapshot, index, file, offset, reader) {
+        return Some(markdown_hover(value));
+    }
+
+    let docs = symbol_docs_at_hover_target(snapshot, index, file, offset);
+    hover_with_live(snapshot, file, offset, docs.as_deref(), reader)
+}
+
+fn symbol_docs_at_hover_target(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<String> {
+    let symbol = index.definition(file, offset)?;
+    if symbol.kind == SymbolKind::Function
+        && !is_function_hover_target(snapshot, index, file, offset, &symbol)
+    {
+        return None;
+    }
+    symbol_docs(snapshot, index, file, offset)
 }
 
 /// The hover for byte `offset`, augmented with the symbol's documentation and the
@@ -63,13 +104,210 @@ pub fn hover_with_live(
         value.push_str(&line);
     }
 
-    Some(Hover {
+    Some(markdown_hover(value))
+}
+
+fn function_hover(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+    reader: Option<&StoreReader>,
+) -> Option<String> {
+    let symbol = index.definition(file, offset)?;
+    if symbol.kind != SymbolKind::Function
+        || !is_function_hover_target(snapshot, index, file, offset, &symbol)
+    {
+        return None;
+    }
+
+    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
+    let parsed_function = parsed_function_at(&parsed_file.parsed.file, symbol.span)?;
+    let checked_function = checked_function_at(snapshot, &symbol)?;
+    let mut value = marrow_code_block(&function_signature(checked_function));
+
+    if let Some(docs) = join_docs(&parsed_function.docs) {
+        value.push_str("\n\n");
+        value.push_str(&docs);
+    }
+
+    if let Some(docs) = parameter_docs(parsed_function) {
+        value.push_str("\n\n");
+        value.push_str(&docs);
+    }
+
+    if let Some(reader) = reader
+        && let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file)
+        && let Some(segments) = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)
+        && let Some(line) = live_value_line(reader, &segments, &snapshot.program)
+    {
+        value.push_str("\n\n");
+        value.push_str(&line);
+    }
+
+    Some(value)
+}
+
+fn is_function_hover_target(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+    symbol: &SymbolRef,
+) -> bool {
+    index.references(symbol).iter().any(|reference| {
+        reference.kind == SymbolKind::Function
+            && reference.file == file
+            && reference.span != symbol.span
+            && span_covers(reference.span, offset)
+            && offset_is_on_last_identifier(snapshot, file, reference.span, offset)
+    }) || is_function_declaration_name(snapshot, file, offset, symbol)
+}
+
+fn offset_is_on_last_identifier(
+    snapshot: &AnalysisSnapshot,
+    file: &Path,
+    span: SourceSpan,
+    offset: usize,
+) -> bool {
+    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
+        return false;
+    };
+    let Some((start, end)) = last_identifier_span(span, &analyzed.source) else {
+        return false;
+    };
+    start <= offset && offset <= end
+}
+
+fn is_function_declaration_name(
+    snapshot: &AnalysisSnapshot,
+    file: &Path,
+    offset: usize,
+    symbol: &SymbolRef,
+) -> bool {
+    if symbol.file != file {
+        return false;
+    }
+    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == symbol.file) else {
+        return false;
+    };
+    let Some(function) = parsed_function_at(&analyzed.parsed.file, symbol.span) else {
+        return false;
+    };
+    let Some((start, end)) = name_span(&function.name, function.span, &analyzed.source) else {
+        return false;
+    };
+    start <= offset && offset <= end
+}
+
+fn parsed_function_at(
+    source: &marrow_syntax::SourceFile,
+    span: SourceSpan,
+) -> Option<&FunctionDecl> {
+    source
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Function(function) if function.span == span => Some(function),
+            _ => None,
+        })
+}
+
+fn checked_function_at<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    symbol: &SymbolRef,
+) -> Option<&'a CheckedFunction> {
+    snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.source_file == symbol.file)?
+        .functions
+        .iter()
+        .find(|function| function.span == symbol.span)
+}
+
+fn name_span(name: &str, span: SourceSpan, source: &str) -> Option<(usize, usize)> {
+    let lexed = lex_source(source);
+    let mut after_fn = false;
+    for token in lexed.tokens {
+        if !span_covers(span, token.span.start_byte) || !span_covers(span, token.span.end_byte) {
+            continue;
+        }
+        match token.kind {
+            TokenKind::Keyword(Keyword::Fn) => after_fn = true,
+            TokenKind::Identifier if after_fn && token.text(source) == name => {
+                return Some((token.span.start_byte, token.span.end_byte));
+            }
+            TokenKind::Newline if after_fn => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn last_identifier_span(span: SourceSpan, source: &str) -> Option<(usize, usize)> {
+    let lexed = lex_source(source);
+    let mut found = None;
+    for token in lexed.tokens {
+        if token.kind == TokenKind::Identifier
+            && span_covers(span, token.span.start_byte)
+            && span_covers(span, token.span.end_byte)
+        {
+            found = Some((token.span.start_byte, token.span.end_byte));
+        }
+    }
+    found
+}
+
+fn span_covers(span: SourceSpan, offset: usize) -> bool {
+    span.start_byte <= offset && offset <= span.end_byte
+}
+
+fn function_signature(function: &CheckedFunction) -> String {
+    let params = function
+        .params
+        .iter()
+        .map(|param| {
+            let mode = match param.mode {
+                Some(ParamMode::Out) => "out ",
+                Some(ParamMode::InOut) => "inout ",
+                None => "",
+            };
+            format!("{mode}{}: {}", param.name, render_type(&param.ty))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    match &function.return_type {
+        Some(ty) => format!("fn {}({params}): {}", function.name, render_type(ty)),
+        None => format!("fn {}({params})", function.name),
+    }
+}
+
+fn parameter_docs(function: &FunctionDecl) -> Option<String> {
+    let docs = function
+        .params
+        .iter()
+        .filter_map(|param| {
+            let docs = join_docs(&param.docs)?;
+            Some(format!("- `{}`: {docs}", param.name))
+        })
+        .collect::<Vec<_>>();
+    if docs.is_empty() {
+        None
+    } else {
+        Some(format!("**Parameters**\n{}", docs.join("\n")))
+    }
+}
+
+fn markdown_hover(value: String) -> Hover {
+    Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
             value,
         }),
         range: None,
-    })
+    }
 }
 
 /// The `;;` description of the symbol at byte `offset` in `file`, as a Markdown
@@ -288,6 +526,26 @@ mod tests {
         (snapshot, file)
     }
 
+    fn analyze_files(
+        files: &[(&str, &str)],
+        target: &str,
+    ) -> (AnalysisSnapshot, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let src = root.join("src");
+        for (path, source) in files {
+            let file = src.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, source).unwrap();
+        }
+        let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+        let file = src.join(target);
+        std::mem::forget(dir);
+        (snapshot, file)
+    }
+
     /// The byte offset of the first occurrence of `needle` in `source`.
     fn offset_of(source: &str, needle: &str) -> usize {
         source.find(needle).expect("needle present in source")
@@ -304,6 +562,202 @@ mod tests {
             panic!("expected markup contents");
         };
         assert_eq!(markup.value, "```marrow\nint\n```");
+    }
+
+    #[test]
+    fn hover_over_a_function_call_shows_signature_and_description() {
+        let source = "\
+module a
+
+;; Adds two numbers.
+pub fn add(x: int, y: int): int
+    return x + y
+
+pub fn caller(): int
+    return add(1, 2)
+";
+        let (snapshot, file) = analyze(source);
+        let offset = source.rfind("add(1, 2)").unwrap();
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the function call");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert!(
+            markup
+                .value
+                .starts_with("```marrow\nfn add(x: int, y: int): int\n```"),
+            "function signature should lead the hover: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("Adds two numbers."),
+            "function docs should follow the signature: {}",
+            markup.value
+        );
+        assert!(
+            !markup.value.contains("Parameters"),
+            "parameter docs section should be omitted when no parameter has docs: {}",
+            markup.value
+        );
+    }
+
+    #[test]
+    fn hover_over_a_function_declaration_name_shows_signature() {
+        let source = "\
+module a
+
+pub fn answer(): int
+    return 42
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "answer") + 1;
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the function declaration");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert_eq!(markup.value, "```marrow\nfn answer(): int\n```");
+    }
+
+    #[test]
+    fn hover_over_a_single_letter_function_declaration_name_ignores_the_fn_keyword() {
+        let source = "\
+module a
+
+pub fn n(): int
+    return 1
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "n():") + 1;
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the function declaration");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert_eq!(markup.value, "```marrow\nfn n(): int\n```");
+    }
+
+    #[test]
+    fn hover_over_a_function_with_moded_params_shows_modes() {
+        let source = "\
+module a
+
+pub fn fill(out value: int, inout count: int)
+    value = count
+    count = count + 1
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "fill") + 1;
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the function declaration");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert_eq!(
+            markup.value,
+            "```marrow\nfn fill(out value: int, inout count: int)\n```"
+        );
+    }
+
+    #[test]
+    fn hover_over_a_function_with_parameter_docs_shows_documented_params() {
+        let source = "\
+module a
+
+pub fn add(
+    ;; The left value.
+    x: int,
+    ;; The right value.
+    y: int,
+): int
+    return x + y
+
+pub fn caller(): int
+    return add(1, 2)
+";
+        let (snapshot, file) = analyze(source);
+        let offset = source.rfind("add(1, 2)").unwrap();
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the function call");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert!(
+            markup
+                .value
+                .starts_with("```marrow\nfn add(x: int, y: int): int\n```"),
+            "function signature should lead the hover: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("**Parameters**"),
+            "parameter docs section should be present: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("- `x`: The left value."),
+            "first parameter docs should be shown: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("- `y`: The right value."),
+            "second parameter docs should be shown: {}",
+            markup.value
+        );
+    }
+
+    #[test]
+    fn hover_over_a_qualified_function_call_only_uses_the_leaf_as_the_function() {
+        let math_source = "\
+module shelf::math
+
+;; Adds two numbers.
+pub fn add(x: int, y: int): int
+    return x + y
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::math
+
+pub fn caller(): int
+    return math::add(1, 2)
+";
+        let (snapshot, file) = analyze_files(
+            &[("shelf/math.mw", math_source), ("shelf/app.mw", app_source)],
+            "shelf/app.mw",
+        );
+        let call = app_source.rfind("math::add(1, 2)").unwrap();
+        let qualifier_hover = hover(&snapshot, &file, call + 1);
+        if let Some(hover) = qualifier_hover {
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markup contents");
+            };
+            assert!(
+                !markup.value.contains("fn add("),
+                "module qualifier hover should not pretend to be the function: {}",
+                markup.value
+            );
+            assert!(
+                !markup.value.contains("Adds two numbers."),
+                "module qualifier hover should not inherit function docs: {}",
+                markup.value
+            );
+        }
+
+        let leaf_offset = call + "math::".len() + 1;
+        let leaf_hover = hover(&snapshot, &file, leaf_offset).expect("a hover at the callee leaf");
+        let HoverContents::Markup(markup) = leaf_hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert!(
+            markup
+                .value
+                .starts_with("```marrow\nfn add(x: int, y: int): int\n```"),
+            "function leaf should show the signature: {}",
+            markup.value
+        );
     }
 
     #[test]
