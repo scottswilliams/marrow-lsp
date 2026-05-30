@@ -216,7 +216,7 @@ fn push(
     let length = if end.line == start.line {
         end.character.saturating_sub(start.character)
     } else {
-        start.character.max(1)
+        first_line_length(token, index, start.character)
     };
 
     let delta_line = start.line - *prev_line;
@@ -234,6 +234,17 @@ fn push(
     });
     *prev_line = start.line;
     *prev_start = start.character;
+}
+
+fn first_line_length(token: &Token, index: &LineIndex, start_character: u32) -> u32 {
+    let text = index.text();
+    let token_text = &text[token.span.start_byte..token.span.end_byte.min(text.len())];
+    let line_end = token_text
+        .find('\n')
+        .map(|offset| token.span.start_byte + offset)
+        .unwrap_or(token.span.end_byte);
+    let end = index.position(line_end);
+    end.character.saturating_sub(start_character).max(1)
 }
 
 #[cfg(test)]
@@ -326,6 +337,37 @@ mod tests {
             decoded.iter().any(|(_, _, _, ty, _)| *ty == TYPE_NAMESPACE),
             "the `::` separator colors as a namespace operator"
         );
+    }
+
+    #[test]
+    fn multi_line_tokens_are_clamped_to_the_first_line_remainder() {
+        let source = "let value = \"first\nsecond\"";
+        let token = Token {
+            kind: marrow_syntax::TokenKind::String,
+            span: marrow_syntax::SourceSpan {
+                start_byte: source.find('"').unwrap(),
+                end_byte: source.len(),
+                line: 0,
+                column: 12,
+            },
+        };
+        let index = LineIndex::new(source);
+        let mut tokens = Vec::new();
+        let mut line = 0;
+        let mut start = 0;
+
+        push(
+            &mut tokens,
+            &token,
+            TYPE_STRING,
+            0,
+            &index,
+            &mut line,
+            &mut start,
+        );
+
+        let decoded = absolute(&tokens);
+        assert_eq!(decoded[0].2, 6, "token covers `\"first` only");
     }
 
     #[test]

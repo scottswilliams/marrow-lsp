@@ -24,6 +24,8 @@ use crate::positions::LineIndex;
 pub enum RenameError {
     /// The cursor is not on a renameable symbol.
     NoSymbol,
+    /// The requested replacement is not a single valid Marrow identifier.
+    InvalidName,
     /// The symbol names data encoded on disk (a saved field, group, layer, index,
     /// or a resource attached to a saved root). Renaming it in source alone would
     /// change the on-disk path and orphan the stored data, so it is refused.
@@ -39,6 +41,7 @@ impl RenameError {
     pub fn message(&self) -> String {
         match self {
             Self::NoSymbol => "no renameable symbol at this position".to_string(),
+            Self::InvalidName => "new name must be a valid Marrow identifier".to_string(),
             Self::SavedDataBacked { stable_id } => {
                 let mut message = "cannot rename: this names saved data, so renaming it in \
                      source would orphan the stored records on disk"
@@ -172,6 +175,9 @@ pub fn rename(
     offset: usize,
     new_name: &str,
 ) -> Result<WorkspaceEdit, RenameError> {
+    if !is_valid_rename(new_name) {
+        return Err(RenameError::InvalidName);
+    }
     let definition = index
         .definition(file, offset)
         .ok_or(RenameError::NoSymbol)?;
@@ -380,6 +386,68 @@ fn is_keyword(word: &str) -> bool {
     )
 }
 
+fn is_valid_rename(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_ident_start(first) && chars.all(is_ident_continue) && !is_reserved_word(name)
+}
+
+fn is_reserved_word(word: &str) -> bool {
+    matches!(
+        word,
+        "and"
+            | "at"
+            | "bool"
+            | "break"
+            | "bytes"
+            | "catch"
+            | "const"
+            | "continue"
+            | "date"
+            | "decimal"
+            | "delete"
+            | "duration"
+            | "else"
+            | "enum"
+            | "Error"
+            | "ErrorCode"
+            | "false"
+            | "finally"
+            | "fn"
+            | "for"
+            | "if"
+            | "in"
+            | "index"
+            | "inout"
+            | "instant"
+            | "int"
+            | "lock"
+            | "match"
+            | "merge"
+            | "module"
+            | "not"
+            | "or"
+            | "out"
+            | "pub"
+            | "required"
+            | "resource"
+            | "return"
+            | "sequence"
+            | "string"
+            | "throw"
+            | "transaction"
+            | "true"
+            | "try"
+            | "unique"
+            | "unknown"
+            | "use"
+            | "var"
+            | "while"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +624,32 @@ pub fn f(): string
         // Offset 0 is the `module` keyword — no symbol.
         let result = rename(&index, &indices, &file, 0, "x");
         assert_eq!(result, Err(RenameError::NoSymbol));
+    }
+
+    #[test]
+    fn rename_rejects_invalid_replacement_text() {
+        let source = "module a\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
+        let (snapshot, file, indices) = analyze(source);
+        let index = build_binding_index(&snapshot);
+        let def_offset = offset_of(source, "const n") + "const ".len();
+
+        assert_eq!(
+            rename(&index, &indices, &file, def_offset, "two words"),
+            Err(RenameError::InvalidName)
+        );
+        assert_eq!(
+            rename(&index, &indices, &file, def_offset, "return"),
+            Err(RenameError::InvalidName)
+        );
+        // Marrow keywords are not valid identifiers; renaming a symbol to one
+        // would produce source that no longer parses.
+        for keyword in ["at", "index", "unique", "out", "inout", "ErrorCode"] {
+            assert_eq!(
+                rename(&index, &indices, &file, def_offset, keyword),
+                Err(RenameError::InvalidName),
+                "renaming to the reserved word `{keyword}` must be rejected"
+            );
+        }
     }
 
     #[test]

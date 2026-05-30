@@ -116,19 +116,24 @@ impl Workspace {
         self.binding_index.as_ref()
     }
 
-    /// Resolve the project for `file` (if not already resolved), overlay every open
-    /// buffer under the root, run the checker, cache the snapshot, and return a
-    /// reference to it.
+    /// Resolve the project for `file`, overlay every open buffer under that root,
+    /// run the checker, cache the snapshot, and return a reference to it.
     ///
-    /// Resolution is sticky: once a project is found it is reused, since every open
-    /// `.mw` buffer in a session belongs to the same project. A file outside any
-    /// project yields [`WorkspaceError::NoProject`].
+    /// The cached project is reused only while `file` still lives under its root.
+    /// Multi-root editor sessions can open unrelated Marrow projects in one server
+    /// process, so a later file outside the current root resolves its own nearest
+    /// `marrow.json` instead of being analyzed against the first project. A file
+    /// outside any project yields [`WorkspaceError::NoProject`].
     pub fn recompute(
         &mut self,
         file: &Path,
         documents: &Documents,
     ) -> Result<&AnalysisSnapshot, WorkspaceError> {
-        if self.project.is_none() {
+        if !self
+            .project
+            .as_ref()
+            .is_some_and(|project| file.starts_with(&project.root))
+        {
             self.project = Some(resolve_project(file)?);
         }
         let project = self.project.as_ref().expect("project resolved just above");
@@ -263,5 +268,41 @@ mod tests {
             workspace.recompute(&stray, &documents),
             Err(WorkspaceError::NoProject)
         ));
+    }
+
+    #[test]
+    fn recompute_switches_projects_when_the_file_moves_outside_the_cached_root() {
+        fn project(dir: &tempfile::TempDir, module: &str) -> PathBuf {
+            let root = dir.path();
+            std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+            let src = root.join("src");
+            std::fs::create_dir_all(&src).unwrap();
+            let file = src.join(format!("{module}.mw"));
+            std::fs::write(
+                &file,
+                format!("module {module}\n\npub fn id(): int\n    return 1\n"),
+            )
+            .unwrap();
+            file
+        }
+
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first = project(&first_dir, "first");
+        let second = project(&second_dir, "second");
+        let documents = Documents::new();
+        let mut workspace = Workspace::new();
+
+        workspace.recompute(&first, &documents).unwrap();
+        let snapshot = workspace.recompute(&second, &documents).unwrap();
+
+        assert!(
+            snapshot.files.iter().any(|file| file.path == second),
+            "the second project should be analyzed, not the cached first project"
+        );
+        assert_eq!(
+            workspace.project().map(|project| project.root.as_path()),
+            Some(second_dir.path())
+        );
     }
 }

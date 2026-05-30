@@ -629,7 +629,11 @@ fn runtime_error_json(error: &RuntimeError) -> Json {
 /// balloon the reply.
 fn truncate(mut output: String) -> String {
     if output.len() > OUTPUT_CAP {
-        output.truncate(OUTPUT_CAP);
+        let mut end = OUTPUT_CAP;
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
         output.push_str("\n…output truncated…");
     }
     output
@@ -904,6 +908,14 @@ pub fn shout()
             result["output"].as_str().unwrap().contains("loud"),
             "print output should be captured, got {result}"
         );
+    }
+
+    #[test]
+    fn output_truncation_preserves_utf8_boundaries() {
+        let output = "€".repeat(OUTPUT_CAP);
+        let truncated = truncate(output);
+
+        assert!(truncated.ends_with("…output truncated…"));
     }
 
     #[test]

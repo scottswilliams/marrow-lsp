@@ -55,7 +55,9 @@ struct Running {
 pub struct Session<W: Write> {
     out: W,
     seq: i64,
-    /// Verified breakpoint lines per source file (already snapped to statements).
+    /// Requested breakpoint lines per source file. They are resolved against the
+    /// loaded program when answering `setBreakpoints` and again when the run starts,
+    /// so breakpoints sent before `launch` are not lost.
     breakpoints: HashMap<PathBuf, Vec<u32>>,
     /// The program for the launched project, for breakpoint resolution. Set at
     /// launch.
@@ -228,8 +230,6 @@ impl<W: Write> Session<W> {
             Ok(launch) => {
                 self.program = Some(launch.program.clone());
                 self.entry_file = entry_source_file(&launch.program, &launch.entry);
-                // Re-resolve any breakpoints already set, now that we have a program.
-                self.resolve_pending_breakpoints();
                 self.pending = Some(PendingLaunch {
                     project_dir,
                     entry,
@@ -268,8 +268,8 @@ impl<W: Write> Session<W> {
             return;
         };
 
-        let (verified, resolved) = self.resolve_breakpoints(&path, &requested);
-        self.breakpoints.insert(path, resolved);
+        let (verified, _) = self.resolve_breakpoints(&path, &requested);
+        self.breakpoints.insert(path, requested);
         self.respond(request, true, json!({ "breakpoints": verified }));
     }
 
@@ -293,18 +293,6 @@ impl<W: Write> Session<W> {
             }
         }
         (verified, resolved)
-    }
-
-    /// Re-resolve breakpoints once a program becomes available (a client may send
-    /// `setBreakpoints` before the launch's program is loaded). Any breakpoint set
-    /// against an empty program is snapped now.
-    fn resolve_pending_breakpoints(&mut self) {
-        let paths: Vec<PathBuf> = self.breakpoints.keys().cloned().collect();
-        for path in paths {
-            let requested = self.breakpoints.get(&path).cloned().unwrap_or_default();
-            let (_, resolved) = self.resolve_breakpoints(&path, &requested);
-            self.breakpoints.insert(path, resolved);
-        }
     }
 
     /// `configurationDone`: start the run-thread with the captured launch and the
@@ -344,11 +332,31 @@ impl<W: Write> Session<W> {
     /// reports frames in and the runtime spans line up with.
     fn entry_breakpoint_lines(&self) -> Vec<u32> {
         match &self.entry_file {
-            Some(file) => self.breakpoints.get(file).cloned().unwrap_or_default(),
+            Some(file) => self
+                .breakpoints
+                .get(file)
+                .map(|requested| self.resolved_breakpoint_lines(file, requested))
+                .unwrap_or_default(),
             // No known entry file: union every set breakpoint line, since a
             // single-file project's spans still match by line.
-            None => self.breakpoints.values().flatten().copied().collect(),
+            None => self
+                .breakpoints
+                .iter()
+                .flat_map(|(file, requested)| self.resolved_breakpoint_lines(file, requested))
+                .collect(),
         }
+    }
+
+    fn resolved_breakpoint_lines(&self, path: &Path, requested: &[u32]) -> Vec<u32> {
+        let lines = self
+            .program
+            .as_ref()
+            .map(|program| breakpoints::statement_lines(program, path))
+            .unwrap_or_default();
+        requested
+            .iter()
+            .filter_map(|line| breakpoints::resolve_line(&lines, *line))
+            .collect()
     }
 
     /// `threads`: the one synthetic thread the single-threaded run presents.
@@ -759,4 +767,48 @@ fn entry_source_file(program: &CheckedProgram, entry: &str) -> Option<PathBuf> {
                 && module_name.is_none_or(|name| module.name == name)
         })
         .map(|module| module.source_file.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marrow_check::{ProjectSources, analyze_project};
+    use marrow_project::ProjectConfig;
+
+    fn program(source: &str) -> (CheckedProgram, PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("m.mw");
+        std::fs::write(&file, source).unwrap();
+        let config = ProjectConfig {
+            source_roots: vec!["src".to_string()],
+            default_entry: None,
+            store: None,
+            tests: Vec::new(),
+        };
+        let snapshot = analyze_project(&root, &config, &ProjectSources::new()).unwrap();
+        (snapshot.program, file, dir)
+    }
+
+    #[test]
+    fn breakpoints_set_before_launch_are_resolved_when_the_program_arrives() {
+        let source = "module m\n\npub fn f(): int\n    return 1\n";
+        let (program, file, _dir) = program(source);
+        let mut session = Session::new(Vec::new());
+        let request = json!({ "seq": 1, "command": "setBreakpoints" });
+
+        session.on_set_breakpoints(
+            &request,
+            &json!({
+                "source": { "path": file.display().to_string() },
+                "breakpoints": [{ "line": 3 }]
+            }),
+        );
+        session.program = Some(program);
+        session.entry_file = Some(file);
+
+        assert_eq!(session.entry_breakpoint_lines(), vec![4]);
+    }
 }
