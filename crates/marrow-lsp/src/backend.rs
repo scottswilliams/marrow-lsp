@@ -2,14 +2,19 @@
 //! edit-driven recompute that publishes diagnostics.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use marrow_lsp_core::data_explorer::{
+    SavedChildrenParams, SavedChildrenResult, SavedGetParams, SavedGetResult, SavedRootsResult,
+    saved_children, saved_get, saved_roots,
+};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::positions::{LineIndex, Position as CorePosition};
+use marrow_lsp_core::store::StoreReader;
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
-use marrow_lsp_core::{completion, formatting, hover, semantic_tokens, symbols};
+use marrow_lsp_core::{code_lens, completion, formatting, hover, semantic_tokens, symbols};
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, jsonrpc};
@@ -25,6 +30,10 @@ pub struct Backend {
     /// runs if it is still current when the debounce elapses, so a newer edit
     /// supersedes an in-flight recompute.
     edit_seq: Arc<AtomicU64>,
+    /// Whether to read real stored data for hover live values, the record-count
+    /// lens, and the Data Explorer. Mirrors the `marrow.liveData` setting, default
+    /// on; turning it off keeps the server from ever opening the store.
+    live_data: Arc<AtomicBool>,
 }
 
 struct State {
@@ -41,7 +50,46 @@ impl Backend {
                 workspace: Workspace::new(),
             })),
             edit_seq: Arc::new(AtomicU64::new(0)),
+            live_data: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// The store reader for the resolved project, or `None` when live data is off,
+    /// no project is resolved yet, or the project pins no native store. The reader
+    /// is short-lived: it holds only the store path and opens the file per read.
+    fn reader(&self, workspace: &Workspace) -> Option<StoreReader> {
+        if !self.live_data.load(Ordering::Relaxed) {
+            return None;
+        }
+        StoreReader::for_project(workspace.project()?)
+    }
+
+    /// `marrow/savedRoots`: the project's saved root names. A short, capped store
+    /// read; never recomputes the project.
+    pub async fn saved_roots(&self) -> jsonrpc::Result<SavedRootsResult> {
+        let state = self.state.lock().await;
+        let reader = self.reader(&state.workspace);
+        Ok(saved_roots(reader.as_ref()))
+    }
+
+    /// `marrow/savedChildren`: the immediate children of a saved path, capped.
+    pub async fn saved_children(
+        &self,
+        params: SavedChildrenParams,
+    ) -> jsonrpc::Result<SavedChildrenResult> {
+        let state = self.state.lock().await;
+        let reader = self.reader(&state.workspace);
+        Ok(saved_children(params, reader.as_ref()))
+    }
+
+    /// `marrow/savedGet`: the presence and schema-typed value at a saved path. The
+    /// path is typed against the cached snapshot's program; no recompute.
+    pub async fn saved_get(&self, params: SavedGetParams) -> jsonrpc::Result<SavedGetResult> {
+        let state = self.state.lock().await;
+        let reader = self.reader(&state.workspace);
+        let empty = EMPTY_PROGRAM.get_or_init(Default::default);
+        let program = state.workspace.program().unwrap_or(empty);
+        Ok(saved_get(params, program, reader.as_ref()))
     }
 
     /// Note that an edit happened and schedule a debounced recompute for `file`.
@@ -96,7 +144,15 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+        // `marrow.liveData` (default true) gates reading real stored data. The
+        // client passes it under `initializationOptions`; only an explicit `false`
+        // turns it off, so a missing or malformed option keeps the default on.
+        if let Some(options) = &params.initialization_options
+            && options.get("marrow.liveData") == Some(&serde_json::Value::Bool(false))
+        {
+            self.live_data.store(false, Ordering::Relaxed);
+        }
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "marrow-lsp".to_string(),
@@ -128,6 +184,10 @@ impl LanguageServer for Backend {
                     ),
                 ),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                // Record-count lenses resolve their count lazily on demand.
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(true),
+                }),
                 ..ServerCapabilities::default()
             },
         })
@@ -199,10 +259,43 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
-        let Some(snapshot) = ensure_snapshot(workspace, documents, &path) else {
+        if ensure_snapshot(workspace, documents, &path).is_none() {
+            return Ok(None);
+        }
+        // The reader borrows the project from the workspace; resolve it before
+        // re-borrowing the snapshot so both borrows are read-only and disjoint.
+        let reader = self.reader(workspace);
+        let snapshot = workspace.latest().expect("ensured just above");
+        Ok(hover::hover_with_live(
+            snapshot,
+            &path,
+            offset,
+            reader.as_ref(),
+        ))
+    }
+
+    /// The record-count lenses for a saved-resource file: one per resource with a
+    /// saved root, unresolved (no count yet). Reads only the cached parse; the
+    /// count is filled in lazily on resolve.
+    async fn code_lens(&self, params: CodeLensParams) -> jsonrpc::Result<Option<Vec<CodeLens>>> {
+        let url = params.text_document.uri;
+        let state = self.state.lock().await;
+        let Some(document) = state.documents.get(&url) else {
             return Ok(None);
         };
-        Ok(hover::hover(snapshot, &path, offset))
+        Ok(Some(code_lens::code_lenses(
+            &document.parsed.file,
+            &document.index,
+        )))
+    }
+
+    /// Resolve a record-count lens: read the live count for its root and set the
+    /// display command. An unavailable store leaves the lens quiet. One short,
+    /// capped store read; never recomputes the project.
+    async fn code_lens_resolve(&self, lens: CodeLens) -> jsonrpc::Result<CodeLens> {
+        let state = self.state.lock().await;
+        let reader = self.reader(&state.workspace);
+        Ok(code_lens::resolve(lens, reader.as_ref()))
     }
 
     async fn document_symbol(

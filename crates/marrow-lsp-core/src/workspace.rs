@@ -72,6 +72,12 @@ impl Workspace {
         self.latest.as_ref()
     }
 
+    /// The resolved project, once a buffer has fixed one. Store-inspection
+    /// features read the store path and config from it without re-resolving.
+    pub fn project(&self) -> Option<&Project> {
+        self.project.as_ref()
+    }
+
     /// The program to drive schema- and scope-aware requests (completion) from:
     /// the latest snapshot's program when it has modules, otherwise the last
     /// recompute that did. While the active buffer carries a parse error — which

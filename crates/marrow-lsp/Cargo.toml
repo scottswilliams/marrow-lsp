@@ -20,8 +20,10 @@ marrow-lsp-core = { path = "../marrow-lsp-core" }
 lsp-types.workspace = true
 tower-lsp.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "sync", "time"] }
+serde_json = "1"
 
 [dev-dependencies]
+marrow-store.workspace = true
 serde_json = "1"
 tempfile = "3"
 url = "2"
