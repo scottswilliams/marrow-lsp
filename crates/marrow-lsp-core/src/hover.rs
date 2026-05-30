@@ -9,10 +9,11 @@
 use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use marrow_check::{AnalysisSnapshot, MarrowType, type_at};
+use marrow_check::{AnalysisSnapshot, type_at};
 use marrow_store::backend::Presence;
 
 use crate::store::{Availability, StoreReader, StoredValue, saved_path_at};
+use crate::types::render_type;
 
 /// The hover for byte `offset` in `file`, or `None` when no type covers it.
 ///
@@ -93,20 +94,6 @@ fn present(stored: &StoredValue) -> String {
 /// Wrap `code` in a fenced `marrow` block so the client renders it as `.mw`.
 fn marrow_code_block(code: &str) -> String {
     format!("```marrow\n{code}\n```")
-}
-
-/// The canonical `.mw` spelling of a checker type. Mirrors `marrow_schema::Type`'s
-/// `Display` for the storable types and names the checker-only forms (`Error`, a
-/// same-module resource, `unknown`) as they are written in source.
-fn render_type(ty: &MarrowType) -> String {
-    match ty {
-        MarrowType::Primitive(scalar) => scalar.name().to_string(),
-        MarrowType::Error => "Error".to_string(),
-        MarrowType::Resource(name) => name.clone(),
-        MarrowType::Identity(resource) => format!("{resource}::Id"),
-        MarrowType::Sequence(element) => format!("sequence[{}]", render_type(element)),
-        MarrowType::Unknown => "unknown".to_string(),
-    }
 }
 
 #[cfg(test)]

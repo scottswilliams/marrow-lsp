@@ -34,6 +34,17 @@ fn main() {
     let policy = Policy {
         allow_data: data_access_enabled(),
     };
+    // Startup is observable in the agent's stderr/output channel; note whether the
+    // data tools are armed so an operator can confirm the gate's state at a glance.
+    eprintln!(
+        "marrow-mcp: starting (version {}, data tools {})",
+        env!("CARGO_PKG_VERSION"),
+        if policy.allow_data {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();

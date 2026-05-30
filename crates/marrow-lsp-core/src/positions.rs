@@ -38,8 +38,9 @@ impl LineIndex {
 
     /// Convert a UTF-8 byte offset to an LSP position. A byte past the end of the
     /// document, or one that does not fall on a character boundary, clamps to the
-    /// nearest boundary at or before it.
-    pub fn position(&self, byte: usize) -> Position {
+    /// nearest boundary at or before it. Crate-internal: callers outside the core
+    /// take ranges through [`Self::range`], which routes both ends through here.
+    pub(crate) fn position(&self, byte: usize) -> Position {
         let byte = self.floor_char_boundary(byte.min(self.text.len()));
         let line = match self.line_starts.binary_search(&byte) {
             Ok(line) => line,

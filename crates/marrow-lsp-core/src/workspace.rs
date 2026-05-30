@@ -228,7 +228,6 @@ mod tests {
         let mut documents = Documents::new();
         documents.open(
             url.clone(),
-            1,
             "module a\n\npub fn answer(): int\n    return \"nope\"\n".to_string(),
         );
 

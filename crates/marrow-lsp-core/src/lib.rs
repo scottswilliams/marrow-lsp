@@ -17,4 +17,5 @@ pub mod positions;
 pub mod semantic_tokens;
 pub mod store;
 pub mod symbols;
+mod types;
 pub mod workspace;

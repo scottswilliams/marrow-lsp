@@ -12,7 +12,7 @@ use marrow_lsp_core::data_explorer::{
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
-use marrow_lsp_core::positions::{LineIndex, Position as CorePosition};
+use marrow_lsp_core::positions::Position as CorePosition;
 use marrow_lsp_core::store::StoreReader;
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
 use marrow_lsp_core::{
@@ -133,7 +133,18 @@ impl Backend {
                 }
                 // A buffer outside any project, or a project that cannot be walked,
                 // has nothing to publish; the editor keeps whatever it last showed.
-                Err(_) => None,
+                // A file simply outside any project is the common, quiet case; a
+                // malformed config or an unwalkable source root is a real failure
+                // the user should be able to see in the output channel.
+                Err(error) => {
+                    if !matches!(error, marrow_lsp_core::workspace::WorkspaceError::NoProject) {
+                        eprintln!(
+                            "marrow-lsp: recompute failed for {}: {error}",
+                            file.display()
+                        );
+                    }
+                    None
+                }
             }
         };
 
@@ -214,9 +225,7 @@ impl LanguageServer for Backend {
         let url = document.uri;
         {
             let mut state = self.state.lock().await;
-            state
-                .documents
-                .open(url.clone(), document.version, document.text);
+            state.documents.open(url.clone(), document.text);
         }
         if let Some(path) = url_to_path(&url) {
             self.schedule_recompute(path);
@@ -225,14 +234,13 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let url = params.text_document.uri;
-        let version = params.text_document.version;
         // Full-text sync: the client sends the whole document as a single change.
         let Some(change) = params.content_changes.into_iter().next_back() else {
             return;
         };
         {
             let mut state = self.state.lock().await;
-            state.documents.change(&url, version, change.text);
+            state.documents.change(&url, change.text);
         }
         if let Some(path) = url_to_path(&url) {
             self.schedule_recompute(path);
@@ -458,6 +466,12 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
+        // documentSymbol is only sent for an open document, so a missing buffer is
+        // a request the client should not have made; outline nothing rather than
+        // reach to disk for text the editor already holds.
+        if documents.get(&url).is_none() {
+            return Ok(None);
+        }
         let Some(snapshot) = ensure_snapshot(workspace, documents, &path) else {
             return Ok(None);
         };
@@ -465,15 +479,12 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        // Outline against the open buffer's index when present, else the parse's
-        // own text rebuilt into an index, so selection ranges land on the buffer.
-        let outline = match documents.get(&url) {
-            Some(document) => symbols::document_symbols(&analyzed.parsed.file, &document.index),
-            None => symbols::document_symbols(
-                &analyzed.parsed.file,
-                &LineIndex::new(read_to_string(&path)),
-            ),
+        // Outline against the open buffer's index so selection ranges land on the
+        // unsaved text the user sees.
+        let Some(document) = documents.get(&url) else {
+            return Ok(None);
         };
+        let outline = symbols::document_symbols(&analyzed.parsed.file, &document.index);
         Ok(Some(DocumentSymbolResponse::Nested(outline)))
     }
 
@@ -624,9 +635,10 @@ fn offset_in(documents: &Documents, url: &Url, position: Position) -> Option<usi
 }
 
 /// Build the per-file index resolver navigation maps spans through: one
-/// [`LineIndex`] per file the snapshot analyzed, the open buffer's when held (so
-/// spans land on unsaved text), else one built from disk. Called once per
-/// navigation request over the bounded project file set.
+/// [`LineIndex`](marrow_lsp_core::positions::LineIndex) per file the snapshot
+/// analyzed, the open buffer's when held (so spans land on unsaved text), else one
+/// built from disk. Called once per navigation request over the bounded project
+/// file set.
 fn snapshot_indices<'a>(workspace: &'a Workspace, documents: &'a Documents) -> SnapshotIndices<'a> {
     let files = workspace
         .latest()
@@ -638,8 +650,4 @@ fn snapshot_indices<'a>(workspace: &'a Workspace, documents: &'a Documents) -> S
             .and_then(|url| documents.get(&url))
             .map(|document| &document.index)
     })
-}
-
-fn read_to_string(path: &std::path::Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
 }

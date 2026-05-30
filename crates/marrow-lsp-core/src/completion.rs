@@ -12,9 +12,11 @@
 use std::path::Path;
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
-use marrow_check::{CheckedModule, CheckedProgram, MarrowType, scope_at};
+use marrow_check::{CheckedModule, CheckedProgram, scope_at};
 use marrow_schema::{Element, Node, ResourceSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
+
+use crate::types::render_type;
 
 /// The Marrow keywords offered in statement/expression position. The type
 /// keywords are offered separately in type position, so they are left out here.
@@ -536,18 +538,6 @@ fn constant_detail(constant: &marrow_check::CheckedConst) -> String {
     match &constant.ty {
         Some(ty) => render_type(ty),
         None => "const".to_string(),
-    }
-}
-
-/// The `.mw` spelling of a checker type, for completion detail.
-fn render_type(ty: &MarrowType) -> String {
-    match ty {
-        MarrowType::Primitive(scalar) => scalar.name().to_string(),
-        MarrowType::Error => "Error".to_string(),
-        MarrowType::Resource(name) => name.clone(),
-        MarrowType::Identity(resource) => format!("{resource}::Id"),
-        MarrowType::Sequence(element) => format!("sequence[{}]", render_type(element)),
-        MarrowType::Unknown => "unknown".to_string(),
     }
 }
 

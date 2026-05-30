@@ -30,6 +30,12 @@ use std::io::{BufReader, Write};
 use session::Session;
 
 fn main() {
+    // Startup is observable in the editor's debug-adapter output channel; protocol
+    // messages go to stdout, so this note goes to stderr.
+    eprintln!(
+        "marrow-dap: starting (version {})",
+        env!("CARGO_PKG_VERSION")
+    );
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut input = BufReader::new(stdin.lock());

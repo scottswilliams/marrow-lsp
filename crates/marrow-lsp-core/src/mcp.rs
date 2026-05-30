@@ -21,7 +21,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use marrow_check::{CheckedProgram, MarrowType, type_at};
+use marrow_check::{CheckedProgram, type_at};
 use marrow_run::{Host, RunOutput, RuntimeError, Value, run_entry_with_host};
 use marrow_schema::{Element, IndexSchema, KeyDef, Node, ResourceSchema, SavedRootSchema, Type};
 use marrow_store::mem::MemStore;
@@ -32,6 +32,7 @@ use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
 use crate::store::StoreReader;
+use crate::types::render_type;
 use crate::workspace::Workspace;
 
 /// A clamp on the saved bytes a `run`/test captures into its result. Output is a
@@ -56,7 +57,7 @@ fn load_project(file: &Path, source: Option<&str>) -> Result<(Workspace, PathBuf
         // Overlay the buffer the same way the LSP overlays an open editor buffer,
         // so a project file with an unsaved edit checks against that edit.
         let url = path_to_url(&file).ok_or_else(|| "the file path is not absolute".to_string())?;
-        documents.open(url, 1, source.to_string());
+        documents.open(url, source.to_string());
     }
     let mut workspace = Workspace::new();
     workspace
@@ -667,20 +668,6 @@ fn all_resources(program: &CheckedProgram) -> impl Iterator<Item = &ResourceSche
         .modules
         .iter()
         .flat_map(|module| module.resources.iter())
-}
-
-/// The `.mw` spelling of a checker type, for `mw_type_at`. Mirrors the renderer the
-/// hover and completion features use, kept here so the MCP type answer matches the
-/// editor's.
-fn render_type(ty: &MarrowType) -> String {
-    match ty {
-        MarrowType::Primitive(scalar) => scalar.name().to_string(),
-        MarrowType::Error => "Error".to_string(),
-        MarrowType::Resource(name) => name.clone(),
-        MarrowType::Identity(resource) => format!("{resource}::Id"),
-        MarrowType::Sequence(element) => format!("sequence[{}]", render_type(element)),
-        MarrowType::Unknown => "unknown".to_string(),
-    }
 }
 
 /// The `.mw` spelling of a schema type, for the resource-schema projection.

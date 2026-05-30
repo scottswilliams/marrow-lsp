@@ -11,8 +11,8 @@ use marrow_syntax::{LexedSource, ParsedSource, lex_source, parse_source};
 
 use crate::positions::LineIndex;
 
-/// One open buffer: its current text, the editor's version counter, a position
-/// index, and the parse/lex of the text — all rebuilt once per edit.
+/// One open buffer: its current text, a position index, and the parse/lex of the
+/// text — all rebuilt once per edit.
 ///
 /// The cached `lexed` and `parsed` are the performance foundation for the
 /// per-document requests (completion, semantic tokens, formatting): each reads
@@ -22,7 +22,6 @@ use crate::positions::LineIndex;
 /// present even while the buffer has errors.
 pub struct Document {
     pub text: String,
-    pub version: i32,
     pub index: LineIndex,
     pub lexed: LexedSource,
     pub parsed: ParsedSource,
@@ -30,13 +29,12 @@ pub struct Document {
 
 impl Document {
     /// Build a document from its text, computing the index, lex, and parse once.
-    fn new(version: i32, text: String) -> Self {
+    fn new(text: String) -> Self {
         let index = LineIndex::new(text.clone());
         let lexed = lex_source(&text);
         let parsed = parse_source(&text);
         Self {
             text,
-            version,
             index,
             lexed,
             parsed,
@@ -56,15 +54,15 @@ impl Documents {
     }
 
     /// Record a newly opened buffer, replacing any buffer already at `url`.
-    pub fn open(&mut self, url: Url, version: i32, text: String) {
-        self.documents.insert(url, Document::new(version, text));
+    pub fn open(&mut self, url: Url, text: String) {
+        self.documents.insert(url, Document::new(text));
     }
 
     /// Replace an open buffer's whole text (full-text sync), rebuilding its index,
     /// lex, and parse. A change for a URL that is not open is ignored.
-    pub fn change(&mut self, url: &Url, version: i32, text: String) {
+    pub fn change(&mut self, url: &Url, text: String) {
         if let Some(document) = self.documents.get_mut(url) {
-            *document = Document::new(version, text);
+            *document = Document::new(text);
         }
     }
 
@@ -82,8 +80,9 @@ impl Documents {
         self.documents.keys()
     }
 
-    /// Every open buffer with its URL.
-    pub fn iter(&self) -> impl Iterator<Item = (&Url, &Document)> {
+    /// Every open buffer with its URL. Used by the workspace to overlay unsaved
+    /// text onto disk; no transport reads it directly.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Url, &Document)> {
         self.documents.iter()
     }
 }
@@ -97,14 +96,13 @@ mod tests {
     }
 
     #[test]
-    fn open_then_change_replaces_text_and_version() {
+    fn open_then_change_replaces_text() {
         let mut documents = Documents::new();
-        documents.open(url(), 1, "old".to_string());
-        documents.change(&url(), 2, "new text".to_string());
+        documents.open(url(), "old".to_string());
+        documents.change(&url(), "new text".to_string());
 
         let document = documents.get(&url()).unwrap();
         assert_eq!(document.text, "new text");
-        assert_eq!(document.version, 2);
         // The index reflects the new text, not the old.
         assert_eq!(document.index.position(8).character, 8);
     }
@@ -112,7 +110,7 @@ mod tests {
     #[test]
     fn close_removes_the_buffer() {
         let mut documents = Documents::new();
-        documents.open(url(), 1, "x".to_string());
+        documents.open(url(), "x".to_string());
         documents.close(&url());
         assert!(documents.get(&url()).is_none());
     }
@@ -120,7 +118,7 @@ mod tests {
     #[test]
     fn change_to_an_unopened_url_is_ignored() {
         let mut documents = Documents::new();
-        documents.change(&url(), 1, "x".to_string());
+        documents.change(&url(), "x".to_string());
         assert!(documents.get(&url()).is_none());
     }
 }
