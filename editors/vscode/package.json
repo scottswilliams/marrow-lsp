@@ -49,6 +49,11 @@
         "title": "Refresh",
         "category": "Marrow",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "marrow.checkDataIntegrity",
+        "title": "Marrow: Check Stored Data Integrity",
+        "category": "Marrow"
       }
     ],
     "menus": {

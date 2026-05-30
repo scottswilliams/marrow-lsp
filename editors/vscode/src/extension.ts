@@ -8,6 +8,7 @@ import {
   TransportKind,
 } from "vscode-languageclient/node";
 import { MarrowDataProvider } from "./dataExplorer";
+import { MarrowDataIntegrity } from "./dataIntegrity";
 
 // The one shared language client for the whole extension. Every transport-facing
 // feature (diagnostics, the Data Explorer) speaks through this single instance.
@@ -54,10 +55,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const dataProvider = new MarrowDataProvider();
   dataProvider.setClient(client);
 
+  // The integrity check is an advisory report wired up only with the client
+  // running, so its request always hits a live server. It shares the single
+  // client instance and owns a dedicated output channel disposed below.
+  const dataIntegrity = new MarrowDataIntegrity(client);
+
   context.subscriptions.push(
+    dataIntegrity,
     vscode.window.registerTreeDataProvider("marrowData", dataProvider),
     vscode.commands.registerCommand("marrow.refreshData", () => {
       dataProvider.refresh();
+    }),
+    vscode.commands.registerCommand("marrow.checkDataIntegrity", () => {
+      void dataIntegrity.run();
     }),
     // A saved store change is announced by a write to marrow.json; reflect it
     // in the tree automatically so live values stay current without a manual
