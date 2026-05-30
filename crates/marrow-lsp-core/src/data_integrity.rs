@@ -29,10 +29,9 @@ use crate::store::{Availability, StoreReader};
 /// audit, so it walks a bounded prefix of the tree rather than an unbounded store.
 pub const SCAN_CAP: usize = 5000;
 
-/// What kind of mismatch a finding reports. Mirrors the two
-/// [`SavedPathClass`] outcomes `marrow data integrity` treats as problems; a
-/// declared scalar that decodes and a generated index marker are healthy and
-/// produce no finding.
+/// What kind of mismatch a finding reports. Mirrors the [`SavedPathClass`]
+/// outcomes `marrow data integrity` treats as problems; a declared scalar that
+/// decodes and a generated index marker are healthy and produce no finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
@@ -43,6 +42,10 @@ pub enum FindingKind {
     /// form of that scalar's type — typically because the field's declared type
     /// changed under existing data.
     Undecodable,
+    /// The member chain resolves, but a record or index key is stored at a scalar
+    /// type the schema does not declare for that key position — a corrupt keyspace,
+    /// distinct from an orphan.
+    KeyTypeMismatch,
 }
 
 /// One stored record the current schema cannot account for: the human path text,
@@ -189,6 +192,18 @@ fn finding_for(program: &CheckedProgram, key: &[u8], value: &[u8]) -> Option<Fin
         }
         // Generated index entries are raw-only by design; they are legal.
         SavedPathClass::IndexMarker => None,
+        // A key written at the wrong scalar type: the member is real but the
+        // keyspace is corrupt. Mirrors `marrow data integrity`'s `data.key_type`.
+        SavedPathClass::KeyTypeMismatch { expected, found } => Some(Finding {
+            path: display_path(key),
+            kind: FindingKind::KeyTypeMismatch,
+            message: format!(
+                "stored key is a {} where the schema declares {}",
+                found.name(),
+                expected.name()
+            ),
+            r#type: None,
+        }),
         SavedPathClass::Orphan => Some(Finding {
             path: display_path(key),
             kind: FindingKind::Orphan,

@@ -248,9 +248,11 @@ fn render_value(bytes: &[u8], class: SavedPathClass) -> String {
             None => hex(bytes),
         },
         // An index marker holds a presence marker or a raw identity, not a typed
-        // scalar; an orphan is data the schema does not account for. Both are
-        // shown raw rather than guessed at.
-        SavedPathClass::IndexMarker | SavedPathClass::Orphan => hex(bytes),
+        // scalar; an orphan is data the schema does not declare; a key-type mismatch
+        // is a corrupt keyspace. All are shown raw rather than guessed at.
+        SavedPathClass::IndexMarker
+        | SavedPathClass::Orphan
+        | SavedPathClass::KeyTypeMismatch { .. } => hex(bytes),
     }
 }
 

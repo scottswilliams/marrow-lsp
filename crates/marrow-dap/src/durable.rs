@@ -112,7 +112,9 @@ fn render(bytes: &[u8], class: SavedPathClass) -> String {
             Some(scalar) => render_scalar(&scalar),
             None => hex(bytes),
         },
-        SavedPathClass::IndexMarker | SavedPathClass::Orphan => hex(bytes),
+        SavedPathClass::IndexMarker
+        | SavedPathClass::Orphan
+        | SavedPathClass::KeyTypeMismatch { .. } => hex(bytes),
     }
 }
 
