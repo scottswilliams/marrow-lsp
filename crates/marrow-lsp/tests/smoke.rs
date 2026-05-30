@@ -200,6 +200,121 @@ fn hover_over_a_typed_expression_returns_a_marrow_code_block() {
     let _ = server.0.kill();
 }
 
+#[test]
+fn completion_after_caret_lists_saved_roots() {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let response = recv(&mut stdout);
+    assert_eq!(
+        response["result"]["capabilities"]["completionProvider"]["triggerCharacters"][0], "^",
+        "the server should advertise `^` as a completion trigger character"
+    );
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    // Open a clean buffer declaring the saved resource `Book at ^books`, so the
+    // analysis caches a program carrying that resource.
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let clean = "module shelf::sample\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn drop()\n    return\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    // Now the user types a `delete ^` — the file no longer parses cleanly, which
+    // drops its module from a fresh analysis. Completion must still list the saved
+    // root, drawn from the last clean program.
+    let erroring = "module shelf::sample\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn drop()\n    delete ^\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": erroring } ]
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    // The `^` is the last non-newline character: line 6 (zero-based), after `delete `.
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 6, "character": 12 }
+            }
+        }),
+    );
+
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let labels: Vec<String> = response["result"]
+        .as_array()
+        .expect("completion returns an array of items")
+        .iter()
+        .map(|item| item["label"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        labels.contains(&"books".to_string()),
+        "completion after `^` should list the saved root `books`, got {labels:?}"
+    );
+
+    let _ = server.0.kill();
+}
+
+/// Read notifications until a `publishDiagnostics` for `uri` arrives (empty or
+/// not), returning it. Used to wait for the debounced recompute to land before a
+/// request that depends on the fresh snapshot.
+fn wait_for_diagnostic_or_empty(reader: &mut impl BufRead, uri: &str, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let message = recv(reader);
+        if message["method"] == "textDocument/publishDiagnostics" && message["params"]["uri"] == uri
+        {
+            return message;
+        }
+    }
+    panic!("no diagnostics published within the timeout");
+}
+
 /// Read notifications until a non-empty `publishDiagnostics` for `uri` arrives,
 /// returning its first diagnostic. Recomputes are debounced, so an initial empty
 /// publish for other open files may precede it.

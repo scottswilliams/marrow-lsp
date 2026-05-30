@@ -4,9 +4,12 @@
 //! this one library. It reuses the canonical marrow crates for all real analysis
 //! and never reimplements the parser, checker, or type system.
 
+pub mod completion;
 pub mod diagnostics;
 pub mod documents;
+pub mod formatting;
 pub mod hover;
 pub mod positions;
+pub mod semantic_tokens;
 pub mod symbols;
 pub mod workspace;

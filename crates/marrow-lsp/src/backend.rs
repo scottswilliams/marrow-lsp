@@ -9,7 +9,7 @@ use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::positions::{LineIndex, Position as CorePosition};
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
-use marrow_lsp_core::{hover, symbols};
+use marrow_lsp_core::{completion, formatting, hover, semantic_tokens, symbols};
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, jsonrpc};
@@ -109,6 +109,25 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    // The sigils and separators that open a new completion context;
+                    // the core classifies which one from the tokens left of the
+                    // cursor. `(` re-triggers inside a labeled-argument list.
+                    trigger_characters: Some(
+                        ["^", ".", ":", "("].iter().map(|c| c.to_string()).collect(),
+                    ),
+                    ..CompletionOptions::default()
+                }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: semantic_tokens::legend(),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..SemanticTokensOptions::default()
+                        },
+                    ),
+                ),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -240,7 +259,86 @@ impl LanguageServer for Backend {
         };
         Ok(Some(symbols::workspace_symbols(&snapshot.program)))
     }
+
+    /// Complete at the cursor. Reads only the document's cached lex/parse and the
+    /// last cached snapshot's program — it never re-lexes, re-parses, or
+    /// recomputes the project, so it answers instantly and even while the project
+    /// has not yet been (re)checked. With no snapshot yet, an empty program backs
+    /// the context-only modes (keywords, builtins) so the first keystroke still
+    /// completes.
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> jsonrpc::Result<Option<CompletionResponse>> {
+        let position = params.text_document_position;
+        let url = position.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+
+        let state = self.state.lock().await;
+        let Some(document) = state.documents.get(&url) else {
+            return Ok(None);
+        };
+        let offset = document.index.offset(to_core_position(position.position));
+
+        let empty = EMPTY_PROGRAM.get_or_init(Default::default);
+        let program = state.workspace.program().unwrap_or(empty);
+
+        let items = completion::completion(
+            program,
+            &path,
+            &document.text,
+            &document.parsed,
+            &document.lexed,
+            offset,
+        );
+        Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    /// Classify the document's cached lex into semantic tokens. Reads only the
+    /// cached lex and position index — no parse, no recompute.
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> jsonrpc::Result<Option<SemanticTokensResult>> {
+        let url = params.text_document.uri;
+        let state = self.state.lock().await;
+        let Some(document) = state.documents.get(&url) else {
+            return Ok(None);
+        };
+        let data = semantic_tokens::semantic_tokens(&document.lexed, &document.index);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
+    }
+
+    /// Format the whole document. Reads only the cached parse and text, calling the
+    /// canonical formatter in-process; returns no edits when the buffer has a parse
+    /// error, so malformed source is never lossily rewritten. No recompute.
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> jsonrpc::Result<Option<Vec<TextEdit>>> {
+        let url = params.text_document.uri;
+        let state = self.state.lock().await;
+        let Some(document) = state.documents.get(&url) else {
+            return Ok(None);
+        };
+        Ok(formatting::formatting(
+            &document.text,
+            &document.parsed,
+            &document.index,
+        ))
+    }
 }
+
+/// An empty checked program backing completion before the first analysis lands,
+/// so a request can borrow a `&CheckedProgram` without recomputing. Initialized
+/// once and shared.
+static EMPTY_PROGRAM: std::sync::OnceLock<marrow_lsp_core::workspace::CheckedProgram> =
+    std::sync::OnceLock::new();
 
 fn to_core_position(position: Position) -> CorePosition {
     CorePosition {

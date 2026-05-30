@@ -446,6 +446,7 @@ dependencies = [
  "lsp-types",
  "marrow-check",
  "marrow-project",
+ "marrow-schema",
  "marrow-syntax",
  "tempfile",
 ]

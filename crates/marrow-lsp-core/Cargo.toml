@@ -14,6 +14,7 @@ workspace = true
 lsp-types.workspace = true
 marrow-syntax.workspace = true
 marrow-check.workspace = true
+marrow-schema.workspace = true
 marrow-project.workspace = true
 
 [dev-dependencies]

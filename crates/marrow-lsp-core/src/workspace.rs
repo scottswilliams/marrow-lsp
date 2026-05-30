@@ -11,7 +11,7 @@ use lsp_types::Url;
 use marrow_check::{ProjectSources, analyze_project};
 use marrow_project::{ProjectConfig, parse_config};
 
-pub use marrow_check::AnalysisSnapshot;
+pub use marrow_check::{AnalysisSnapshot, CheckedProgram};
 
 use crate::documents::Documents;
 
@@ -53,6 +53,11 @@ impl std::error::Error for WorkspaceError {}
 pub struct Workspace {
     project: Option<Project>,
     latest: Option<AnalysisSnapshot>,
+    /// The most recent checked program that had any modules. The checker drops a
+    /// module for a file with a parse error, so a mid-edit recompute can yield an
+    /// empty program; completion and other schema-driven requests fall back to
+    /// this last good program so a stray syntax error does not blank their results.
+    last_program: Option<CheckedProgram>,
 }
 
 impl Workspace {
@@ -61,9 +66,22 @@ impl Workspace {
     }
 
     /// The most recent analysis, if any, so a later request can read the cached
-    /// snapshot without recomputing.
+    /// snapshot without recomputing. This always reflects the latest recompute —
+    /// diagnostics publish from it.
     pub fn latest(&self) -> Option<&AnalysisSnapshot> {
         self.latest.as_ref()
+    }
+
+    /// The program to drive schema- and scope-aware requests (completion) from:
+    /// the latest snapshot's program when it has modules, otherwise the last
+    /// recompute that did. While the active buffer carries a parse error — which
+    /// drops its module — this keeps the resources and signatures the editor was
+    /// just completing against, instead of an empty list.
+    pub fn program(&self) -> Option<&CheckedProgram> {
+        match self.latest.as_ref() {
+            Some(snapshot) if !snapshot.program.modules.is_empty() => Some(&snapshot.program),
+            _ => self.last_program.as_ref(),
+        }
     }
 
     /// Resolve the project for `file` (if not already resolved), overlay every open
@@ -87,6 +105,12 @@ impl Workspace {
         let snapshot = analyze_project(&project.root, &project.config, &sources)
             .map_err(WorkspaceError::Discover)?;
 
+        // Retain the last program that had modules, so a later recompute whose
+        // active buffer errors (dropping its module) does not erase the schema and
+        // signatures completion draws on.
+        if !snapshot.program.modules.is_empty() {
+            self.last_program = Some(snapshot.program.clone());
+        }
         self.latest = Some(snapshot);
         Ok(self.latest.as_ref().expect("just stored a snapshot"))
     }

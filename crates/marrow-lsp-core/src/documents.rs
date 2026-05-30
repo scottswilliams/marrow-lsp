@@ -7,15 +7,41 @@
 use std::collections::HashMap;
 
 use lsp_types::Url;
+use marrow_syntax::{LexedSource, ParsedSource, lex_source, parse_source};
 
 use crate::positions::LineIndex;
 
-/// One open buffer: its current text, the editor's version counter, and a
-/// position index rebuilt on every edit.
+/// One open buffer: its current text, the editor's version counter, a position
+/// index, and the parse/lex of the text — all rebuilt once per edit.
+///
+/// The cached `lexed` and `parsed` are the performance foundation for the
+/// per-document requests (completion, semantic tokens, formatting): each reads
+/// this snapshot of the buffer instead of re-lexing or re-parsing on every
+/// request, and none of them triggers a project recompute. Both the lexer and
+/// the parser are error-recovering and always succeed, so the cache is always
+/// present even while the buffer has errors.
 pub struct Document {
     pub text: String,
     pub version: i32,
     pub index: LineIndex,
+    pub lexed: LexedSource,
+    pub parsed: ParsedSource,
+}
+
+impl Document {
+    /// Build a document from its text, computing the index, lex, and parse once.
+    fn new(version: i32, text: String) -> Self {
+        let index = LineIndex::new(text.clone());
+        let lexed = lex_source(&text);
+        let parsed = parse_source(&text);
+        Self {
+            text,
+            version,
+            index,
+            lexed,
+            parsed,
+        }
+    }
 }
 
 /// The open buffers, keyed by URL.
@@ -31,24 +57,14 @@ impl Documents {
 
     /// Record a newly opened buffer, replacing any buffer already at `url`.
     pub fn open(&mut self, url: Url, version: i32, text: String) {
-        let index = LineIndex::new(text.clone());
-        self.documents.insert(
-            url,
-            Document {
-                text,
-                version,
-                index,
-            },
-        );
+        self.documents.insert(url, Document::new(version, text));
     }
 
-    /// Replace an open buffer's whole text (full-text sync) and rebuild its index.
-    /// A change for a URL that is not open is ignored.
+    /// Replace an open buffer's whole text (full-text sync), rebuilding its index,
+    /// lex, and parse. A change for a URL that is not open is ignored.
     pub fn change(&mut self, url: &Url, version: i32, text: String) {
         if let Some(document) = self.documents.get_mut(url) {
-            document.index = LineIndex::new(text.clone());
-            document.text = text;
-            document.version = version;
+            *document = Document::new(version, text);
         }
     }
 
