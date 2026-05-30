@@ -11,10 +11,13 @@ use marrow_lsp_core::data_explorer::{
 };
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
+use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
 use marrow_lsp_core::positions::{LineIndex, Position as CorePosition};
 use marrow_lsp_core::store::StoreReader;
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
-use marrow_lsp_core::{code_lens, completion, formatting, hover, semantic_tokens, symbols};
+use marrow_lsp_core::{
+    code_lens, completion, formatting, hover, navigation, semantic_tokens, symbols,
+};
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, jsonrpc};
@@ -163,6 +166,15 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                // Rename advertises a prepare step so the editor can pre-select the
+                // identifier and surface a refusal (e.g. a saved field) before
+                // prompting for the new name.
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
@@ -272,6 +284,140 @@ impl LanguageServer for Backend {
             offset,
             reader.as_ref(),
         ))
+    }
+
+    /// Go to the definition of the symbol under the cursor. Reads the cached
+    /// binding index (built once per recompute) — never re-resolves names or
+    /// recomputes the project.
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        let position = params.text_document_position_params;
+        let url = position.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+
+        let mut state = self.state.lock().await;
+        let Some(offset) = offset_in(&state.documents, &url, position.position) else {
+            return Ok(None);
+        };
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        if ensure_index(workspace, documents, &path).is_none() {
+            return Ok(None);
+        }
+        let indices = snapshot_indices(workspace, documents);
+        let index = workspace
+            .binding_index_cached()
+            .expect("ensured just above");
+        Ok(navigation::definition(index, &indices, &path, offset)
+            .map(GotoDefinitionResponse::Scalar))
+    }
+
+    /// Every reference to the symbol under the cursor, keeping or dropping the
+    /// declaration per `includeDeclaration`. Reads the cached binding index.
+    async fn references(&self, params: ReferenceParams) -> jsonrpc::Result<Option<Vec<Location>>> {
+        let position = params.text_document_position;
+        let url = position.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+        let include_declaration = params.context.include_declaration;
+
+        let mut state = self.state.lock().await;
+        let Some(offset) = offset_in(&state.documents, &url, position.position) else {
+            return Ok(None);
+        };
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        if ensure_index(workspace, documents, &path).is_none() {
+            return Ok(None);
+        }
+        let indices = snapshot_indices(workspace, documents);
+        let index = workspace
+            .binding_index_cached()
+            .expect("ensured just above");
+        Ok(navigation::references(
+            index,
+            &indices,
+            &path,
+            offset,
+            include_declaration,
+        ))
+    }
+
+    /// Pre-select the identifier for a rename, or refuse when the cursor is not on a
+    /// renameable symbol. Reads the cached binding index.
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> jsonrpc::Result<Option<PrepareRenameResponse>> {
+        let url = params.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+
+        let mut state = self.state.lock().await;
+        let Some(offset) = offset_in(&state.documents, &url, params.position) else {
+            return Ok(None);
+        };
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        if ensure_index(workspace, documents, &path).is_none() {
+            return Ok(None);
+        }
+        let indices = snapshot_indices(workspace, documents);
+        let index = workspace
+            .binding_index_cached()
+            .expect("ensured just above");
+        Ok(navigation::prepare_rename(index, &indices, &path, offset)
+            .map(PrepareRenameResponse::Range))
+    }
+
+    /// Rename the symbol under the cursor across every reference. Refused with a
+    /// JSON-RPC error when the symbol names saved data, so a rename can never
+    /// silently orphan stored records. Reads the cached binding index.
+    async fn rename(&self, params: RenameParams) -> jsonrpc::Result<Option<WorkspaceEdit>> {
+        let position = params.text_document_position;
+        let url = position.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+        let new_name = params.new_name;
+
+        let mut state = self.state.lock().await;
+        let Some(offset) = offset_in(&state.documents, &url, position.position) else {
+            return Ok(None);
+        };
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        if ensure_index(workspace, documents, &path).is_none() {
+            return Ok(None);
+        }
+        let indices = snapshot_indices(workspace, documents);
+        let index = workspace
+            .binding_index_cached()
+            .expect("ensured just above");
+        match navigation::rename(index, &indices, &path, offset, &new_name) {
+            Ok(edit) => Ok(Some(edit)),
+            // No symbol under the cursor is not an error — the editor simply does
+            // nothing. A saved-data-backed symbol is refused with a clear message so
+            // the user learns renaming it would orphan stored records.
+            Err(RenameError::NoSymbol) => Ok(None),
+            Err(error @ RenameError::SavedDataBacked { .. }) => {
+                Err(jsonrpc::Error::invalid_params(error.message()))
+            }
+        }
     }
 
     /// The record-count lenses for a saved-resource file: one per resource with a
@@ -452,6 +598,46 @@ fn ensure_snapshot<'a>(
         let _ = workspace.recompute(file, documents);
     }
     workspace.latest()
+}
+
+/// Ensure a snapshot exists, then build and cache its binding index, so a later
+/// immutable borrow can read it alongside the snapshot. Returns `None` for a file
+/// outside any project. The index is built at most once per recompute; subsequent
+/// navigation requests reuse the cache and this is a no-op.
+fn ensure_index<'a>(
+    workspace: &'a mut Workspace,
+    documents: &Documents,
+    file: &std::path::Path,
+) -> Option<&'a marrow_lsp_core::workspace::BindingIndex> {
+    if workspace.latest().is_none() {
+        let _ = workspace.recompute(file, documents);
+    }
+    workspace.binding_index()
+}
+
+/// The byte offset of `position` in the buffer at `url`, from that buffer's cached
+/// index, so a request maps correctly even before the debounced recompute lands.
+fn offset_in(documents: &Documents, url: &Url, position: Position) -> Option<usize> {
+    documents
+        .get(url)
+        .map(|document| document.index.offset(to_core_position(position)))
+}
+
+/// Build the per-file index resolver navigation maps spans through: one
+/// [`LineIndex`] per file the snapshot analyzed, the open buffer's when held (so
+/// spans land on unsaved text), else one built from disk. Called once per
+/// navigation request over the bounded project file set.
+fn snapshot_indices<'a>(workspace: &'a Workspace, documents: &'a Documents) -> SnapshotIndices<'a> {
+    let files = workspace
+        .latest()
+        .map(|snapshot| snapshot.files.iter().map(|file| file.path.as_path()))
+        .into_iter()
+        .flatten();
+    SnapshotIndices::new(files, |path| {
+        marrow_lsp_core::diagnostics::path_to_url(path)
+            .and_then(|url| documents.get(&url))
+            .map(|document| &document.index)
+    })
 }
 
 fn read_to_string(path: &std::path::Path) -> String {

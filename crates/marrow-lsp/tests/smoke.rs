@@ -201,6 +201,93 @@ fn hover_over_a_typed_expression_returns_a_marrow_code_block() {
 }
 
 #[test]
+fn goto_definition_jumps_from_a_use_to_its_binding() {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let response = recv(&mut stdout);
+    assert_eq!(
+        response["result"]["capabilities"]["definitionProvider"], true,
+        "the server should advertise go-to-definition"
+    );
+    assert_eq!(
+        response["result"]["capabilities"]["referencesProvider"], true,
+        "the server should advertise find-references"
+    );
+    assert_eq!(
+        response["result"]["capabilities"]["renameProvider"]["prepareProvider"], true,
+        "the server should advertise prepare-rename"
+    );
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    // A buffer binding a local `n` on line 3 (zero-based) and using it on line 4.
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let clean = "module shelf::sample\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    // Go to definition from the `n` in `return n` (line 4, after `    return `).
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 4, "character": 11 }
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let location = &response["result"];
+    assert_eq!(location["uri"], uri, "definition is in the same file");
+    // The binding is the `n` in `const n` on line 3, at `    const ` = 10 columns.
+    assert_eq!(
+        location["range"]["start"]["line"], 3,
+        "definition lands on the const binding line"
+    );
+    assert_eq!(location["range"]["start"]["character"], 10);
+
+    let _ = server.0.kill();
+}
+
+#[test]
 fn completion_after_caret_lists_saved_roots() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))

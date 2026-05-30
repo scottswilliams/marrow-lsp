@@ -8,10 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
-use marrow_check::{ProjectSources, analyze_project};
+use marrow_check::{ProjectSources, analyze_project, build_binding_index};
 use marrow_project::{ProjectConfig, parse_config};
 
-pub use marrow_check::{AnalysisSnapshot, CheckedProgram};
+pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
 
 use crate::documents::Documents;
 
@@ -58,6 +58,11 @@ pub struct Workspace {
     /// empty program; completion and other schema-driven requests fall back to
     /// this last good program so a stray syntax error does not blank their results.
     last_program: Option<CheckedProgram>,
+    /// The binding index for [`Self::latest`], built lazily on the first
+    /// navigation request and reused by go-to-definition, find-references, and
+    /// rename. A recompute replaces the snapshot and clears this, so it is rebuilt
+    /// at most once per recompute and never on a request that only reads it.
+    binding_index: Option<BindingIndex>,
 }
 
 impl Workspace {
@@ -90,6 +95,27 @@ impl Workspace {
         }
     }
 
+    /// The binding index for the latest snapshot, built once on first access and
+    /// cached until the next recompute. Returns `None` only when no analysis has
+    /// run yet. Navigation requests (definition, references, rename) read this
+    /// instead of rebuilding the index — the build walks every file's declarations
+    /// and bodies, so doing it per request would be wasteful.
+    pub fn binding_index(&mut self) -> Option<&BindingIndex> {
+        if self.binding_index.is_none() {
+            let snapshot = self.latest.as_ref()?;
+            self.binding_index = Some(build_binding_index(snapshot));
+        }
+        self.binding_index.as_ref()
+    }
+
+    /// The binding index if it has already been built, without building it. Lets a
+    /// caller take a read-only borrow of the cached index alongside another
+    /// read-only borrow of the snapshot, after [`Self::binding_index`] has populated
+    /// it — the lazy builder needs `&mut self`, which cannot coexist with those.
+    pub fn binding_index_cached(&self) -> Option<&BindingIndex> {
+        self.binding_index.as_ref()
+    }
+
     /// Resolve the project for `file` (if not already resolved), overlay every open
     /// buffer under the root, run the checker, cache the snapshot, and return a
     /// reference to it.
@@ -118,6 +144,9 @@ impl Workspace {
             self.last_program = Some(snapshot.program.clone());
         }
         self.latest = Some(snapshot);
+        // The cached index belongs to the snapshot just replaced; drop it so the
+        // next navigation request rebuilds it against the fresh analysis.
+        self.binding_index = None;
         Ok(self.latest.as_ref().expect("just stored a snapshot"))
     }
 }
