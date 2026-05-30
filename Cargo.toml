@@ -4,6 +4,7 @@ members = [
     "crates/marrow-lsp-core",
     "crates/marrow-lsp",
     "crates/marrow-mcp",
+    "crates/marrow-dap",
 ]
 
 [workspace.package]

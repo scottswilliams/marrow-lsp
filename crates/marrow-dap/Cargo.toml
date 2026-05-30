@@ -1,0 +1,28 @@
+[package]
+name = "marrow-dap"
+description = "Debug Adapter Protocol server for the Marrow .mw language: a statement-level debugger over stdio."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "marrow-dap"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+marrow-lsp-core = { path = "../marrow-lsp-core" }
+marrow-syntax.workspace = true
+marrow-check.workspace = true
+marrow-project.workspace = true
+marrow-store.workspace = true
+marrow-run.workspace = true
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -427,6 +427,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "marrow-dap"
+version = "0.1.0"
+dependencies = [
+ "marrow-check",
+ "marrow-lsp-core",
+ "marrow-project",
+ "marrow-run",
+ "marrow-store",
+ "marrow-syntax",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "marrow-lsp"
 version = "0.1.0"
 dependencies = [
