@@ -18,7 +18,9 @@
 use serde::{Deserialize, Serialize};
 
 use marrow_check::CheckedProgram;
-use marrow_run::{SavedPathClass, classify_saved_path};
+use marrow_run::{
+    SavedPathClass, classify_saved_path, decode_identity_arity, identity_leaf_key_mismatch,
+};
 use marrow_store::path::{decode_path, display_path};
 use marrow_store::value::decode_value;
 
@@ -136,7 +138,9 @@ pub fn data_integrity(
 /// `marrow data integrity` does: a path that does not decode, or that
 /// [`classify_saved_path`] places as an [`SavedPathClass::Orphan`], is flagged; a
 /// declared [`SavedPathClass::Scalar`] whose value fails [`decode_value`] is
-/// flagged as undecodable; a healthy scalar or a generated index marker is not.
+/// flagged as undecodable; a declared [`SavedPathClass::Identity`] whose value
+/// fails identity decoding or carries wrong-typed identity keys is flagged; a
+/// healthy scalar, healthy identity, or generated index marker is not.
 ///
 /// An unreadable store (locked, corrupt, absent, or unsupported) yields
 /// [`Availability::Unavailable`], never an error.
@@ -190,6 +194,29 @@ fn finding_for(program: &CheckedProgram, key: &[u8], value: &[u8]) -> Option<Fin
                 })
             }
         }
+        SavedPathClass::Identity { resource, arity } => {
+            let ty = format!("{resource}::Id");
+            match decode_identity_arity(value, arity) {
+                None => Some(Finding {
+                    path: display_path(key),
+                    kind: FindingKind::Undecodable,
+                    message: format!("stored value no longer decodes as {ty}"),
+                    r#type: Some(ty),
+                }),
+                Some(keys) => identity_leaf_key_mismatch(program, &resource, &keys).map(
+                    |(expected, found)| Finding {
+                        path: display_path(key),
+                        kind: FindingKind::KeyTypeMismatch,
+                        message: format!(
+                            "stored `{ty}` reference has a {} key where the schema declares {}",
+                            found.name(),
+                            expected.name()
+                        ),
+                        r#type: None,
+                    },
+                ),
+            }
+        }
         // Generated index entries are raw-only by design; they are legal.
         SavedPathClass::IndexMarker => None,
         // A key written at the wrong scalar type: the member is real but the
@@ -220,7 +247,7 @@ mod tests {
     use marrow_check::{ProjectSources, analyze_project};
     use marrow_project::parse_config;
     use marrow_store::backend::Backend;
-    use marrow_store::path::{PathSegment, SavedKey, encode_path};
+    use marrow_store::path::{PathSegment, SavedKey, encode_key_value, encode_path};
     use marrow_store::redb::RedbStore;
     use std::path::{Path, PathBuf};
 
@@ -369,6 +396,98 @@ resource Book at ^books(id: int)
         assert_eq!(finding.path, "^books(1).count");
         assert_eq!(finding.r#type.as_deref(), Some("int"));
         assert!(finding.message.contains("int"));
+    }
+
+    #[test]
+    fn a_typed_reference_leaf_with_a_canonical_identity_is_clean() {
+        let source = "\
+module shelf
+
+resource Author at ^authors(id: int)
+    required name: string
+
+resource Book at ^books(id: int)
+    authorId: Author::Id
+";
+        let (project, program, path) = build_project(source);
+        let author_id_path = encode_path(&[
+            PathSegment::Root("books".to_string()),
+            PathSegment::RecordKey(SavedKey::Int(1)),
+            PathSegment::Field("authorId".to_string()),
+        ]);
+        write_entries(
+            &path,
+            &[(author_id_path, encode_key_value(&SavedKey::Int(7)))],
+        );
+
+        let result = impact(&project, &program);
+
+        assert!(
+            result.findings.is_empty(),
+            "a canonical Author::Id leaf is valid saved data: {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_typed_reference_leaf_that_is_not_an_identity_is_flagged() {
+        let source = "\
+module shelf
+
+resource Author at ^authors(id: int)
+    required name: string
+
+resource Book at ^books(id: int)
+    authorId: Author::Id
+";
+        let (project, program, path) = build_project(source);
+        let author_id_path = encode_path(&[
+            PathSegment::Root("books".to_string()),
+            PathSegment::RecordKey(SavedKey::Int(1)),
+            PathSegment::Field("authorId".to_string()),
+        ]);
+        write_entries(&path, &[(author_id_path, b"not-an-identity".to_vec())]);
+
+        let result = impact(&project, &program);
+
+        assert_eq!(result.findings.len(), 1, "{result:?}");
+        let finding = &result.findings[0];
+        assert_eq!(finding.kind, FindingKind::Undecodable);
+        assert_eq!(finding.path, "^books(1).authorId");
+        assert_eq!(finding.r#type.as_deref(), Some("Author::Id"));
+        assert!(finding.message.contains("Author::Id"));
+    }
+
+    #[test]
+    fn a_typed_reference_leaf_with_the_wrong_key_type_is_flagged() {
+        let source = "\
+module shelf
+
+resource Author at ^authors(slug: string)
+    required name: string
+
+resource Book at ^books(id: int)
+    authorId: Author::Id
+";
+        let (project, program, path) = build_project(source);
+        let author_id_path = encode_path(&[
+            PathSegment::Root("books".to_string()),
+            PathSegment::RecordKey(SavedKey::Int(1)),
+            PathSegment::Field("authorId".to_string()),
+        ]);
+        write_entries(
+            &path,
+            &[(author_id_path, encode_key_value(&SavedKey::Int(7)))],
+        );
+
+        let result = impact(&project, &program);
+
+        assert_eq!(result.findings.len(), 1, "{result:?}");
+        let finding = &result.findings[0];
+        assert_eq!(finding.kind, FindingKind::KeyTypeMismatch);
+        assert_eq!(finding.path, "^books(1).authorId");
+        assert!(finding.message.contains("Author::Id"));
+        assert!(finding.message.contains("int"));
+        assert!(finding.message.contains("string"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use marrow_check::CheckedProgram;
 use marrow_project::{StoreBackend, StoreConfig};
-use marrow_run::{SavedPathClass, classify_saved_path};
+use marrow_run::{SavedPathClass, classify_saved_path, decode_identity_arity};
 use marrow_store::backend::{Backend, Presence, ScanPage, StoreError};
 use marrow_store::path::{ChildSegment, PathSegment, SavedKey, encode_path};
 use marrow_store::redb::RedbStore;
@@ -88,9 +88,10 @@ impl StoreReader {
 
     /// The presence at `path` and, when a value is stored there, its rendered
     /// form. The path is classified against `program`'s schema so a scalar leaf
-    /// decodes to a human string of its declared type; a value that does not
-    /// decode renders as raw hex so it stays inspectable. An unreadable store
-    /// yields [`Availability::Unavailable`].
+    /// decodes to a human string of its declared type and a typed-reference leaf
+    /// renders as an identity constructor; a value that does not decode renders
+    /// as raw hex so it stays inspectable. An unreadable store yields
+    /// [`Availability::Unavailable`].
     pub fn get(&self, path: &[PathSegment], program: &CheckedProgram) -> Availability<StoredValue> {
         let key = encode_path(path);
         let class = classify_saved_path(program, path);
@@ -238,13 +239,18 @@ impl RecordCount {
 }
 
 /// Render stored bytes to a human string using the path's schema classification.
-/// A declared scalar leaf decodes to a canonical form of its type; an index
-/// marker or a value that does not decode renders as raw hex so corrupt or
-/// untyped data stays visible rather than vanishing.
+/// A declared scalar leaf decodes to a canonical form of its type, and a typed
+/// reference leaf decodes to `Resource::Id(...)`; an index marker or a value that
+/// does not decode renders as raw hex so corrupt or untyped data stays visible
+/// rather than vanishing.
 fn render_value(bytes: &[u8], class: SavedPathClass) -> String {
     match class {
         SavedPathClass::Scalar(ty) => match decode_value(bytes, ty) {
             Some(scalar) => render_scalar(&scalar),
+            None => hex(bytes),
+        },
+        SavedPathClass::Identity { resource, arity } => match decode_identity_arity(bytes, arity) {
+            Some(keys) => render_identity(&resource, &keys),
             None => hex(bytes),
         },
         // An index marker holds a presence marker or a raw identity, not a typed
@@ -253,6 +259,31 @@ fn render_value(bytes: &[u8], class: SavedPathClass) -> String {
         SavedPathClass::IndexMarker
         | SavedPathClass::Orphan
         | SavedPathClass::KeyTypeMismatch { .. } => hex(bytes),
+    }
+}
+
+/// A typed-reference leaf stores the referenced resource identity's key encoding.
+/// Render the decoded identity in the source-level constructor shape users know.
+fn render_identity(resource: &str, keys: &[SavedKey]) -> String {
+    let args = keys
+        .iter()
+        .map(saved_key_literal)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{resource}::Id({args})")
+}
+
+/// A saved key as the Marrow literal text users see in a path or identity
+/// constructor: strings escaped, bytes hex-prefixed, temporal keys canonical.
+pub fn saved_key_literal(key: &SavedKey) -> String {
+    match key {
+        SavedKey::Int(value) => value.to_string(),
+        SavedKey::Bool(value) => value.to_string(),
+        SavedKey::Str(value) => format!("{value:?}"),
+        SavedKey::Date(value) => canonical(&Scalar::Date(*value)),
+        SavedKey::Duration(value) => canonical(&Scalar::Duration(*value)),
+        SavedKey::Instant(value) => canonical(&Scalar::Instant(*value)),
+        SavedKey::Bytes(value) => format!("0x{}", hex(value)),
     }
 }
 
@@ -660,7 +691,7 @@ mod tests {
     use super::*;
     use marrow_check::{ProjectSources, analyze_project};
     use marrow_project::parse_config;
-    use marrow_store::path::{PathSegment, SavedKey, encode_path};
+    use marrow_store::path::{PathSegment, SavedKey, encode_key_value, encode_path};
     use marrow_store::redb::RedbStore;
 
     /// A project whose `marrow.json` pins a native store under `data/`, with one
@@ -758,6 +789,29 @@ resource Book at ^books(id: int)
         assert_eq!(stored.presence, Presence::ValueOnly);
         // `title` is a `string` field, so the bytes decode and render quoted.
         assert_eq!(stored.value.as_deref(), Some("\"Mort\""));
+    }
+
+    #[test]
+    fn render_value_decodes_a_typed_reference_leaf_to_an_identity() {
+        let bytes = [
+            encode_key_value(&SavedKey::Str("Ada\nLovelace".to_string())),
+            encode_key_value(&SavedKey::Bytes(vec![0x0a, 0xff])),
+            encode_key_value(&SavedKey::Date(0)),
+        ]
+        .concat();
+
+        let rendered = render_value(
+            &bytes,
+            SavedPathClass::Identity {
+                resource: "Author".to_string(),
+                arity: 3,
+            },
+        );
+
+        assert_eq!(
+            rendered,
+            "Author::Id(\"Ada\\nLovelace\", 0x0aff, 1970-01-01)"
+        );
     }
 
     #[test]

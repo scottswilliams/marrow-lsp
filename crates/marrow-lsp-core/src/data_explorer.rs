@@ -148,8 +148,9 @@ pub struct SavedGetResult {
     pub presence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    /// The scalar type name of the leaf (`int`, `string`, …), when the path is a
-    /// declared scalar; absent for a record node, an index marker, or an orphan.
+    /// The declared type name of the leaf (`int`, `string`, `Resource::Id`, …),
+    /// when the path is a typed leaf; absent for a record node, an index marker,
+    /// or an orphan.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
 }
@@ -193,7 +194,7 @@ pub fn saved_children(
     }
 }
 
-/// Handle `marrow/savedGet`. The path is typed against `program` so a scalar leaf
+/// Handle `marrow/savedGet`. The path is typed against `program` so a typed leaf
 /// reports its type and renders its value. A malformed key, a missing reader, or
 /// an unavailable store answer `available: false`.
 pub fn saved_get(
@@ -210,7 +211,7 @@ pub fn saved_get(
     let Some(path) = decode_path(params.path) else {
         return unavailable;
     };
-    let type_name = scalar_type_name(program, &path);
+    let type_name = leaf_type_name(program, &path);
     match reader.map(|reader| reader.get(&path, program)) {
         Some(Availability::Available(StoredValue { presence, value })) => SavedGetResult {
             available: true,
@@ -222,10 +223,11 @@ pub fn saved_get(
     }
 }
 
-/// The leaf scalar type name for a path, when the schema declares it a scalar.
-fn scalar_type_name(program: &CheckedProgram, path: &[PathSegment]) -> Option<String> {
+/// The leaf type name for a path, when the schema declares it as a typed leaf.
+fn leaf_type_name(program: &CheckedProgram, path: &[PathSegment]) -> Option<String> {
     match marrow_run::classify_saved_path(program, path) {
         marrow_run::SavedPathClass::Scalar(ty) => Some(ty.name().to_string()),
+        marrow_run::SavedPathClass::Identity { resource, .. } => Some(format!("{resource}::Id")),
         _ => None,
     }
 }
@@ -430,6 +432,78 @@ mod tests {
             PathSegment::RecordKey(SavedKey::Int(1)),
             PathSegment::Field("title".to_string()),
         ];
-        assert_eq!(scalar_type_name(&program, &path).as_deref(), Some("string"));
+        assert_eq!(leaf_type_name(&program, &path).as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn saved_get_reports_an_identity_leaf_type() {
+        use crate::workspace::Project;
+        use marrow_check::{ProjectSources, analyze_project};
+        use marrow_project::parse_config;
+        use marrow_store::backend::Backend;
+        use marrow_store::path::{encode_key_value, encode_path};
+        use marrow_store::redb::RedbStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let config_text = r#"{
+            "sourceRoots": ["src"],
+            "store": { "backend": "native", "dataDir": "data" }
+        }"#;
+        std::fs::write(root.join("marrow.json"), config_text).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(
+            root.join("src").join("a.mw"),
+            "\
+module a
+
+resource Author at ^authors(id: int)
+    required name: string
+
+resource Book at ^books(id: int)
+    authorId: Author::Id
+",
+        )
+        .unwrap();
+
+        let store_path = root.join("data").join("marrow.redb");
+        let author_id_path = encode_path(&[
+            PathSegment::Root("books".to_string()),
+            PathSegment::RecordKey(SavedKey::Int(1)),
+            PathSegment::Field("authorId".to_string()),
+        ]);
+        {
+            let mut store = RedbStore::open(&store_path).unwrap();
+            store
+                .write(&author_id_path, encode_key_value(&SavedKey::Int(7)))
+                .unwrap();
+        }
+
+        let config = parse_config(config_text).unwrap();
+        let program = analyze_project(root, &config, &ProjectSources::new())
+            .unwrap()
+            .program;
+        let project = Project {
+            root: root.to_path_buf(),
+            config,
+        };
+        let reader = StoreReader::for_project(&project).unwrap();
+
+        let result = saved_get(
+            SavedGetParams {
+                path: vec![
+                    SegmentJson::Root("books".to_string()),
+                    SegmentJson::Key(KeyJson::Int(1)),
+                    SegmentJson::Field("authorId".to_string()),
+                ],
+            },
+            &program,
+            Some(&reader),
+        );
+
+        assert!(result.available, "{result:?}");
+        assert_eq!(result.value.as_deref(), Some("Author::Id(7)"));
+        assert_eq!(result.r#type.as_deref(), Some("Author::Id"));
     }
 }

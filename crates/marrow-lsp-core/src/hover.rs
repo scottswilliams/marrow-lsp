@@ -11,7 +11,7 @@ use std::path::Path;
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::{AnalysisSnapshot, BindingIndex, SymbolKind, SymbolRef, type_at};
 use marrow_store::backend::Presence;
-use marrow_syntax::{Declaration, ResourceDecl, ResourceMember, SourceSpan};
+use marrow_syntax::{Declaration, EnumDecl, EnumMember, ResourceDecl, ResourceMember, SourceSpan};
 
 use crate::store::{Availability, StoreReader, StoredValue, saved_path_at};
 use crate::types::render_type;
@@ -78,8 +78,9 @@ pub fn hover_with_live(
 /// The symbol is resolved through the cached [`BindingIndex`] (the same one
 /// go-to-definition and references read), so this never rebuilds resolution per
 /// request. Only documentable declarations — functions, resources, module
-/// constants, and a resource's saved fields, layers, and indexes — carry docs; a
-/// local or parameter has none and yields `None`. The declaration is located in
+/// constants, enums, enum members, and a resource's saved fields, layers, and
+/// indexes — carry docs; a local or parameter has none and yields `None`. The
+/// declaration is located in
 /// the snapshot's parsed file by matching the definition span, and its `docs`
 /// lines (each a `;;` line) are joined into one paragraph. An undocumented
 /// declaration yields `None`.
@@ -130,6 +131,18 @@ fn declaration_docs<'a>(
         SymbolKind::Resource | SymbolKind::ResourceIdentity => {
             resource_at(source, symbol.span).map(|resource| resource.docs.as_slice())
         }
+        SymbolKind::Enum => enum_at(source, symbol.span).map(|enum_decl| enum_decl.docs.as_slice()),
+        SymbolKind::EnumMember => {
+            source
+                .declarations
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Declaration::Enum(enum_decl) => {
+                        enum_member_docs(&enum_decl.members, symbol.span)
+                    }
+                    _ => None,
+                })
+        }
         SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index => source
             .declarations
             .iter()
@@ -151,6 +164,31 @@ fn resource_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&
             Declaration::Resource(resource) if resource.span == span => Some(resource),
             _ => None,
         })
+}
+
+/// The enum declaration whose span is `span`, or `None`.
+fn enum_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&EnumDecl> {
+    source
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Enum(enum_decl) if enum_decl.span == span => Some(enum_decl),
+            _ => None,
+        })
+}
+
+/// The `docs` of the enum member whose span is `span`, searching nested members,
+/// or `None`.
+fn enum_member_docs(members: &[EnumMember], span: SourceSpan) -> Option<&[String]> {
+    for member in members {
+        if member.span == span {
+            return Some(&member.docs);
+        }
+        if let Some(docs) = enum_member_docs(&member.members, span) {
+            return Some(docs);
+        }
+    }
+    None
 }
 
 /// The `docs` of the resource member (field, group/layer, or index) whose span is
@@ -510,6 +548,43 @@ pub fn f(): string
         let offset = source.rfind(").title").unwrap() + ").".len() + 1;
         let docs = symbol_docs(&snapshot, &index, &file, offset).expect("field docs");
         assert_eq!(docs, "The book's title.");
+    }
+
+    #[test]
+    fn symbol_docs_for_a_documented_enum_returns_its_description() {
+        let source = "\
+module a
+
+;; Lifecycle state.
+enum Status
+    open
+    closed
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let offset = source.find("Status").unwrap() + 1;
+        let docs = symbol_docs(&snapshot, &index, &file, offset).expect("enum docs");
+        assert_eq!(docs, "Lifecycle state.");
+    }
+
+    #[test]
+    fn symbol_docs_for_a_documented_enum_member_returns_its_description() {
+        let source = "\
+module a
+
+enum Status
+    ;; Open for edits.
+    open
+    closed
+
+pub fn current(): Status
+    return Status::open
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let offset = source.rfind("Status::open").unwrap() + "Status::".len() + 1;
+        let docs = symbol_docs(&snapshot, &index, &file, offset).expect("enum member docs");
+        assert_eq!(docs, "Open for edits.");
     }
 
     #[test]

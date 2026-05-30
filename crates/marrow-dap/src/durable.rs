@@ -9,7 +9,7 @@
 //! the pure tree-and-render logic it calls.
 
 use marrow_check::CheckedProgram;
-use marrow_run::{SavedPathClass, classify_saved_path};
+use marrow_run::{SavedPathClass, classify_saved_path, decode_identity_arity};
 use marrow_store::backend::{Backend, Presence};
 use marrow_store::path::{ChildSegment, PathSegment, SavedKey, encode_path};
 use marrow_store::value::{Scalar, decode_value, encode_value};
@@ -46,9 +46,9 @@ pub fn roots(store: &dyn Backend) -> Vec<DurableNode> {
 }
 
 /// The children of a durable `path`, each rendered as a node. A child that holds
-/// a stored scalar leaf shows its decoded value; a child that only has
-/// descendants shows none and is expandable. The path's schema classification
-/// types each leaf so an `int` field reads as a number, not raw bytes.
+/// a typed stored leaf shows its decoded value; a child that only has descendants
+/// shows none and is expandable. The path's schema classification types each leaf
+/// so an `int` field reads as a number and a typed reference reads as an identity.
 pub fn children(
     store: &dyn Backend,
     program: &CheckedProgram,
@@ -92,8 +92,9 @@ fn node_at(
 
 /// The rendered value stored exactly at `path`, or `None` when nothing is stored
 /// there (a pure container node). The path is classified against the schema so a
-/// declared scalar decodes to its typed form; anything else renders raw so
-/// corrupt or untyped data stays inspectable rather than vanishing.
+/// declared scalar decodes to its typed form and a typed-reference leaf renders
+/// as `Resource::Id(...)`; corrupt or untyped data renders raw so it stays
+/// inspectable rather than vanishing.
 pub fn read_leaf(
     store: &dyn Backend,
     program: &CheckedProgram,
@@ -105,17 +106,33 @@ pub fn read_leaf(
 }
 
 /// Render stored bytes using the path's schema class: a declared scalar decodes
-/// to its canonical text, an index marker or undeclared member shows as hex.
+/// to its canonical text, a typed reference decodes to an identity constructor,
+/// and untyped or corrupt data shows as hex.
 fn render(bytes: &[u8], class: SavedPathClass) -> String {
     match class {
         SavedPathClass::Scalar(ty) => match decode_value(bytes, ty) {
             Some(scalar) => render_scalar(&scalar),
             None => hex(bytes),
         },
+        SavedPathClass::Identity { resource, arity } => match decode_identity_arity(bytes, arity) {
+            Some(keys) => render_identity(&resource, &keys),
+            None => hex(bytes),
+        },
         SavedPathClass::IndexMarker
         | SavedPathClass::Orphan
         | SavedPathClass::KeyTypeMismatch { .. } => hex(bytes),
     }
+}
+
+/// A typed-reference leaf stores another resource's identity key encoding. Show
+/// the source-level identity constructor shape in the debugger variables view.
+fn render_identity(resource: &str, keys: &[SavedKey]) -> String {
+    let args = keys
+        .iter()
+        .map(marrow_lsp_core::store::saved_key_literal)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{resource}::Id({args})")
 }
 
 /// A decoded scalar as display text. Strings are quoted so an empty or
@@ -304,6 +321,29 @@ mod tests {
         assert_eq!(title.value, "\"Dune\"");
         let pages = fields.iter().find(|n| n.name == "pages").unwrap();
         assert_eq!(pages.value, "412");
+    }
+
+    #[test]
+    fn render_decodes_a_typed_reference_leaf_to_an_identity() {
+        let bytes = [
+            marrow_store::path::encode_key_value(&SavedKey::Str("Ada\nLovelace".to_string())),
+            marrow_store::path::encode_key_value(&SavedKey::Bytes(vec![0x0a, 0xff])),
+            marrow_store::path::encode_key_value(&SavedKey::Date(0)),
+        ]
+        .concat();
+
+        let rendered = render(
+            &bytes,
+            SavedPathClass::Identity {
+                resource: "Author".to_string(),
+                arity: 3,
+            },
+        );
+
+        assert_eq!(
+            rendered,
+            "Author::Id(\"Ada\\nLovelace\", 0x0aff, 1970-01-01)"
+        );
     }
 
     #[test]
