@@ -7,7 +7,10 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { MarrowDataProvider } from "./dataExplorer";
 
+// The one shared language client for the whole extension. Every transport-facing
+// feature (diagnostics, the Data Explorer) speaks through this single instance.
 let client: LanguageClient | undefined;
 
 const SERVER_BINARY = process.platform === "win32" ? "marrow-lsp.exe" : "marrow-lsp";
@@ -43,6 +46,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   await client.start();
+
+  // The Data Explorer is only wired up once the client is running, so every
+  // request it issues hits a live server. It shares the single client instance.
+  const dataProvider = new MarrowDataProvider();
+  dataProvider.setClient(client);
+
+  context.subscriptions.push(
+    vscode.window.registerTreeDataProvider("marrowData", dataProvider),
+    vscode.commands.registerCommand("marrow.refreshData", () => {
+      dataProvider.refresh();
+    }),
+    // A saved store change is announced by a write to marrow.json; reflect it
+    // in the tree automatically so live values stay current without a manual
+    // refresh.
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      if (path.basename(document.fileName) === "marrow.json") {
+        dataProvider.refresh();
+      }
+    }),
+  );
 }
 
 export async function deactivate(): Promise<void> {

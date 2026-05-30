@@ -21,6 +21,40 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "marrow",
+          "title": "Marrow",
+          "icon": "$(database)"
+        }
+      ]
+    },
+    "views": {
+      "marrow": [
+        {
+          "id": "marrowData",
+          "name": "Marrow Data"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "marrow.refreshData",
+        "title": "Refresh",
+        "category": "Marrow",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "marrow.refreshData",
+          "when": "view == marrowData",
+          "group": "navigation"
+        }
+      ]
+    },
     "languages": [
       {
         "id": "marrow",
