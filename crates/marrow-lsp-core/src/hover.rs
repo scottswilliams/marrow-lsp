@@ -9,8 +9,9 @@
 use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use marrow_check::{AnalysisSnapshot, type_at};
+use marrow_check::{AnalysisSnapshot, BindingIndex, SymbolKind, SymbolRef, type_at};
 use marrow_store::backend::Presence;
+use marrow_syntax::{Declaration, ResourceDecl, ResourceMember, SourceSpan};
 
 use crate::store::{Availability, StoreReader, StoredValue, saved_path_at};
 use crate::types::render_type;
@@ -20,27 +21,39 @@ use crate::types::render_type;
 /// The file must be one the snapshot analyzed; a path it does not know (or an
 /// offset no expression covers) yields `None`, so the editor shows nothing.
 pub fn hover(snapshot: &AnalysisSnapshot, file: &Path, offset: usize) -> Option<Hover> {
-    hover_with_live(snapshot, file, offset, None)
+    hover_with_live(snapshot, file, offset, None, None)
 }
 
-/// The hover for byte `offset`, optionally augmented with the live stored value
-/// when the cursor sits on a saved `^` path and a readable store is supplied.
+/// The hover for byte `offset`, augmented with the symbol's documentation and the
+/// live stored value when each is available.
 ///
-/// The type always comes from the checker. When `reader` is `Some` and the cursor
-/// resolves to a concrete saved path, a second line shows the live value (a typed
-/// scalar, `N records`, `present`, or `absent`). A store that is `Unavailable`
-/// (locked, corrupt, missing) adds nothing — the hover shows only the type, never
-/// an error. Passing `None` for `reader` disables live data entirely (the
-/// `marrow.liveData` setting is off, or no native store is configured).
+/// The type always comes from the checker and is shown first. `docs`, when
+/// present, is the symbol's `;;` description rendered as a paragraph below the
+/// type. When `reader` is `Some` and the cursor resolves to a concrete saved path,
+/// a final line shows the live value (a typed scalar, `N records`, `present`, or
+/// `absent`). A store that is `Unavailable` (locked, corrupt, missing) adds
+/// nothing — the hover shows only the type and docs, never an error. Passing
+/// `None` for `reader` disables live data entirely (the `marrow.liveData` setting
+/// is off, or no native store is configured); passing `None` for `docs` omits the
+/// description (the symbol has none, or is a local/parameter that carries none).
 pub fn hover_with_live(
     snapshot: &AnalysisSnapshot,
     file: &Path,
     offset: usize,
+    docs: Option<&str>,
     reader: Option<&StoreReader>,
 ) -> Option<Hover> {
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     let ty = type_at(&snapshot.program, file, &analyzed.parsed, offset)?;
     let mut value = marrow_code_block(&render_type(&ty));
+
+    // The documentation paragraph sits between the type and any live value: the
+    // type is the primary fact, the docs explain the symbol, the live value is
+    // the current store reading.
+    if let Some(docs) = docs {
+        value.push_str("\n\n");
+        value.push_str(docs);
+    }
 
     if let Some(reader) = reader
         && let Some(segments) = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)
@@ -57,6 +70,123 @@ pub fn hover_with_live(
         }),
         range: None,
     })
+}
+
+/// The `;;` description of the symbol at byte `offset` in `file`, as a Markdown
+/// paragraph, or `None` when none applies.
+///
+/// The symbol is resolved through the cached [`BindingIndex`] (the same one
+/// go-to-definition and references read), so this never rebuilds resolution per
+/// request. Only documentable declarations — functions, resources, module
+/// constants, and a resource's saved fields, layers, and indexes — carry docs; a
+/// local or parameter has none and yields `None`. The declaration is located in
+/// the snapshot's parsed file by matching the definition span, and its `docs`
+/// lines (each a `;;` line) are joined into one paragraph. An undocumented
+/// declaration yields `None`.
+pub fn symbol_docs(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<String> {
+    let symbol = index.definition(file, offset)?;
+    let analyzed = snapshot.files.iter().find(|f| f.path == symbol.file)?;
+    let docs = declaration_docs(&analyzed.parsed.file, &symbol)?;
+    join_docs(docs)
+}
+
+/// The `docs` lines of the declaration the definition `symbol` names, found in
+/// `source` by matching the definition span, or `None` when the symbol is not a
+/// documentable declaration. A resource's generated identity shares its
+/// resource's span, so it reads the resource's docs; locals and parameters are
+/// not declarations here and return `None`.
+fn declaration_docs<'a>(
+    source: &'a marrow_syntax::SourceFile,
+    symbol: &SymbolRef,
+) -> Option<&'a [String]> {
+    match symbol.kind {
+        SymbolKind::Function => {
+            source
+                .declarations
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Declaration::Function(function) if function.span == symbol.span => {
+                        Some(function.docs.as_slice())
+                    }
+                    _ => None,
+                })
+        }
+        SymbolKind::ModuleConst => {
+            source
+                .declarations
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Declaration::Const(constant) if constant.span == symbol.span => {
+                        Some(constant.docs.as_slice())
+                    }
+                    _ => None,
+                })
+        }
+        SymbolKind::Resource | SymbolKind::ResourceIdentity => {
+            resource_at(source, symbol.span).map(|resource| resource.docs.as_slice())
+        }
+        SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index => source
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Resource(resource) => member_docs(&resource.members, symbol.span),
+                _ => None,
+            }),
+        // Locals, parameters, and module aliases carry no `;;` documentation.
+        SymbolKind::Local | SymbolKind::Param | SymbolKind::ModuleRef => None,
+    }
+}
+
+/// The resource declaration whose span is `span`, or `None`.
+fn resource_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&ResourceDecl> {
+    source
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Resource(resource) if resource.span == span => Some(resource),
+            _ => None,
+        })
+}
+
+/// The `docs` of the resource member (field, group/layer, or index) whose span is
+/// `span`, searching nested groups, or `None`.
+fn member_docs(members: &[ResourceMember], span: SourceSpan) -> Option<&[String]> {
+    for member in members {
+        match member {
+            ResourceMember::Field(field) if field.span == span => return Some(&field.docs),
+            ResourceMember::Group(group) if group.span == span => return Some(&group.docs),
+            ResourceMember::Index(index) if index.span == span => return Some(&index.docs),
+            // A nested group can hold the named member; descend before moving on.
+            ResourceMember::Group(group) => {
+                if let Some(docs) = member_docs(&group.members, span) {
+                    return Some(docs);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Join `;;` doc lines into one Markdown paragraph, or `None` when there is no doc
+/// text (no lines, or only blank ones).
+fn join_docs(lines: &[String]) -> Option<String> {
+    let joined = lines
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let joined = joined.trim();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.to_string())
+    }
 }
 
 /// The live-data line for a resolved saved path, or `None` when the store is
@@ -218,8 +348,8 @@ pub fn f(): string
 
         // Hover over `title` in the function body's `^books(1).title`.
         let offset = source.rfind(").title").unwrap() + ").".len() + 1;
-        let hover =
-            hover_with_live(&snapshot, &file, offset, Some(&reader)).expect("a hover at the path");
+        let hover = hover_with_live(&snapshot, &file, offset, None, Some(&reader))
+            .expect("a hover at the path");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup contents");
         };
@@ -251,7 +381,7 @@ pub fn f()
         // Hover over `^books` in the body. The type at a bare root may not resolve,
         // so this asserts the path resolver + count only when a hover is produced.
         let offset = source.rfind("^books").unwrap();
-        if let Some(hover) = hover_with_live(&snapshot, &file, offset, Some(&reader)) {
+        if let Some(hover) = hover_with_live(&snapshot, &file, offset, None, Some(&reader)) {
             let HoverContents::Markup(markup) = hover.contents else {
                 panic!("expected markup");
             };
@@ -276,11 +406,142 @@ pub fn f(): string
 ";
         let (snapshot, file, _project) = analyze_with_store(source);
         let offset = source.rfind(").title").unwrap() + ").".len() + 1;
-        // No reader: the live-data setting is off. Only the type shows.
-        let hover = hover_with_live(&snapshot, &file, offset, None).expect("a hover");
+        // No reader, no docs: the live-data setting is off. Only the type shows.
+        let hover = hover_with_live(&snapshot, &file, offset, None, None).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
         assert_eq!(markup.value, "```marrow\nstring\n```");
+    }
+
+    /// Build the binding index for a snapshot so a docs test can resolve a symbol.
+    fn index_for(snapshot: &AnalysisSnapshot) -> BindingIndex {
+        marrow_check::build_binding_index(snapshot)
+    }
+
+    #[test]
+    fn symbol_docs_for_a_documented_function_returns_its_description() {
+        let source = "\
+module a
+
+;; Adds two numbers.
+pub fn add(x: int, y: int): int
+    return x + y
+
+pub fn caller(): int
+    return add(1, 2)
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        // Hover over the call `add(1, 2)`.
+        let offset = source.rfind("add(1, 2)").unwrap();
+        let docs = symbol_docs(&snapshot, &index, &file, offset).expect("function docs");
+        assert_eq!(docs, "Adds two numbers.");
+    }
+
+    #[test]
+    fn hover_over_a_documented_function_shows_type_and_description() {
+        let source = "\
+module a
+
+;; Adds two numbers.
+pub fn add(x: int, y: int): int
+    return x + y
+
+pub fn caller(): int
+    return add(1, 2)
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let offset = source.rfind("add(1, 2)").unwrap();
+        let docs = symbol_docs(&snapshot, &index, &file, offset);
+        let hover = hover_with_live(&snapshot, &file, offset, docs.as_deref(), None)
+            .expect("a hover at the call");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        assert!(
+            markup.value.starts_with("```marrow\n"),
+            "the type still leads the hover: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("Adds two numbers."),
+            "the description should be shown: {}",
+            markup.value
+        );
+    }
+
+    #[test]
+    fn symbol_docs_for_a_resource_name_returns_its_description() {
+        let source = "\
+module a
+
+;; A book on a shelf.
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn f(): Book
+    return Book(id: 1, title: \"x\")
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        // Hover over the constructor use `Book(...)`.
+        let offset = source.rfind("Book(id: 1").unwrap();
+        let docs = symbol_docs(&snapshot, &index, &file, offset).expect("resource docs");
+        assert_eq!(docs, "A book on a shelf.");
+    }
+
+    #[test]
+    fn symbol_docs_for_a_saved_field_returns_its_description() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    ;; The book's title.
+    required title: string
+
+pub fn f(): string
+    return ^books(1).title
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        // Hover over `title` in `^books(1).title`.
+        let offset = source.rfind(").title").unwrap() + ").".len() + 1;
+        let docs = symbol_docs(&snapshot, &index, &file, offset).expect("field docs");
+        assert_eq!(docs, "The book's title.");
+    }
+
+    #[test]
+    fn symbol_docs_for_an_undocumented_symbol_is_none() {
+        let source = "\
+module a
+
+pub fn add(x: int, y: int): int
+    return x + y
+
+pub fn caller(): int
+    return add(1, 2)
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let offset = source.rfind("add(1, 2)").unwrap();
+        assert!(
+            symbol_docs(&snapshot, &index, &file, offset).is_none(),
+            "an undocumented function has no description"
+        );
+    }
+
+    #[test]
+    fn symbol_docs_for_a_local_or_param_is_none() {
+        let source = "module a\n\npub fn f(n: int): int\n    return n\n";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        // Hover over the parameter use `n` in `return n`.
+        let offset = offset_of(source, "return n") + "return ".len();
+        assert!(
+            symbol_docs(&snapshot, &index, &file, offset).is_none(),
+            "a parameter carries no `;;` documentation"
+        );
     }
 }

@@ -300,17 +300,25 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
-        if ensure_snapshot(workspace, documents, &path).is_none() {
+        // Build and cache the binding index (once per recompute) so the docs
+        // lookup reuses it exactly like definition and references do — never
+        // rebuilding resolution per hover. This also ensures the snapshot.
+        if ensure_index(workspace, documents, &path).is_none() {
             return Ok(None);
         }
         // The reader borrows the project from the workspace; resolve it before
-        // re-borrowing the snapshot so both borrows are read-only and disjoint.
+        // re-borrowing the snapshot so all borrows are read-only and disjoint.
         let reader = self.reader(workspace);
         let snapshot = workspace.latest().expect("ensured just above");
+        let index = workspace
+            .binding_index_cached()
+            .expect("ensured just above");
+        let docs = hover::symbol_docs(snapshot, index, &path, offset);
         Ok(hover::hover_with_live(
             snapshot,
             &path,
             offset,
+            docs.as_deref(),
             reader.as_ref(),
         ))
     }
