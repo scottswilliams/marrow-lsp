@@ -1,0 +1,24 @@
+[package]
+name = "marrow-mcp"
+description = "MCP server for the Marrow .mw language, over stdio, for coding agents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "marrow-mcp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+marrow-lsp-core = { path = "../marrow-lsp-core" }
+serde_json = "1"
+
+[dev-dependencies]
+marrow-store.workspace = true
+tempfile = "3"
