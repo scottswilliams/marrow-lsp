@@ -23,6 +23,7 @@ fixtures/shelf/      a runnable Marrow project used by tests and manual checks
 
 ## Status
 
-Early. The workspace builds and `marrow-lsp-core::positions` (byte ↔ UTF-16) is in place.
-Diagnostics, completion, hover, navigation, the data-inspection features, the MCP server, and
-the debugger land in subsequent milestones. See `AGENTS.md` for working conventions.
+The workspace contains the shared Rust core, the LSP/MCP/DAP transports, and the VSCode
+extension. Diagnostics, completion, hover, navigation, semantic tokens, formatting, data
+inspection, MCP tools, and statement-level debugging are implemented, with language behavior
+coming from the canonical marrow crates. See `AGENTS.md` for working conventions.

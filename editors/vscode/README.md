@@ -24,9 +24,9 @@ Rust binaries. No parsing or position math runs in TypeScript.
 - **Marrow Data Explorer** — a dedicated view (Activity Bar) that browses the project's durable
   data, with values and types resolved lazily as rows become visible. Refreshes automatically
   when `marrow.json` is saved, and on demand from the view title.
-- **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
-  `.mw` entry, step, set breakpoints, inspect variables, and read a live `^` durable-data scope
-  that surfaces the project's persisted values alongside ordinary locals.
+- **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch an
+  entry function, step, set breakpoints, inspect variables, and read a live `^` durable-data
+  scope that surfaces the project's persisted values alongside ordinary locals.
 
 ## Requirements
 
@@ -40,21 +40,24 @@ so no separate install or Rust toolchain is required.
 ## How the extension finds the server binary
 
 Both the language server (`marrow-lsp`) and the debug adapter (`marrow-dap`) are resolved the
-same way, in order, with the first that exists on disk winning:
+same way, in order:
 
 1. The explicit setting — `marrow.server.path` for the server, `marrow.dap.path` for the debug
-   adapter — when set to an absolute path. An override is always authoritative.
+   adapter — when set to an absolute path that exists on disk.
 2. The **bundled** binary shipped inside the extension at `server/marrow-lsp` /
    `server/marrow-dap`. This is what a Marketplace/`.vsix` install uses.
 3. A local **dev build** at `target/debug/<binary>` relative to the extension checkout, for
-   working on the extension from a source tree.
+   working on the extension from a source tree. This fallback is disabled in packaged installs.
 
 ## Settings
 
 - `marrow.server.path` — absolute path to the `marrow-lsp` binary. Overrides the bundled and
-  dev locations.
+  dev locations when the file exists.
 - `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
-  bundled and dev locations.
+  bundled and dev locations when the file exists.
+- `marrow.liveData` — allow hover, CodeLens, the Data Explorer, and data-integrity checks to
+  read the project's durable store. Disable it when editor-triggered reads of local stored data
+  are not appropriate.
 
 ## Known limitations
 

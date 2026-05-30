@@ -22,7 +22,8 @@
   "activationEvents": [
     "onLanguage:marrow",
     "workspaceContains:**/marrow.json",
-    "onDebug"
+    "onDebugResolve:marrow",
+    "onDebugDynamicConfigurations:marrow"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -105,7 +106,7 @@
               },
               "entry": {
                 "type": "string",
-                "description": "Path to the .mw entry file to debug. Defaults to the active editor's file."
+                "description": "Entry function to debug, such as `module::function`. When omitted, the adapter uses `defaultEntry` from marrow.json."
               },
               "args": {
                 "type": "array",
@@ -129,7 +130,6 @@
             "request": "launch",
             "name": "Debug Marrow entry",
             "project": "${workspaceFolder}",
-            "entry": "${file}",
             "args": [],
             "stopOnEntry": false
           }
@@ -137,13 +137,13 @@
         "configurationSnippets": [
           {
             "label": "Marrow: Debug entry",
-            "description": "Debug a Marrow .mw entry file.",
+            "description": "Debug a Marrow entry function.",
             "body": {
               "type": "marrow",
               "request": "launch",
               "name": "Debug Marrow entry",
               "project": "^\"\\${workspaceFolder}\"",
-              "entry": "^\"\\${file}\"",
+              "entry": "^\"module::function\"",
               "args": [],
               "stopOnEntry": false
             }
@@ -157,12 +157,17 @@
         "marrow.server.path": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to the `marrow-lsp` server binary. When empty, the extension uses the bundled `./server/marrow-lsp` if present, otherwise the dev build at `../../target/debug/marrow-lsp`."
+          "markdownDescription": "Absolute path to an existing `marrow-lsp` server binary. When empty, the extension uses the bundled `./server/marrow-lsp` if present. Extension development hosts may also fall back to `../../target/debug/marrow-lsp`."
         },
         "marrow.dap.path": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to the `marrow-dap` debug adapter binary. When empty, the extension uses the bundled `./server/marrow-dap` if present, otherwise the dev build at `../../target/debug/marrow-dap`."
+          "markdownDescription": "Absolute path to an existing `marrow-dap` debug adapter binary. When empty, the extension uses the bundled `./server/marrow-dap` if present. Extension development hosts may also fall back to `../../target/debug/marrow-dap`."
+        },
+        "marrow.liveData": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Allow hover, CodeLens, the Data Explorer, and stored-data integrity checks to open the project's native dev store read-only. Disable this to prevent editor-triggered reads of real stored data."
         }
       }
     }
