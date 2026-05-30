@@ -17,7 +17,8 @@
   ],
   "activationEvents": [
     "onLanguage:marrow",
-    "workspaceContains:**/marrow.json"
+    "workspaceContains:**/marrow.json",
+    "onDebug"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -74,6 +75,69 @@
         "path": "./syntaxes/marrow.tmLanguage.json"
       }
     ],
+    "debuggers": [
+      {
+        "type": "marrow",
+        "label": "Marrow",
+        "languages": [
+          "marrow"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "project": {
+                "type": "string",
+                "description": "Path to the Marrow project (the directory containing marrow.json).",
+                "default": "${workspaceFolder}"
+              },
+              "entry": {
+                "type": "string",
+                "description": "Path to the .mw entry file to debug. Defaults to the active editor's file."
+              },
+              "args": {
+                "type": "array",
+                "description": "Arguments passed to the Marrow entry.",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Break at the first statement of the entry.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "marrow",
+            "request": "launch",
+            "name": "Debug Marrow entry",
+            "project": "${workspaceFolder}",
+            "entry": "${file}",
+            "args": [],
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Marrow: Debug entry",
+            "description": "Debug a Marrow .mw entry file.",
+            "body": {
+              "type": "marrow",
+              "request": "launch",
+              "name": "Debug Marrow entry",
+              "project": "^\"\\${workspaceFolder}\"",
+              "entry": "^\"\\${file}\"",
+              "args": [],
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
+    ],
     "configuration": {
       "title": "Marrow",
       "properties": {
@@ -81,6 +145,11 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Absolute path to the `marrow-lsp` server binary. When empty, the extension uses the bundled `./server/marrow-lsp` if present, otherwise the dev build at `../../target/debug/marrow-lsp`."
+        },
+        "marrow.dap.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the `marrow-dap` debug adapter binary. When empty, the extension uses the bundled `./server/marrow-dap` if present, otherwise the dev build at `../../target/debug/marrow-dap`."
         }
       }
     }
