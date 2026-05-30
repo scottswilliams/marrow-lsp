@@ -7,6 +7,7 @@
 pub mod code_lens;
 pub mod completion;
 pub mod data_explorer;
+pub mod data_integrity;
 pub mod diagnostics;
 pub mod documents;
 pub mod formatting;

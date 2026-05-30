@@ -109,6 +109,10 @@ fn initialize_list_tools_then_call_mw_check() {
         "mw_check listed, got {names:?}"
     );
     assert!(names.contains(&"mw_run"), "mw_run listed, got {names:?}");
+    assert!(
+        names.contains(&"mw_data_integrity"),
+        "mw_data_integrity listed, got {names:?}"
+    );
 
     // tools/call mw_check against a project file overlaid with a type error.
     let file = temp_project();
@@ -181,6 +185,91 @@ fn data_tools_refuse_without_the_opt_in() {
         "without the opt-in, data tools must refuse and read nothing, got {response}"
     );
     assert_eq!(structured["available"], false);
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn mw_data_integrity_flags_an_orphan_with_the_opt_in() {
+    use marrow_store::backend::Backend;
+    use marrow_store::path::{PathSegment, SavedKey, encode_path};
+    use marrow_store::redb::RedbStore;
+
+    // A throwaway project pinning a native store. The schema declares
+    // `^books(id).title`; the store also holds `^books(1).sticker`, an undeclared
+    // field, so the schema-impact advisory must flag it as an orphan.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src/shelf");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    let file = src.join("books.mw");
+    std::fs::write(
+        &file,
+        "module shelf::books\n\nresource Book at ^books(id: int)\n    required title: string\n",
+    )
+    .unwrap();
+    {
+        let mut store = RedbStore::open(&root.join("data").join("marrow.redb")).unwrap();
+        let title = encode_path(&[
+            PathSegment::Root("books".to_string()),
+            PathSegment::RecordKey(SavedKey::Int(1)),
+            PathSegment::Field("title".to_string()),
+        ]);
+        store.write(&title, b"Mort".to_vec()).unwrap();
+        let orphan = encode_path(&[
+            PathSegment::Root("books".to_string()),
+            PathSegment::RecordKey(SavedKey::Int(1)),
+            PathSegment::Field("sticker".to_string()),
+        ]);
+        store.write(&orphan, b"gold".to_vec()).unwrap();
+    }
+    // Keep the project dir alive for the child process's lifetime; the OS reclaims
+    // it on exit.
+    std::mem::forget(dir);
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-mcp"))
+            .arg("--allow-data")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-mcp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+    );
+    let _ = wait_for(&mut stdout, 1, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": "mw_data_integrity", "arguments": { "file": file.to_string_lossy() } }
+        }),
+    );
+    let response = wait_for(&mut stdout, 2, Duration::from_secs(10));
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["available"], true,
+        "the seeded store is readable with the opt-in, got {response}"
+    );
+    let findings = structured["findings"].as_array().expect("a findings array");
+    assert_eq!(findings.len(), 1, "one orphan finding: {response}");
+    assert_eq!(findings[0]["kind"], "orphan");
+    assert_eq!(findings[0]["path"], "^books(1).sticker");
 
     let _ = server.0.kill();
 }

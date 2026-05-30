@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use marrow_check::CheckedProgram;
 use marrow_project::{StoreBackend, StoreConfig};
 use marrow_run::{SavedPathClass, classify_saved_path};
-use marrow_store::backend::{Backend, Presence, StoreError};
+use marrow_store::backend::{Backend, Presence, ScanPage, StoreError};
 use marrow_store::path::{ChildSegment, PathSegment, SavedKey, encode_path};
 use marrow_store::redb::RedbStore;
 use marrow_store::value::{Scalar, decode_value};
@@ -128,6 +128,14 @@ impl StoreReader {
         })
     }
 
+    /// Up to `limit` stored (key, value) pairs across the whole tree, in Marrow
+    /// order, with `truncated` set when the store held more past the limit. One
+    /// bounded read backing the data-integrity scan; an unreadable store yields
+    /// [`Availability::Unavailable`].
+    pub fn scan(&self, limit: usize) -> Availability<ScanPage> {
+        self.with_store(|store| store.scan(&[], limit).ok())
+    }
+
     /// Open the store read-only, run `read`, and drop the handle. A missing file,
     /// a lock held by a live writer, a corrupt store, an unsupported format
     /// version, or a read that fails partway all collapse to
@@ -166,6 +174,10 @@ impl ReadOnly {
 
     fn roots(&self) -> Result<Vec<String>, StoreError> {
         self.0.roots()
+    }
+
+    fn scan(&self, path: &[u8], limit: usize) -> Result<ScanPage, StoreError> {
+        self.0.scan(path, limit)
     }
 }
 

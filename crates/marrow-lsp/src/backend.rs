@@ -9,6 +9,7 @@ use marrow_lsp_core::data_explorer::{
     SavedChildrenParams, SavedChildrenResult, SavedGetParams, SavedGetResult, SavedRootsResult,
     saved_children, saved_get, saved_roots,
 };
+use marrow_lsp_core::data_integrity::{DataIntegrityParams, DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
@@ -93,6 +94,26 @@ impl Backend {
         let empty = EMPTY_PROGRAM.get_or_init(Default::default);
         let program = state.workspace.program().unwrap_or(empty);
         Ok(saved_get(params, program, reader.as_ref()))
+    }
+
+    /// `marrow/dataIntegrity`: the schema-change-impact advisory. A capped,
+    /// on-demand scan of the project's saved data that flags every record the
+    /// current schema can no longer account for. Reads through the same
+    /// `marrow.liveData`-gated reader as hover live values and the Data Explorer,
+    /// so it never opens the store when live data is off, and it is invoked only on
+    /// explicit request — never on save or edit. A `None` reader (live data off, no
+    /// project, or no native store) or an unreadable store answers
+    /// `available: false`. The path is typed against the cached snapshot's program;
+    /// no recompute.
+    pub async fn data_integrity(
+        &self,
+        _params: DataIntegrityParams,
+    ) -> jsonrpc::Result<DataIntegrityResult> {
+        let state = self.state.lock().await;
+        let reader = self.reader(&state.workspace);
+        let empty = EMPTY_PROGRAM.get_or_init(Default::default);
+        let program = state.workspace.program().unwrap_or(empty);
+        Ok(data_integrity(reader.as_ref(), program))
     }
 
     /// Note that an edit happened and schedule a debounced recompute for `file`.

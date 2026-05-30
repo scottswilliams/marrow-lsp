@@ -376,6 +376,38 @@ pub fn saved_children(file: &Path, path: Json, allow_data: bool) -> Json {
     value
 }
 
+/// `mw_data_integrity`: the schema-change-impact advisory — a capped, on-demand
+/// scan of the project's real stored data that flags every record the *current*
+/// schema can no longer account for (an orphan path, or a value that no longer
+/// decodes as its declared type). Reuses the same classification as
+/// `marrow data integrity`, through a short-lived [`StoreReader`]. Gated like
+/// [`saved_roots`]: with `allow_data = false` it returns a refusal envelope and
+/// never opens the store. A project with no native store, or a store that cannot
+/// be read right now, answers `available: false`.
+pub fn data_integrity(file: &Path, allow_data: bool) -> Json {
+    if !allow_data {
+        return data_disabled();
+    }
+    let unavailable =
+        json!({ "available": false, "findings": [], "scanned": 0, "truncated": false });
+    let workspace = match load_project(file, None) {
+        Ok((workspace, _)) => workspace,
+        Err(error) => {
+            let mut value = unavailable.clone();
+            value["error"] = json!(error);
+            return value;
+        }
+    };
+    let reader = workspace.project().and_then(StoreReader::for_project);
+    let empty = CheckedProgram::default();
+    let program = workspace.program().unwrap_or(&empty);
+    serde_json::to_value(crate::data_integrity::data_integrity(
+        reader.as_ref(),
+        program,
+    ))
+    .unwrap_or(unavailable)
+}
+
 /// The refusal a data tool returns when data access is not enabled: a clear,
 /// machine-readable envelope that carries no stored data. The transport sets the
 /// opt-in (an env var / launch flag); the boundary itself lives here so a missing
@@ -950,6 +982,61 @@ pub fn fails()
         assert_eq!(got["dataAccess"], "disabled");
         let children = saved_children(&file, json!([]), false);
         assert_eq!(children["dataAccess"], "disabled");
+        let integrity = data_integrity(&file, false);
+        assert_eq!(integrity["dataAccess"], "disabled");
+    }
+
+    #[test]
+    fn data_integrity_flags_an_orphan_under_an_undeclared_field() {
+        let (dir, file) = project();
+        // The project declares `^books(id).title`; seed an extra `^books(1).sticker`
+        // the schema does not declare, so the scan flags it as an orphan.
+        let store_path = dir.path().join("data").join("marrow.redb");
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        {
+            let mut store = RedbStore::open(&store_path).unwrap();
+            let title = encode_path(&[
+                PathSegment::Root("books".to_string()),
+                PathSegment::RecordKey(SavedKey::Int(1)),
+                PathSegment::Field("title".to_string()),
+            ]);
+            store.write(&title, b"Mort".to_vec()).unwrap();
+            let orphan = encode_path(&[
+                PathSegment::Root("books".to_string()),
+                PathSegment::RecordKey(SavedKey::Int(1)),
+                PathSegment::Field("sticker".to_string()),
+            ]);
+            store.write(&orphan, b"gold".to_vec()).unwrap();
+        }
+        let result = data_integrity(&file, true);
+        assert_eq!(result["available"], true, "{result}");
+        let findings = result["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "one orphan finding: {result}");
+        assert_eq!(findings[0]["kind"], "orphan");
+        assert_eq!(findings[0]["path"], "^books(1).sticker");
+        assert_eq!(result["truncated"], false);
+    }
+
+    #[test]
+    fn data_integrity_is_clean_on_a_matching_store() {
+        let (dir, file) = project();
+        let store_path = dir.path().join("data").join("marrow.redb");
+        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        {
+            let mut store = RedbStore::open(&store_path).unwrap();
+            let title = encode_path(&[
+                PathSegment::Root("books".to_string()),
+                PathSegment::RecordKey(SavedKey::Int(1)),
+                PathSegment::Field("title".to_string()),
+            ]);
+            store.write(&title, b"Mort".to_vec()).unwrap();
+        }
+        let result = data_integrity(&file, true);
+        assert_eq!(result["available"], true, "{result}");
+        assert!(
+            result["findings"].as_array().unwrap().is_empty(),
+            "{result}"
+        );
     }
 
     #[test]

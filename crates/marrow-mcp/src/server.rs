@@ -137,6 +137,17 @@ pub fn tools() -> Json {
             },
         },
         {
+            "name": "mw_data_integrity",
+            "description": "Scan the project's real stored data against the CURRENT schema and report every saved record the schema can no longer account for: an orphan path (a root or member the schema no longer declares) or a value that no longer decodes as its declared type. The capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs. Gated behind data access; returns a refusal envelope and reads nothing when disabled.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": string_prop("Absolute path to any .mw file inside the project."),
+                },
+                "required": ["file"],
+            },
+        },
+        {
             "name": "mw_run",
             "description": "Execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\") with positional scalar `args`. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
             "inputSchema": {
@@ -197,6 +208,10 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
             let file = required_path(arguments, "file")?;
             let path = arguments.get("path").cloned().unwrap_or_else(|| json!([]));
             Ok(mcp::saved_children(&file, path, policy.allow_data))
+        }
+        "mw_data_integrity" => {
+            let file = required_path(arguments, "file")?;
+            Ok(mcp::data_integrity(&file, policy.allow_data))
         }
         "mw_run" => {
             let file = required_path(arguments, "file")?;
@@ -272,6 +287,7 @@ mod tests {
             "mw_saved_roots",
             "mw_saved_get",
             "mw_saved_children",
+            "mw_data_integrity",
             "mw_run",
         ] {
             assert!(
@@ -301,6 +317,14 @@ mod tests {
         // A nonexistent file is fine: the gate is checked before any project load,
         // so the refusal envelope comes back without touching the filesystem.
         let result = call("mw_saved_roots", &json!({ "file": "/nope/x.mw" }), policy).unwrap();
+        assert_eq!(result["dataAccess"], "disabled");
+        // The schema-impact advisory reads the store, so it is gated the same way.
+        let result = call(
+            "mw_data_integrity",
+            &json!({ "file": "/nope/x.mw" }),
+            policy,
+        )
+        .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
     }
 
