@@ -53,6 +53,8 @@
   },
   "scripts": {
     "compile": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "compile:release": "esbuild ./src/extension.ts --bundle --minify --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "vscode:prepublish": "npm run compile:release",
     "check": "tsc --noEmit"
   },
   "dependencies": {

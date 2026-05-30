@@ -32,3 +32,13 @@ marrow-project = { path = "../marrow/crates/marrow-project" }
 # and `Position` without a conversion layer. Bump in lockstep with tower-lsp.
 lsp-types = "=0.94.1"
 tower-lsp = "0.20"
+
+# The extension launches this binary on every editor session, so the shipped build
+# is optimized for fast startup and fast responses (dev builds use `dev`). `strip`
+# keeps the binary small to load; panics stay unwinding so a faulty request cannot
+# abort the whole server.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
