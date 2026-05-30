@@ -1,30 +1,70 @@
 # Marrow for VSCode
 
-Language support for the Marrow `.mw` language. This extension is a thin launcher: it ships
-the TextMate grammar and editor configuration, and it starts the `marrow-lsp` server, which
-provides all language intelligence (diagnostics, hover, navigation, and the rest). No parsing
-or language logic lives in this extension.
+Language support for the Marrow `.mw` language. The extension is a thin launcher: it ships
+the TextMate grammar, the editor configuration, the Data Explorer view, and the debug wiring,
+and it starts the bundled `marrow-lsp` language server and `marrow-dap` debug adapter. All
+language intelligence — parsing, checking, typing, schema, and store access — lives in the
+Rust binaries. No parsing or position math runs in TypeScript.
 
 ## Features
 
-- Syntax highlighting for `.mw` files.
-- Indentation-aware editing (comments, brackets, on-enter rules).
-- Launches and talks to the `marrow-lsp` language server over stdio.
+- **Diagnostics** — parse, type, and schema errors reported as you edit.
+- **Hover** — type and documentation on hover, including **live data values** read from the
+  project's durable store when one is available.
+- **Completion** — context-aware completion of names in scope.
+- **Document & workspace symbols** — outline a single `.mw` file and search symbols across the
+  whole project.
+- **Go to definition** — jump from a use to its binding.
+- **Find references** — list every use of a symbol.
+- **Rename** — data-safe rename that refuses edits that would diverge from the persisted store
+  schema, so renames never silently break durable data.
+- **Semantic tokens** — semantic highlighting layered over the TextMate grammar.
+- **Formatting** — format a `.mw` document.
+- **CodeLens** — a live **record-count** lens above declarations backed by stored data.
+- **Marrow Data Explorer** — a dedicated view (Activity Bar) that browses the project's durable
+  data, with values and types resolved lazily as rows become visible. Refreshes automatically
+  when `marrow.json` is saved, and on demand from the view title.
+- **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
+  `.mw` entry, step, set breakpoints, inspect variables, and read a live `^` durable-data scope
+  that surfaces the project's persisted values alongside ordinary locals.
 
-## Server binary
+## Requirements
 
-The extension resolves the server in this order:
+- **VSCode 1.85+**.
+- A **Marrow project**: a directory containing a `marrow.json`. The extension activates on
+  `.mw` files and on workspaces that contain a `marrow.json`.
 
-1. The `marrow.server.path` setting, if set to an absolute path.
-2. The bundled binary at `server/marrow-lsp` inside the extension.
-3. The local dev build at `target/debug/marrow-lsp` in the workspace checkout.
+The release `.vsix` for your platform **bundles** the `marrow-lsp` and `marrow-dap` binaries,
+so no separate install or Rust toolchain is required.
 
-For local development, build the server in the `marrow-lsp` repo so the dev path resolves.
+## How the extension finds the server binary
+
+Both the language server (`marrow-lsp`) and the debug adapter (`marrow-dap`) are resolved the
+same way, in order, with the first that exists on disk winning:
+
+1. The explicit setting — `marrow.server.path` for the server, `marrow.dap.path` for the debug
+   adapter — when set to an absolute path. An override is always authoritative.
+2. The **bundled** binary shipped inside the extension at `server/marrow-lsp` /
+   `server/marrow-dap`. This is what a Marketplace/`.vsix` install uses.
+3. A local **dev build** at `target/debug/<binary>` relative to the extension checkout, for
+   working on the extension from a source tree.
 
 ## Settings
 
-- `marrow.server.path`: absolute path to the `marrow-lsp` binary. Overrides the bundled and
+- `marrow.server.path` — absolute path to the `marrow-lsp` binary. Overrides the bundled and
   dev locations.
+- `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
+  bundled and dev locations.
+
+## Known limitations
+
+- The bundled binaries are **platform-specific**. Each release `.vsix` targets one platform
+  (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`); install the one that
+  matches your machine, or point `marrow.server.path` / `marrow.dap.path` at your own build.
+- Live data values, the record-count CodeLens, and the Data Explorer require a readable durable
+  store. A busy or missing store is treated as "unavailable" and simply omits live values rather
+  than reporting an error.
+- Debugging is **statement-level** (not expression-level stepping).
 
 ## Development
 
@@ -32,4 +72,8 @@ For local development, build the server in the `marrow-lsp` repo so the dev path
 npm install
 npm run compile   # esbuild bundle to out/extension.js
 npm run check     # tsc --noEmit typecheck
+npm run bundle    # build the two release binaries into ./server/
+npm run package   # minified compile + bundle + vsce package for this platform
 ```
+
+See `CHANGELOG.md` for release notes.

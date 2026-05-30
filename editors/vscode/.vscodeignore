@@ -1,8 +1,24 @@
+# Ship only what a user needs to run the extension. Everything else — source,
+# build inputs, dev config, and tooling — is excluded so the .vsix stays small
+# and contains no development cruft. The bundled release binaries (server/**),
+# the grammar (syntaxes/**), the compiled bundle (out/extension.js), and the
+# user-facing docs are the entire payload.
+
+# Source and build inputs.
+src/**
+**/*.ts
+**/*.map
+tsconfig.json
+
+# Dependencies (the extension is a single esbuild bundle; nothing is required at runtime).
+node_modules/**
+package-lock.json
+
+# Dev config and tooling.
 .vscode/**
 .vscodeignore
-src/**
-tsconfig.json
-**/*.map
-**/*.ts
-node_modules/**
 .gitignore
+scripts/**
+
+# Any stray packaged artifact.
+*.vsix
