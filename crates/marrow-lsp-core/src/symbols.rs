@@ -1,17 +1,17 @@
 //! Document and workspace symbols from a parsed file and a checked program.
 //!
 //! Document symbols are the outline of one file: a [`DocumentSymbol`] per
-//! declaration (constant, resource, function), with a resource's fields, groups,
-//! and indexes nested beneath it and groups recursing. Workspace symbols flatten
-//! every checked module's functions, resources, and constants into a project-wide
-//! list an editor's "go to symbol in workspace" searches. Both read only the
-//! parse and the checked program; nothing here re-parses or re-checks.
+//! declaration (constant, enum, resource, function), with enum members and resource
+//! members nested beneath their parents. Workspace symbols flatten every checked
+//! module's functions, resources, enums, and constants into a project-wide list an
+//! editor's "go to symbol in workspace" searches. Both read only the parse and the
+//! checked program; nothing here re-parses or re-checks.
 
 use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
 use marrow_check::CheckedProgram;
 use marrow_syntax::{
-    Declaration, FieldDecl, FunctionDecl, GroupDecl, IndexDecl, ResourceDecl, ResourceMember,
-    SourceFile, SourceSpan,
+    Declaration, EnumDecl, EnumMember, FieldDecl, FunctionDecl, GroupDecl, IndexDecl, ResourceDecl,
+    ResourceMember, SourceFile, SourceSpan,
 };
 
 use crate::positions::LineIndex;
@@ -46,8 +46,36 @@ fn declaration_symbol(declaration: &Declaration, index: &LineIndex) -> DocumentS
             index,
             None,
         ),
+        Declaration::Enum(enum_decl) => enum_symbol(enum_decl, index),
         Declaration::Resource(resource) => resource_symbol(resource, index),
     }
+}
+
+fn enum_symbol(enum_decl: &EnumDecl, index: &LineIndex) -> DocumentSymbol {
+    let children = enum_decl
+        .members
+        .iter()
+        .map(|member| enum_member_symbol(member, index))
+        .collect();
+    symbol(
+        &enum_decl.name,
+        None,
+        SymbolKind::ENUM,
+        enum_decl.span,
+        index,
+        Some(children),
+    )
+}
+
+fn enum_member_symbol(member: &EnumMember, index: &LineIndex) -> DocumentSymbol {
+    symbol(
+        &member.name,
+        None,
+        SymbolKind::ENUM_MEMBER,
+        member.span,
+        index,
+        None,
+    )
 }
 
 fn resource_symbol(resource: &ResourceDecl, index: &LineIndex) -> DocumentSymbol {
@@ -167,7 +195,7 @@ fn function_signature(function: &FunctionDecl) -> String {
     }
 }
 
-/// Every checked module's functions, resources, and constants as a flat,
+/// Every checked module's functions, resources, enums, and constants as a flat,
 /// project-wide list for "go to symbol in workspace". Each symbol is located by
 /// the `file://` URL of its module's source file and the declaration's range,
 /// computed from that file's on-disk text; a file whose URL or text is
@@ -205,6 +233,18 @@ pub fn workspace_symbols(program: &CheckedProgram) -> Vec<SymbolInformation> {
             symbols.push(flat_symbol(
                 &resource.name,
                 SymbolKind::STRUCT,
+                &url,
+                module.span,
+                &index,
+                &module.name,
+            ));
+        }
+        for enum_schema in &module.enums {
+            // Enum schemas carry their name but not their declaration span; the
+            // module span locates them well enough for a flat jump target.
+            symbols.push(flat_symbol(
+                &enum_schema.name,
+                SymbolKind::ENUM,
                 &url,
                 module.span,
                 &index,
@@ -324,6 +364,33 @@ resource Book at ^books(id: int)
         assert_eq!(symbols[1].detail.as_deref(), Some("(n: int): int"));
     }
 
+    #[test]
+    fn document_symbols_list_an_enum_with_members() {
+        let source = "\
+module a
+
+enum Status
+    active
+    archived
+";
+        let index = LineIndex::new(source);
+        let symbols = document_symbols(&parse(source), &index);
+
+        assert_eq!(symbols.len(), 1);
+        let status = &symbols[0];
+        assert_eq!(status.name, "Status");
+        assert_eq!(status.kind, SymbolKind::ENUM);
+
+        let children = status.children.as_ref().expect("enum has members");
+        let names: Vec<&str> = children.iter().map(|child| child.name.as_str()).collect();
+        assert_eq!(names, ["active", "archived"]);
+        assert!(
+            children
+                .iter()
+                .all(|child| child.kind == SymbolKind::ENUM_MEMBER)
+        );
+    }
+
     /// Analyze a one-file project on disk so the checked program has a module with
     /// real `source_file` paths for workspace symbols to locate.
     fn analyze(source: &str) -> CheckedProgram {
@@ -346,6 +413,10 @@ module a
 
 const LIMIT: int = 10
 
+enum Status
+    active
+    archived
+
 resource Book at ^books(id: int)
     required title: string
 
@@ -361,6 +432,7 @@ pub fn add(title: string): Book::Id
             symbols.iter().map(|s| (s.name.as_str(), s.kind)).collect();
         assert_eq!(by_name.get("add"), Some(&SymbolKind::FUNCTION));
         assert_eq!(by_name.get("Book"), Some(&SymbolKind::STRUCT));
+        assert_eq!(by_name.get("Status"), Some(&SymbolKind::ENUM));
         assert_eq!(by_name.get("LIMIT"), Some(&SymbolKind::CONSTANT));
 
         // Every symbol is located in module `a` by a `file://` URL.

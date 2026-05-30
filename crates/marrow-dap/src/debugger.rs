@@ -296,6 +296,7 @@ fn terminated() -> RuntimeError {
         message: "run terminated by the debugger".to_string(),
         span: marrow_syntax::SourceSpan::default(),
         throw: None,
+        origin: None,
     }
 }
 

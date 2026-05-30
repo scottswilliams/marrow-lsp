@@ -270,12 +270,16 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let url = params.text_document.uri;
+        let path = url_to_path(&url);
         {
             let mut state = self.state.lock().await;
             state.documents.close(&url);
         }
         // A closed buffer's problems no longer apply to the editor's view.
         self.client.publish_diagnostics(url, Vec::new(), None).await;
+        if let Some(path) = path {
+            self.schedule_recompute(path);
+        }
     }
 
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
@@ -451,7 +455,7 @@ impl LanguageServer for Backend {
             // nothing. A saved-data-backed symbol is refused with a clear message so
             // the user learns renaming it would orphan stored records.
             Err(RenameError::NoSymbol) => Ok(None),
-            Err(error @ RenameError::SavedDataBacked { .. }) => {
+            Err(error @ (RenameError::SavedDataBacked { .. } | RenameError::InvalidName)) => {
                 Err(jsonrpc::Error::invalid_params(error.message()))
             }
         }

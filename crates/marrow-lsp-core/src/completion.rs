@@ -13,7 +13,7 @@ use std::path::Path;
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use marrow_check::{CheckedModule, CheckedProgram, scope_at};
-use marrow_schema::{Element, Node, ResourceSchema, stdlib};
+use marrow_schema::{Element, EnumSchema, Node, ResourceSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
 
 use crate::types::render_type;
@@ -39,6 +39,7 @@ const KEYWORDS: &[&str] = &[
     "catch",
     "finally",
     "throw",
+    "match",
     "true",
     "false",
     "not",
@@ -325,8 +326,8 @@ fn saved_index_completions(program: &CheckedProgram, root: &str) -> Vec<Completi
         .collect()
 }
 
-/// What `qualifier::` exposes: a resource's `Id`, a used module's public
-/// functions and constants, or a `std` module's ops.
+/// What `qualifier::` exposes: a resource's `Id`, an enum's members, a used
+/// module's public functions and constants, or a `std` module's ops.
 fn namespace_completions(
     program: &CheckedProgram,
     file: &Path,
@@ -345,6 +346,10 @@ fn namespace_completions(
         if resources(program).any(|resource| &resource.name == name) {
             return vec![item("Id", CompletionItemKind::CLASS).detail(format!("{name}::Id"))];
         }
+        // An enum name exposes its member literals.
+        if let Some(enum_schema) = enum_by_name(program, name) {
+            return enum_member_completions(enum_schema);
+        }
         // A used module exposes its public functions and constants.
         if let Some(module) = module_named(program, file, name) {
             return module_member_completions(module);
@@ -359,6 +364,19 @@ fn std_module_completions(module: &str) -> Vec<CompletionItem> {
         .iter()
         .filter(|op| op.module == module)
         .map(|op| item(op.op, CompletionItemKind::FUNCTION).detail(std_signature(op)))
+        .collect()
+}
+
+/// The members of an enum, in declaration order.
+fn enum_member_completions(enum_schema: &EnumSchema) -> Vec<CompletionItem> {
+    enum_schema
+        .members
+        .iter()
+        .map(|member| {
+            item(&member.name, CompletionItemKind::ENUM_MEMBER)
+                .detail(enum_schema.name.clone())
+                .docs_from(&member.docs)
+        })
         .collect()
 }
 
@@ -381,8 +399,8 @@ fn module_member_completions(module: &CheckedModule) -> Vec<CompletionItem> {
     items
 }
 
-/// Type-position completions: the built-in type names plus every resource name
-/// and its `::Id` identity.
+/// Type-position completions: the built-in type names plus every resource name,
+/// resource identity, and enum name.
 fn type_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
     let mut items: Vec<CompletionItem> = TYPE_NAMES
         .iter()
@@ -393,6 +411,13 @@ fn type_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
         items.push(
             item(&format!("{}::Id", resource.name), CompletionItemKind::CLASS)
                 .detail("identity".to_string()),
+        );
+    }
+    for enum_schema in enums(program) {
+        items.push(
+            item(&enum_schema.name, CompletionItemKind::ENUM)
+                .detail("enum".to_string())
+                .docs_from(&enum_schema.docs),
         );
     }
     dedup(items)
@@ -425,6 +450,19 @@ fn resources(program: &CheckedProgram) -> impl Iterator<Item = &ResourceSchema> 
         .modules
         .iter()
         .flat_map(|module| module.resources.iter())
+}
+
+/// Every enum schema declared across all modules of the program.
+fn enums(program: &CheckedProgram) -> impl Iterator<Item = &EnumSchema> {
+    program
+        .modules
+        .iter()
+        .flat_map(|module| module.enums.iter())
+}
+
+/// The first enum named `name`, searched across all modules.
+fn enum_by_name<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a EnumSchema> {
+    enums(program).find(|enum_schema| enum_schema.name == name)
 }
 
 /// The resource whose saved root is `root`, searched across all modules. The
@@ -634,6 +672,10 @@ resource Book at ^books(id: int)
 
     index byShelf(shelf, id)
 
+enum Status
+    active
+    archived
+
 pub fn titleOf(id: Book::Id): string
     return ^books(id).title
 
@@ -763,6 +805,10 @@ pub fn run(count: int): int
             "a keyword, got {labels:?}"
         );
         assert!(
+            labels.contains(&"match".to_string()),
+            "a match keyword, got {labels:?}"
+        );
+        assert!(
             labels.contains(&"exists".to_string()),
             "a builtin, got {labels:?}"
         );
@@ -777,6 +823,21 @@ pub fn run(count: int): int
             "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
         );
         assert_eq!(labels, vec!["Id".to_string()], "`Book::` offers only `Id`");
+    }
+
+    #[test]
+    fn enum_namespace_lists_members() {
+        let (program, file) = project();
+        let labels = complete(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x = Status::|\n",
+        );
+        assert_eq!(
+            labels,
+            vec!["active".to_string(), "archived".to_string()],
+            "`Status::` offers enum members"
+        );
     }
 
     #[test]
@@ -834,6 +895,10 @@ pub fn run(count: int): int
         assert!(
             labels.contains(&"Book::Id".to_string()),
             "a resource identity, got {labels:?}"
+        );
+        assert!(
+            labels.contains(&"Status".to_string()),
+            "an enum type, got {labels:?}"
         );
     }
 

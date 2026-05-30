@@ -77,7 +77,8 @@ fn statement_span(statement: &Statement) -> marrow_syntax::SourceSpan {
         | Statement::For { span, .. }
         | Statement::Transaction { span, .. }
         | Statement::Lock { span, .. }
-        | Statement::Try { span, .. } => *span,
+        | Statement::Try { span, .. }
+        | Statement::Match { span, .. } => *span,
     }
 }
 
@@ -117,6 +118,7 @@ fn nested_blocks(statement: &Statement) -> Vec<&Block> {
             }
             blocks
         }
+        Statement::Match { arms, .. } => arms.iter().map(|arm| &arm.block).collect(),
         _ => Vec::new(),
     }
 }
@@ -212,5 +214,27 @@ mod tests {
         let lines = statement_lines(&program, &file);
         // Line 3 is the signature; the first statement is the return on line 4.
         assert_eq!(resolve_line(&lines, 3), Some(4));
+    }
+
+    #[test]
+    fn statement_lines_include_match_arms() {
+        let source = "module m\n\
+                       \n\
+                       enum Status\n\
+                       \x20   active\n\
+                       \x20   archived\n\
+                       \n\
+                       pub fn f(status: Status): int\n\
+                       \x20   match status\n\
+                       \x20       active\n\
+                       \x20           return 1\n\
+                       \x20       archived\n\
+                       \x20           return 2\n";
+        let (program, file, _dir) = analyze(source);
+        let lines = statement_lines(&program, &file);
+
+        assert!(lines.contains(&8), "{lines:?}");
+        assert!(lines.contains(&10), "{lines:?}");
+        assert!(lines.contains(&12), "{lines:?}");
     }
 }

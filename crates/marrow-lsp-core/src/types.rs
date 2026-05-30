@@ -10,14 +10,41 @@ use marrow_check::MarrowType;
 
 /// The canonical `.mw` spelling of a checker type. Mirrors `marrow_schema::Type`'s
 /// `Display` for the storable types and names the checker-only forms (`Error`, a
-/// same-module resource, `unknown`) as they are written in source.
+/// same-module resource or enum, `unknown`) as they are written in source.
 pub(crate) fn render_type(ty: &MarrowType) -> String {
     match ty {
         MarrowType::Primitive(scalar) => scalar.name().to_string(),
         MarrowType::Error => "Error".to_string(),
         MarrowType::Resource(name) => name.clone(),
         MarrowType::Identity(resource) => format!("{resource}::Id"),
+        MarrowType::Enum { module, name } if module.is_empty() => name.clone(),
+        MarrowType::Enum { module, name } => format!("{module}::{name}"),
         MarrowType::Sequence(element) => format!("sequence[{}]", render_type(element)),
         MarrowType::Unknown => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_types_render_with_their_owner_when_qualified() {
+        let ty = MarrowType::Enum {
+            module: "shelf::state".to_string(),
+            name: "Status".to_string(),
+        };
+
+        assert_eq!(render_type(&ty), "shelf::state::Status");
+    }
+
+    #[test]
+    fn module_less_enum_types_render_as_the_bare_name() {
+        let ty = MarrowType::Enum {
+            module: String::new(),
+            name: "Status".to_string(),
+        };
+
+        assert_eq!(render_type(&ty), "Status");
     }
 }

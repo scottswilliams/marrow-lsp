@@ -435,6 +435,16 @@ fn walk_statement<'a>(
                 walk_block(finally, offset, found)
             }
         }
+        Statement::Match {
+            scrutinee, arms, ..
+        } => {
+            if let Some(scrutinee) = scrutinee {
+                walk_expr(scrutinee, offset, found)
+            }
+            for arm in arms {
+                walk_block(&arm.block, offset, found);
+            }
+        }
         Statement::Break { .. } | Statement::Continue { .. } => {}
     }
 }
@@ -891,6 +901,38 @@ pub fn f(): string
         let offset = source.rfind("^books").unwrap();
         let segments = saved_path_at(&file, &program, offset).expect("a saved path");
         assert_eq!(segments.len(), 3, "the whole path resolves from the caret");
+    }
+
+    #[test]
+    fn saved_path_at_finds_paths_inside_match_arms() {
+        let source = "\
+module shelf
+
+enum Status
+    active
+    archived
+
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn f(status: Status): string
+    match status
+        active
+            return ^books(1).title
+        archived
+            return \"archived\"
+";
+        let (program, file) = check_source(source);
+        let offset = source.find(").title").unwrap() + ").".len() + 1;
+        let segments = saved_path_at(&file, &program, offset).expect("a saved path in a match arm");
+        assert_eq!(
+            segments,
+            vec![
+                PathSegment::Root("books".to_string()),
+                PathSegment::RecordKey(SavedKey::Int(1)),
+                PathSegment::Field("title".to_string()),
+            ]
+        );
     }
 
     #[test]
