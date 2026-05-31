@@ -3,10 +3,11 @@
 //! Most navigation reads the checker's [`BindingIndex`](marrow_check::BindingIndex)
 //! — the one resolution layer that maps every identifier use to the definition it
 //! names, respecting lexical scope, `use` aliases, and the saved-data schema.
-//! Go-to-definition also has a small syntax-backed fallback for saved roots, since
-//! `^root` names durable data rather than a checker symbol. References and rename
-//! stay binding-index driven, and rename applies the index's safety classification
-//! so a rename that would orphan stored data is refused rather than performed.
+//! Go-to-definition also has small syntax-backed fallbacks for saved roots and
+//! module path prefixes, since those name durable data or namespaces rather than
+//! checker symbols. References and rename stay binding-index driven, and rename
+//! applies the index's safety classification so a rename that would orphan stored
+//! data is refused rather than performed.
 //!
 //! Spans into a file are mapped through that file's [`LineIndex`]. A caller supplies
 //! the index per file (the open buffer's when present, else one built from disk),
@@ -15,8 +16,15 @@
 use std::path::Path;
 
 use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
-use marrow_check::{BindingIndex, RenameSafety, SymbolRef};
-use marrow_syntax::{Declaration, SourceSpan, TokenKind, lex_source};
+use marrow_check::{
+    BindingIndex, DefItem, RenameSafety, Resolution, ResolvableKind, SymbolKind, SymbolRef,
+    build_alias_map, expand_module_alias, resolve,
+};
+use marrow_schema::stdlib;
+use marrow_syntax::{
+    Declaration, Keyword, ResourceMember, SourceFile, SourceSpan, Statement, Token, TokenKind,
+    TypeRef, lex_source,
+};
 
 use crate::positions::LineIndex;
 
@@ -123,6 +131,11 @@ pub fn definition(
 ) -> Option<Location> {
     if let Some(location) = saved_root_definition(snapshot, indices, file, offset) {
         return Some(location);
+    }
+    match module_path_definition(snapshot, index, indices, file, offset) {
+        Some(ModulePathDefinition::Location(location)) => return Some(location),
+        Some(ModulePathDefinition::NoDefinition) => return None,
+        None => {}
     }
     let symbol = index.definition(file, offset)?;
     symbol_location(&symbol, indices)
@@ -333,6 +346,467 @@ fn saved_root_identifier_span(
 
 fn span_covers(span: SourceSpan, offset: usize) -> bool {
     span.start_byte <= offset && offset <= span.end_byte
+}
+
+fn module_path_definition(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    index: &BindingIndex,
+    indices: &impl FileIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<ModulePathDefinition> {
+    let analyzed = snapshot
+        .files
+        .iter()
+        .find(|analyzed| analyzed.path == file)?;
+    let in_type_annotation = type_annotation_at(&analyzed.parsed.file, offset);
+    let path = qualified_path_at(&analyzed.source, offset, in_type_annotation)?;
+    if path.declaration.is_none()
+        && let Some(symbol) = index.definition(file, offset)
+        && path.binding_index_should_win(symbol.kind)
+    {
+        return None;
+    }
+    if path.declaration.is_none()
+        && in_type_annotation
+        && let Some(location) = resource_identity_path_definition(snapshot, indices, file, &path)
+    {
+        return Some(ModulePathDefinition::Location(location));
+    }
+    let module_name = match path.declaration {
+        Some(ModulePathDeclaration::Module | ModulePathDeclaration::Use) => {
+            path.segments[..=path.cursor_segment].join("::")
+        }
+        None => {
+            if path.cursor_segment + 1 == path.segments.len() {
+                return None;
+            }
+            let prefix = path.segments[..=path.cursor_segment].join("::");
+            let current = snapshot
+                .program
+                .modules
+                .iter()
+                .find(|module| module.source_file == file)?;
+            let aliases = build_alias_map(&current.imports);
+            expand_module_alias(&prefix, &aliases)
+        }
+    };
+    if is_stdlib_module_name(&module_name) {
+        return Some(ModulePathDefinition::NoDefinition);
+    }
+    Some(
+        match module_declaration_location(snapshot, indices, &module_name) {
+            Some(location) => ModulePathDefinition::Location(location),
+            None => ModulePathDefinition::NoDefinition,
+        },
+    )
+}
+
+enum ModulePathDefinition {
+    Location(Location),
+    NoDefinition,
+}
+
+struct QualifiedPath {
+    segments: Vec<String>,
+    cursor_segment: usize,
+    declaration: Option<ModulePathDeclaration>,
+}
+
+impl QualifiedPath {
+    fn binding_index_should_win(&self, kind: SymbolKind) -> bool {
+        matches!(
+            kind,
+            SymbolKind::Enum | SymbolKind::EnumMember | SymbolKind::ResourceIdentity
+        )
+    }
+}
+
+fn is_stdlib_module_name(name: &str) -> bool {
+    name.strip_prefix("std::")
+        .is_some_and(|module| stdlib::all().iter().any(|op| op.module == module))
+}
+
+#[derive(Clone, Copy)]
+enum ModulePathDeclaration {
+    Module,
+    Use,
+}
+
+fn qualified_path_at(
+    source: &str,
+    offset: usize,
+    in_type_annotation: bool,
+) -> Option<QualifiedPath> {
+    let tokens = lex_source(source).tokens;
+    let cursor = tokens
+        .iter()
+        .position(|token| is_possible_path_segment(token) && span_covers(token.span, offset))?;
+
+    let mut first = cursor;
+    while first >= 2
+        && tokens[first - 1].kind == TokenKind::DoubleColon
+        && is_possible_path_segment(&tokens[first - 2])
+    {
+        first -= 2;
+    }
+
+    let mut last = cursor;
+    while last + 2 < tokens.len()
+        && tokens[last + 1].kind == TokenKind::DoubleColon
+        && is_possible_path_segment(&tokens[last + 2])
+    {
+        last += 2;
+    }
+
+    let mut segment_tokens = Vec::new();
+    let mut index = first;
+    loop {
+        if !is_possible_path_segment(&tokens[index]) {
+            return None;
+        }
+        segment_tokens.push(index);
+        if index == last {
+            break;
+        }
+        if index + 2 > last || tokens[index + 1].kind != TokenKind::DoubleColon {
+            return None;
+        }
+        index += 2;
+    }
+
+    let cursor_segment = segment_tokens
+        .iter()
+        .position(|segment| *segment == cursor)?;
+    let declaration = path_declaration(&tokens, first);
+    if segment_tokens
+        .iter()
+        .any(|segment| !is_path_segment(&tokens[*segment], declaration, in_type_annotation))
+    {
+        return None;
+    }
+    let segments = segment_tokens
+        .iter()
+        .map(|segment| tokens[*segment].text(source).to_string())
+        .collect();
+    Some(QualifiedPath {
+        segments,
+        cursor_segment,
+        declaration,
+    })
+}
+
+fn is_possible_path_segment(token: &Token) -> bool {
+    matches!(token.kind, TokenKind::Identifier | TokenKind::Keyword(_))
+}
+
+fn is_path_segment(
+    token: &Token,
+    declaration: Option<ModulePathDeclaration>,
+    in_type_annotation: bool,
+) -> bool {
+    match token.kind {
+        TokenKind::Identifier => true,
+        TokenKind::Keyword(keyword) => {
+            declaration.is_some() || in_type_annotation || is_callable_path_keyword(keyword)
+        }
+        _ => false,
+    }
+}
+
+fn is_callable_path_keyword(keyword: Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Int
+            | Keyword::Decimal
+            | Keyword::Bool
+            | Keyword::String
+            | Keyword::Bytes
+            | Keyword::Date
+            | Keyword::Instant
+            | Keyword::Duration
+            | Keyword::ErrorCode
+            | Keyword::Error
+    )
+}
+
+fn path_declaration(tokens: &[Token], first_segment: usize) -> Option<ModulePathDeclaration> {
+    match tokens.get(first_segment.checked_sub(1)?)?.kind {
+        TokenKind::Keyword(Keyword::Module) => Some(ModulePathDeclaration::Module),
+        TokenKind::Keyword(Keyword::Use) => Some(ModulePathDeclaration::Use),
+        _ => None,
+    }
+}
+
+fn type_annotation_at(file: &SourceFile, offset: usize) -> bool {
+    file.declarations
+        .iter()
+        .any(|declaration| declaration_type_annotation_at(declaration, offset))
+}
+
+fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> bool {
+    match declaration {
+        Declaration::Const(declaration) => declaration
+            .ty
+            .as_ref()
+            .is_some_and(|ty| type_ref_covers(ty, offset)),
+        Declaration::Resource(resource) => {
+            resource
+                .members
+                .iter()
+                .any(|member| resource_member_type_annotation_at(member, offset))
+                || resource.store.as_ref().is_some_and(|store| {
+                    store
+                        .keys
+                        .iter()
+                        .any(|key| type_ref_covers(&key.ty, offset))
+                })
+        }
+        Declaration::Function(function) => {
+            function
+                .params
+                .iter()
+                .any(|param| type_ref_covers(&param.ty, offset))
+                || function
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|ty| type_ref_covers(ty, offset))
+                || block_type_annotation_at(&function.body, offset)
+        }
+        Declaration::Enum(_) => false,
+    }
+}
+
+fn resource_member_type_annotation_at(member: &ResourceMember, offset: usize) -> bool {
+    match member {
+        ResourceMember::Field(field) => {
+            type_ref_covers(&field.ty, offset)
+                || field
+                    .keys
+                    .iter()
+                    .any(|key| type_ref_covers(&key.ty, offset))
+        }
+        ResourceMember::Group(group) => {
+            group
+                .keys
+                .iter()
+                .any(|key| type_ref_covers(&key.ty, offset))
+                || group
+                    .members
+                    .iter()
+                    .any(|member| resource_member_type_annotation_at(member, offset))
+        }
+        ResourceMember::Index(_) => false,
+    }
+}
+
+fn block_type_annotation_at(block: &marrow_syntax::Block, offset: usize) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|statement| statement_type_annotation_at(statement, offset))
+}
+
+fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
+    match statement {
+        Statement::Const { ty, .. } => ty.as_ref().is_some_and(|ty| type_ref_covers(ty, offset)),
+        Statement::Var { keys, ty, .. } => {
+            keys.iter().any(|key| type_ref_covers(&key.ty, offset))
+                || ty.as_ref().is_some_and(|ty| type_ref_covers(ty, offset))
+        }
+        Statement::If {
+            then_block,
+            else_ifs,
+            else_block,
+            ..
+        } => {
+            block_type_annotation_at(then_block, offset)
+                || else_ifs
+                    .iter()
+                    .any(|else_if| block_type_annotation_at(&else_if.block, offset))
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_type_annotation_at(block, offset))
+        }
+        Statement::While { body, .. }
+        | Statement::For { body, .. }
+        | Statement::Transaction { body, .. }
+        | Statement::Lock { body, .. } => block_type_annotation_at(body, offset),
+        Statement::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            block_type_annotation_at(body, offset)
+                || catch.as_ref().is_some_and(|catch| {
+                    catch
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| type_ref_covers(ty, offset))
+                        || block_type_annotation_at(&catch.block, offset)
+                })
+                || finally
+                    .as_ref()
+                    .is_some_and(|block| block_type_annotation_at(block, offset))
+        }
+        Statement::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| block_type_annotation_at(&arm.block, offset)),
+        Statement::Assign { .. }
+        | Statement::Delete { .. }
+        | Statement::Merge { .. }
+        | Statement::Return { .. }
+        | Statement::Break { .. }
+        | Statement::Continue { .. }
+        | Statement::Throw { .. }
+        | Statement::Expr { .. } => false,
+    }
+}
+
+fn type_ref_covers(ty: &TypeRef, offset: usize) -> bool {
+    span_covers(ty.span, offset)
+}
+
+fn module_declaration_location(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    indices: &impl FileIndex,
+    module_name: &str,
+) -> Option<Location> {
+    let module = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.name == module_name)?;
+    let line_index = indices.index_for(&module.source_file)?;
+    let url = Url::from_file_path(&module.source_file).ok()?;
+    let leaf = module.name.rsplit("::").next().unwrap_or(&module.name);
+    let range = last_name_in_span(
+        line_index.text(),
+        module.span.start_byte,
+        module.span.end_byte,
+        leaf,
+    )
+    .map(|(start, end)| line_index.range(start, end))
+    .unwrap_or_else(|| line_index.range(module.span.start_byte, module.span.end_byte));
+    Some(Location { uri: url, range })
+}
+
+fn resource_identity_path_definition(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    indices: &impl FileIndex,
+    file: &Path,
+    path: &QualifiedPath,
+) -> Option<Location> {
+    let (id, prefix) = path.segments.split_last()?;
+    if id != "Id" || path.cursor_segment + 2 < path.segments.len() {
+        return None;
+    }
+    let current = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.source_file == file)?;
+    let (resource_name, module_segments) = prefix.split_last()?;
+    if module_segments.is_empty() {
+        let Resolution::Found(definition) = resolve(
+            &snapshot.program,
+            &current.name,
+            &path.segments,
+            ResolvableKind::ResourceIdentity,
+        ) else {
+            return None;
+        };
+        let DefItem::Resource(resource) = definition.item else {
+            return None;
+        };
+        return resource_identity_location(
+            snapshot,
+            indices,
+            &definition.module.source_file,
+            &resource.name,
+        );
+    }
+
+    let aliases = build_alias_map(&current.imports);
+    let module_name = expand_module_alias(&module_segments.join("::"), &aliases);
+    let module = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.name == module_name)?;
+    let resource = module
+        .resources
+        .iter()
+        .find(|resource| resource.name.as_str() == resource_name.as_str())?;
+    resource_identity_location(snapshot, indices, &module.source_file, &resource.name)
+}
+
+fn resource_identity_location(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    indices: &impl FileIndex,
+    file: &Path,
+    resource_name: &str,
+) -> Option<Location> {
+    let analyzed = snapshot
+        .files
+        .iter()
+        .find(|analyzed| analyzed.path == file)?;
+    for declaration in &analyzed.parsed.file.declarations {
+        let Declaration::Resource(resource) = declaration else {
+            continue;
+        };
+        if resource.name != resource_name {
+            continue;
+        }
+        let (start, end) = resource_identity_span(&analyzed.source, resource)?;
+        let line_index = indices.index_for(file)?;
+        let url = Url::from_file_path(file).ok()?;
+        return Some(Location {
+            uri: url,
+            range: line_index.range(start, end),
+        });
+    }
+    None
+}
+
+fn resource_identity_span(
+    source: &str,
+    resource: &marrow_syntax::ResourceDecl,
+) -> Option<(usize, usize)> {
+    if let Some(store) = &resource.store
+        && let Some(span) = saved_root_identifier_span(source, resource.span, &store.root)
+    {
+        return Some(span);
+    }
+    name_in_span(
+        source,
+        resource.span.start_byte,
+        resource.span.end_byte,
+        &resource.name,
+    )
+}
+
+fn last_name_in_span(text: &str, start: usize, end: usize, name: &str) -> Option<(usize, usize)> {
+    let end = end.min(text.len());
+    if start > end {
+        return None;
+    }
+    let slice = text.get(start..end)?;
+    let mut search_from = 0;
+    let mut found_range = None;
+    while let Some(found) = slice[search_from..].find(name) {
+        let abs_start = start + search_from + found;
+        let abs_end = abs_start + name.len();
+        if is_whole_word(text, abs_start, abs_end) {
+            found_range = Some((abs_start, abs_end));
+        }
+        search_from += found + 1;
+        if search_from >= slice.len() {
+            break;
+        }
+    }
+    found_range
 }
 
 /// The source spelling of a symbol's name: the identifier the checker resolved it
@@ -923,6 +1397,793 @@ fn f(): b::Status
         );
         let enum_name = offset_of(status_source, "enum Status") + "enum ".len();
         let (line, character) = line_col(status_source, enum_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_from_imported_call_jumps_to_module_declaration() {
+        let books_source = "\
+module shelf::books
+
+pub fn titleOf(): string
+    return \"Dune\"
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): string
+    return books::titleOf()
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/books.mw", books_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let books_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let prefix = offset_of(app_source, "return books::titleOf") + "return ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+            .expect("module prefix resolves to the imported module declaration");
+        let line_index = indices.0.get(books_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(books_file).unwrap());
+        assert_eq!(
+            range_text(books_source, line_index, location.range),
+            "books"
+        );
+        let module_name = offset_of(books_source, "module shelf::books") + "module shelf::".len();
+        let (line, character) = line_col(books_source, module_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_leaf_definition_from_imported_call_stays_on_binding_index() {
+        let books_source = "\
+module shelf::books
+
+pub fn titleOf(): string
+    return \"Dune\"
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): string
+    return books::titleOf()
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/books.mw", books_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let books_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let leaf = offset_of(app_source, "books::titleOf") + "books::".len();
+        let location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
+            .expect("leaf call still resolves through the binding index");
+        let line_index = indices.0.get(books_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(books_file).unwrap());
+        assert_eq!(
+            range_text(books_source, line_index, location.range),
+            "titleOf"
+        );
+        let function_name = offset_of(books_source, "fn titleOf") + "fn ".len();
+        let (line, character) = line_col(books_source, function_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_definition_from_use_leaf_jumps_to_imported_module_declaration() {
+        let books_source = "\
+module shelf::books
+
+pub fn titleOf(): string
+    return \"Dune\"
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): string
+    return books::titleOf()
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/books.mw", books_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let books_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let imported_leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
+        let location = definition(&snapshot, &index, &indices, app_file, imported_leaf + 1)
+            .expect("use leaf resolves to the imported module declaration");
+        let line_index = indices.0.get(books_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(books_file).unwrap());
+        assert_eq!(
+            range_text(books_source, line_index, location.range),
+            "books"
+        );
+        let module_name = offset_of(books_source, "module shelf::books") + "module shelf::".len();
+        let (line, character) = line_col(books_source, module_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_for_std_path_returns_none() {
+        let clock_source = "\
+module std::clock
+
+const TICK: int = 1
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::clock
+
+pub fn run(): instant
+    return std::clock::now()
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("std/clock.mw", clock_source), ("shelf/app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let std_clock = offset_of(app_source, "std::clock::now") + "std::".len();
+        let location = definition(&snapshot, &index, &indices, app_file, std_clock + 1);
+
+        assert_eq!(
+            location, None,
+            "std module prefixes must not fabricate a project location"
+        );
+    }
+
+    #[test]
+    fn module_path_prefix_definition_for_aliased_std_path_returns_none() {
+        let clock_source = "\
+module std::clock
+
+const TICK: int = 1
+";
+        let app_source = "\
+module shelf::app
+
+use std::clock
+
+pub fn run(): instant
+    return clock::now()
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("std/clock.mw", clock_source), ("shelf/app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let std_clock = offset_of(app_source, "clock::now");
+        let location = definition(&snapshot, &index, &indices, app_file, std_clock + 1);
+
+        assert_eq!(
+            location, None,
+            "aliased std module prefixes must not fabricate a project location"
+        );
+    }
+
+    #[test]
+    fn module_path_prefix_definition_allows_project_std_namespace_module() {
+        let custom_source = "\
+module std::custom
+
+pub fn tick(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+pub fn run(): int
+    return std::custom::tick()
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("std/custom.mw", custom_source), ("app.mw", app_source)]);
+        let custom_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let custom = offset_of(app_source, "std::custom::tick") + "std::".len();
+        let location = definition(&snapshot, &index, &indices, app_file, custom + 1)
+            .expect("non-stdlib std:: project module prefix should resolve");
+        let line_index = indices.0.get(custom_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(custom_file).unwrap());
+        assert_eq!(
+            range_text(custom_source, line_index, location.range),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn module_path_prefix_definition_does_not_steal_enum_literal_head() {
+        let status_module_source = "\
+module status
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+enum status
+    active
+
+pub fn run(): status
+    return status::active
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("status.mw", status_module_source), ("app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let enum_head = offset_of(app_source, "return status::active") + "return ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, enum_head + 1)
+            .expect("enum literal head resolves through the binding index");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "status");
+        let enum_name = offset_of(app_source, "enum status") + "enum ".len();
+        let (line, character) = line_col(app_source, enum_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_does_not_steal_nested_enum_literal_head() {
+        let cat_module_source = "\
+module cat
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+enum cat
+    category tiger
+        paw
+
+pub fn run(): cat
+    return cat::tiger::paw
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("cat.mw", cat_module_source), ("app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let enum_head = offset_of(app_source, "return cat::tiger::paw") + "return ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, enum_head + 1)
+            .expect("nested enum literal head resolves through the binding index");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "cat");
+        let enum_name = offset_of(app_source, "enum cat") + "enum ".len();
+        let (line, character) = line_col(app_source, enum_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_does_not_steal_nested_enum_member_segment() {
+        let tiger_module_source = "\
+module cat::tiger
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+enum cat
+    category tiger
+        paw
+
+pub fn run(): cat
+    return cat::tiger::paw
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("cat/tiger.mw", tiger_module_source),
+            ("app.mw", app_source),
+        ]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let member_segment = offset_of(app_source, "return cat::tiger::paw") + "return cat::".len();
+        let location = definition(&snapshot, &index, &indices, app_file, member_segment + 1)
+            .expect("nested enum member segment resolves through the binding index");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "tiger");
+        let member_name = offset_of(app_source, "category tiger") + "category ".len();
+        let (line, character) = line_col(app_source, member_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_does_not_steal_resource_identity_head() {
+        let book_module_source = "\
+module book
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+resource book at ^books(id: int)
+    required title: string
+
+pub fn run(): book::Id
+    return book::Id(1)
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let identity_head = offset_of(app_source, "return book::Id") + "return ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
+            .expect("resource identity head resolves through the binding index");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "books");
+        let saved_root =
+            offset_of(app_source, "resource book at ^books") + "resource book at ^".len();
+        let (line, character) = line_col(app_source, saved_root);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_does_not_steal_resource_identity_annotation_head() {
+        let book_module_source = "\
+module book
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+resource book at ^books(id: int)
+    required title: string
+
+pub fn run(): book::Id
+    return book::Id(1)
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let identity_head =
+            offset_of(app_source, "pub fn run(): book::Id") + "pub fn run(): ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
+            .expect("identity annotation should resolve as the resource identity");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "books");
+        let saved_root =
+            offset_of(app_source, "resource book at ^books") + "resource book at ^".len();
+        let (line, character) = line_col(app_source, saved_root);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_does_not_steal_imported_module_named_like_identity() {
+        let book_source = "\
+module shelf::book
+
+pub fn Id(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+use shelf::book
+
+resource book at ^books(id: int)
+    required title: string
+
+pub fn run(): int
+    return book::Id()
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("shelf/book.mw", book_source), ("app.mw", app_source)]);
+        let book_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let prefix = offset_of(app_source, "return book::Id") + "return ".len();
+        let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+            .expect("module prefix wins over the local resource identity in call position");
+        let book_index = indices.0.get(book_file).unwrap();
+        assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, book_index, prefix_location.range),
+            "book"
+        );
+
+        let leaf = offset_of(app_source, "book::Id") + "book::".len();
+        let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
+            .expect("leaf call still resolves through the binding index");
+        assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, book_index, leaf_location.range),
+            "Id"
+        );
+    }
+
+    #[test]
+    fn module_path_prefix_definition_named_argument_colon_is_not_type_annotation() {
+        let book_source = "\
+module shelf::book
+
+pub fn Id(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+use shelf::book
+
+resource book at ^books(id: int)
+    required title: string
+
+pub fn wrap(value: int): int
+    return value
+
+pub fn run(): int
+    return wrap(value: book::Id())
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("shelf/book.mw", book_source), ("app.mw", app_source)]);
+        let book_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+        let book_index = indices.0.get(book_file).unwrap();
+
+        let prefix = offset_of(app_source, "value: book::Id") + "value: ".len();
+        let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+            .expect("named argument value stays in expression context");
+        assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, book_index, prefix_location.range),
+            "book"
+        );
+
+        let leaf = offset_of(app_source, "book::Id") + "book::".len();
+        let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
+            .expect("named argument leaf call resolves through the binding index");
+        assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, book_index, leaf_location.range),
+            "Id"
+        );
+    }
+
+    #[test]
+    fn module_path_prefix_definition_resource_identity_inside_sequence_annotation() {
+        let book_module_source = "\
+module book
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+resource book at ^books(id: int)
+    required title: string
+
+pub fn run(ids: sequence[book::Id])
+    return
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let identity_head = offset_of(app_source, "sequence[book::Id]") + "sequence[".len();
+        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
+            .expect("identity inside sequence annotation resolves as the resource identity");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "books");
+        let saved_root =
+            offset_of(app_source, "resource book at ^books") + "resource book at ^".len();
+        let (line, character) = line_col(app_source, saved_root);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_prefix_definition_resource_identity_inside_var_key_annotation() {
+        let book_module_source = "\
+module book
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+resource book at ^books(id: int)
+    required title: string
+
+pub fn run()
+    var selected(book: book::Id)
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let identity_head = offset_of(app_source, "book: book::Id") + "book: ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
+            .expect("identity in var key annotation resolves as the resource identity");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "books");
+    }
+
+    #[test]
+    fn module_path_prefix_definition_resource_identity_inside_match_arm_block_annotation() {
+        let book_module_source = "\
+module book
+
+pub fn helper(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+resource book at ^books(id: int)
+    required title: string
+
+enum status
+    active
+
+pub fn run(status: status)
+    match status
+        active
+            var id: book::Id
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let identity_head = offset_of(app_source, "var id: book::Id") + "var id: ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
+            .expect("identity in match arm block annotation resolves as the resource identity");
+        let line_index = indices.0.get(app_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(range_text(app_source, line_index, location.range), "books");
+    }
+
+    #[test]
+    fn module_path_prefix_definition_qualified_resource_identity_annotation() {
+        let book_source = "\
+module shelf::lib
+
+resource Book at ^books(id: int)
+    required title: string
+";
+        let app_source = "\
+module app
+
+use shelf::lib
+
+pub fn read_full(id: shelf::lib::Book::Id): string
+    return ^books(id).title
+
+pub fn read_alias(id: lib::Book::Id): string
+    return ^books(id).title
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("shelf/lib.mw", book_source), ("app.mw", app_source)]);
+        let book_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+        let line_index = indices.0.get(book_file).unwrap();
+
+        for needle in ["shelf::lib::Book::Id", "lib::Book::Id"] {
+            let book = offset_of(app_source, needle) + needle.rfind("Book").unwrap();
+            let book_location = definition(&snapshot, &index, &indices, app_file, book + 1)
+                .expect("qualified identity resource name resolves as the resource identity");
+            assert_eq!(book_location.uri, Url::from_file_path(book_file).unwrap());
+            assert_eq!(
+                range_text(book_source, line_index, book_location.range),
+                "books"
+            );
+
+            let id = offset_of(app_source, needle) + needle.rfind("Id").unwrap();
+            let id_location = definition(&snapshot, &index, &indices, app_file, id + 1)
+                .expect("qualified identity leaf resolves as the resource identity");
+            assert_eq!(id_location.uri, Url::from_file_path(book_file).unwrap());
+            assert_eq!(
+                range_text(book_source, line_index, id_location.range),
+                "books"
+            );
+        }
+    }
+
+    #[test]
+    fn module_path_prefix_definition_resource_identity_annotation_with_keyword_module_segment() {
+        let book_source = "\
+module unknown::lib
+
+resource Book at ^books(id: int)
+    required title: string
+";
+        let app_source = "\
+module app
+
+pub fn read(id: unknown::lib::Book::Id): string
+    return ^books(id).title
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("unknown/lib.mw", book_source), ("app.mw", app_source)]);
+        let book_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+        let line_index = indices.0.get(book_file).unwrap();
+
+        let module_leaf = offset_of(app_source, "unknown::lib::Book::Id") + "unknown::".len();
+        let module_location = definition(&snapshot, &index, &indices, app_file, module_leaf + 1)
+            .expect("keyword-like module segment in a type annotation resolves to the module");
+        assert_eq!(module_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, line_index, module_location.range),
+            "lib"
+        );
+
+        let book = offset_of(app_source, "unknown::lib::Book::Id") + "unknown::lib::".len();
+        let book_location = definition(&snapshot, &index, &indices, app_file, book + 1)
+            .expect("resource name after a keyword-like module segment resolves as identity");
+        assert_eq!(book_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, line_index, book_location.range),
+            "books"
+        );
+
+        let id = offset_of(app_source, "unknown::lib::Book::Id") + "unknown::lib::Book::".len();
+        let id_location = definition(&snapshot, &index, &indices, app_file, id + 1)
+            .expect("identity leaf after a keyword-like module segment resolves as identity");
+        assert_eq!(id_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, line_index, id_location.range),
+            "books"
+        );
+    }
+
+    #[test]
+    fn module_path_prefix_definition_repeated_leaf_selects_module_leaf_segment() {
+        let foo_source = "\
+module foo::foo
+
+pub fn title(): string
+    return \"nested\"
+";
+        let app_source = "\
+module app
+
+pub fn run(): string
+    return foo::foo::title()
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("foo/foo.mw", foo_source), ("app.mw", app_source)]);
+        let foo_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let second_prefix = offset_of(app_source, "foo::foo::title") + "foo::".len();
+        let location = definition(&snapshot, &index, &indices, app_file, second_prefix + 1)
+            .expect("repeated leaf module prefix resolves to the module declaration");
+        let line_index = indices.0.get(foo_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(foo_file).unwrap());
+        assert_eq!(range_text(foo_source, line_index, location.range), "foo");
+        let module_leaf = offset_of(foo_source, "module foo::foo") + "module foo::".len();
+        let (line, character) = line_col(foo_source, module_leaf);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn module_path_namespace_only_prefix_in_fully_qualified_call_returns_none() {
+        let books_source = "\
+module shelf::books
+
+pub fn titleOf(): string
+    return \"Dune\"
+";
+        let app_source = "\
+module shelf::app
+
+pub fn run(): string
+    return shelf::books::titleOf()
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/books.mw", books_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let namespace = offset_of(app_source, "return shelf::books::titleOf") + "return ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, namespace + 1);
+
+        assert_eq!(
+            location, None,
+            "namespace-only prefixes should not fall through to the call leaf"
+        );
+    }
+
+    #[test]
+    fn module_path_prefix_definition_accepts_keyword_like_segments() {
+        let bytes_source = "\
+module shelf::bytes
+
+pub fn size(): int
+    return 1
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::bytes
+
+pub fn run(): int
+    return bytes::size()
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/bytes.mw", bytes_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let bytes_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let prefix = offset_of(app_source, "return bytes::size") + "return ".len();
+        let location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+            .expect("keyword-like module prefix resolves to the module declaration");
+        let line_index = indices.0.get(bytes_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(bytes_file).unwrap());
+        assert_eq!(
+            range_text(bytes_source, line_index, location.range),
+            "bytes"
+        );
+        let module_name = offset_of(bytes_source, "module shelf::bytes") + "module shelf::".len();
+        let (line, character) = line_col(bytes_source, module_name);
         assert_eq!(location.range.start.line, line);
         assert_eq!(location.range.start.character, character);
     }
