@@ -361,6 +361,11 @@ fn module_path_definition(
         .find(|analyzed| analyzed.path == file)?;
     let in_type_annotation = type_annotation_at(&analyzed.parsed.file, offset);
     let path = qualified_path_at(&analyzed.source, offset, in_type_annotation)?;
+    let function_location = if path.declaration.is_none() && !in_type_annotation {
+        function_path_definition(snapshot, indices, file, &path)
+    } else {
+        None
+    };
     if path.declaration.is_none()
         && let Some(symbol) = index.definition(file, offset)
         && path.binding_index_should_win(symbol.kind)
@@ -379,6 +384,9 @@ fn module_path_definition(
         }
         None => {
             if path.cursor_segment + 1 == path.segments.len() {
+                if let Some(location) = function_location {
+                    return Some(ModulePathDefinition::Location(location));
+                }
                 return None;
             }
             let prefix = path.segments[..=path.cursor_segment].join("::");
@@ -399,6 +407,36 @@ fn module_path_definition(
             Some(location) => ModulePathDefinition::Location(location),
             None => ModulePathDefinition::NoDefinition,
         },
+    )
+}
+
+fn function_path_definition(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    indices: &impl FileIndex,
+    file: &Path,
+    path: &QualifiedPath,
+) -> Option<Location> {
+    let current = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.source_file == file)?;
+    let Resolution::Found(definition) = resolve(
+        &snapshot.program,
+        &current.name,
+        &path.segments,
+        ResolvableKind::Function,
+    ) else {
+        return None;
+    };
+    let DefItem::Function(function) = definition.item else {
+        return None;
+    };
+    function_location(
+        snapshot,
+        indices,
+        &definition.module.source_file,
+        &function.name,
     )
 }
 
@@ -740,6 +778,39 @@ fn resource_identity_path_definition(
         .iter()
         .find(|resource| resource.name.as_str() == resource_name.as_str())?;
     resource_identity_location(snapshot, indices, &module.source_file, &resource.name)
+}
+
+fn function_location(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    indices: &impl FileIndex,
+    file: &Path,
+    function_name: &str,
+) -> Option<Location> {
+    let analyzed = snapshot
+        .files
+        .iter()
+        .find(|analyzed| analyzed.path == file)?;
+    for declaration in &analyzed.parsed.file.declarations {
+        let Declaration::Function(function) = declaration else {
+            continue;
+        };
+        if function.name != function_name {
+            continue;
+        }
+        let (start, end) = name_in_span(
+            &analyzed.source,
+            function.span.start_byte,
+            function.span.end_byte,
+            &function.name,
+        )?;
+        let line_index = indices.index_for(file)?;
+        let url = Url::from_file_path(file).ok()?;
+        return Some(Location {
+            uri: url,
+            range: line_index.range(start, end),
+        });
+    }
+    None
 }
 
 fn resource_identity_location(
@@ -1482,6 +1553,201 @@ pub fn run(): string
     }
 
     #[test]
+    fn definition_from_qualified_resource_constructor_leaf_jumps_to_foreign_resource_root() {
+        let state_source = "\
+module shelf::state
+
+resource Book at ^state_books(id: int)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+resource Book at ^app_books(code: string)
+    required label: string
+
+pub fn make()
+    const book = state::Book(title: \"x\")
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/state.mw", state_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let state_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let book = offset_of(app_source, "state::Book(title") + "state::".len();
+        let location = definition(&snapshot, &index, &indices, app_file, book + 1)
+            .expect("qualified resource constructor leaf resolves to the foreign resource");
+        let state_index = indices.0.get(state_file).unwrap();
+
+        assert_eq!(location.uri, Url::from_file_path(state_file).unwrap());
+        assert_eq!(
+            range_text(state_source, state_index, location.range),
+            "state_books"
+        );
+    }
+
+    #[test]
+    fn definition_from_qualified_resource_identity_constructor_jumps_to_foreign_identity_root() {
+        let state_source = "\
+module shelf::state
+
+resource Book at ^state_books(id: int)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+resource Book at ^app_books(code: string)
+    required label: string
+
+pub fn make_id()
+    const id = state::Book::Id(1)
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/state.mw", state_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let state_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+        let state_index = indices.0.get(state_file).unwrap();
+
+        for offset in [
+            offset_of(app_source, "state::Book::Id(1)") + "state::".len(),
+            offset_of(app_source, "state::Book::Id(1)") + "state::Book::".len(),
+        ] {
+            let location = definition(&snapshot, &index, &indices, app_file, offset + 1)
+                .expect("qualified resource identity constructor resolves to foreign identity");
+            assert_eq!(location.uri, Url::from_file_path(state_file).unwrap());
+            assert_eq!(
+                range_text(state_source, state_index, location.range),
+                "state_books"
+            );
+        }
+    }
+
+    #[test]
+    fn definition_from_same_named_local_and_foreign_resource_uses_the_qualified_target() {
+        let state_source = "\
+module shelf::state
+
+resource Book at ^state_books(id: int)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+resource Book at ^app_books(code: string)
+    required label: string
+
+pub fn make_foreign()
+    const book = state::Book(title: \"x\")
+
+pub fn make_local()
+    const book = Book(label: \"local\")
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/state.mw", state_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let state_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+        let state_index = indices.0.get(state_file).unwrap();
+        let app_index = indices.0.get(app_file).unwrap();
+
+        let qualified_book = offset_of(app_source, "state::Book(title") + "state::".len();
+        let qualified_location =
+            definition(&snapshot, &index, &indices, app_file, qualified_book + 1)
+                .expect("qualified constructor resolves to the imported resource");
+        assert_eq!(
+            qualified_location.uri,
+            Url::from_file_path(state_file).unwrap()
+        );
+        assert_eq!(
+            range_text(state_source, state_index, qualified_location.range),
+            "state_books"
+        );
+
+        let bare_book = offset_of(app_source, "Book(label: \"local\")");
+        let bare_location = definition(&snapshot, &index, &indices, app_file, bare_book + 1)
+            .expect("bare constructor resolves to the local resource");
+        assert_eq!(bare_location.uri, Url::from_file_path(app_file).unwrap());
+        assert_eq!(
+            range_text(app_source, app_index, bare_location.range),
+            "app_books"
+        );
+    }
+
+    #[test]
+    fn definition_from_same_named_local_and_foreign_identity_uses_the_qualified_target() {
+        let state_source = "\
+module shelf::state
+
+resource Book at ^state_books(id: int)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+resource Book at ^app_books(code: string)
+    required label: string
+
+pub fn foreign_id()
+    const id = state::Book::Id(1)
+
+pub fn local_id()
+    const id = Book::Id(\"local\")
+";
+        let (snapshot, paths, indices) = analyze_files(&[
+            ("shelf/state.mw", state_source),
+            ("shelf/app.mw", app_source),
+        ]);
+        let state_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+        let state_index = indices.0.get(state_file).unwrap();
+        let app_index = indices.0.get(app_file).unwrap();
+
+        for offset in [
+            offset_of(app_source, "state::Book::Id(1)") + "state::".len(),
+            offset_of(app_source, "state::Book::Id(1)") + "state::Book::".len(),
+        ] {
+            let location = definition(&snapshot, &index, &indices, app_file, offset + 1)
+                .expect("qualified identity resolves to the imported resource");
+            assert_eq!(location.uri, Url::from_file_path(state_file).unwrap());
+            assert_eq!(
+                range_text(state_source, state_index, location.range),
+                "state_books"
+            );
+        }
+
+        for offset in [
+            offset_of(app_source, "Book::Id(\"local\")"),
+            offset_of(app_source, "Book::Id(\"local\")") + "Book::".len(),
+        ] {
+            let location = definition(&snapshot, &index, &indices, app_file, offset + 1)
+                .expect("bare identity resolves to the local resource");
+            assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+            assert_eq!(
+                range_text(app_source, app_index, location.range),
+                "app_books"
+            );
+        }
+    }
+
+    #[test]
     fn module_path_definition_from_use_leaf_jumps_to_imported_module_declaration() {
         let books_source = "\
 module shelf::books
@@ -1817,11 +2083,53 @@ pub fn run(): int
         let book_file = &paths[0];
         let app_file = &paths[1];
         let index = build_binding_index(&snapshot);
+        let book_index = indices.0.get(book_file).unwrap();
 
         let prefix = offset_of(app_source, "return book::Id") + "return ".len();
         let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("module prefix wins over the local resource identity in call position");
+            .expect("aliased module prefix resolves before local resource identity lookup");
+        assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, book_index, prefix_location.range),
+            "book"
+        );
+
+        let leaf = offset_of(app_source, "return book::Id") + "return book::".len();
+        let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
+            .expect("aliased leaf resolves to the imported function");
+        assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
+        assert_eq!(
+            range_text(book_source, book_index, leaf_location.range),
+            "Id"
+        );
+    }
+
+    #[test]
+    fn module_path_definition_keeps_imported_function_without_identity_binding_fact() {
+        let book_source = "\
+module shelf::book
+
+pub fn Id(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+use shelf::book
+
+pub fn run(): int
+    return book::Id()
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("shelf/book.mw", book_source), ("app.mw", app_source)]);
+        let book_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
         let book_index = indices.0.get(book_file).unwrap();
+
+        let prefix = offset_of(app_source, "return book::Id") + "return ".len();
+        let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+            .expect("module prefix resolves to the imported module");
         assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
             range_text(book_source, book_index, prefix_location.range),
@@ -1830,7 +2138,7 @@ pub fn run(): int
 
         let leaf = offset_of(app_source, "book::Id") + "book::".len();
         let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
-            .expect("leaf call still resolves through the binding index");
+            .expect("leaf call resolves to the imported function");
         assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
             range_text(book_source, book_index, leaf_location.range),
@@ -1867,18 +2175,20 @@ pub fn run(): int
         let index = build_binding_index(&snapshot);
         let book_index = indices.0.get(book_file).unwrap();
 
-        let prefix = offset_of(app_source, "value: book::Id") + "value: ".len();
+        let prefix =
+            offset_of(app_source, "return wrap(value: book::Id") + "return wrap(value: ".len();
         let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("named argument value stays in expression context");
+            .expect("named argument value stays in expression context for aliased calls");
         assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
             range_text(book_source, book_index, prefix_location.range),
             "book"
         );
 
-        let leaf = offset_of(app_source, "book::Id") + "book::".len();
+        let leaf = offset_of(app_source, "return wrap(value: book::Id")
+            + "return wrap(value: book::".len();
         let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
-            .expect("named argument leaf call resolves through the binding index");
+            .expect("named argument aliased call leaf resolves to the imported function");
         assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
             range_text(book_source, book_index, leaf_location.range),

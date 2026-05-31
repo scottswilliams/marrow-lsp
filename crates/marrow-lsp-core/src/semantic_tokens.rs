@@ -617,11 +617,17 @@ fn reference_overrides(
     path: &Path,
 ) -> HashMap<ByteSpan, TokenStyle> {
     let mut overrides = HashMap::new();
-    for token in &lexed.tokens {
+    for (token_index, token) in lexed.tokens.iter().enumerate() {
         if !is_path_segment_token(token.kind) {
             continue;
         }
         let Some(definition) = index.definition(path, token.span.start_byte) else {
+            if token_is_prefix_before_resolved_resource_tail(lexed, token_index, index, path) {
+                overrides.insert(
+                    (token.span.start_byte, token.span.end_byte),
+                    TokenStyle::plain(TYPE_NAMESPACE),
+                );
+            }
             continue;
         };
         let references = index.references(&definition);
@@ -636,6 +642,7 @@ fn reference_overrides(
                 &definition,
             )
             .is_some()
+                || token_is_prefix_before_resolved_resource_tail(lexed, token_index, index, path)
             {
                 overrides.insert(
                     (token.span.start_byte, token.span.end_byte),
@@ -650,6 +657,34 @@ fn reference_overrides(
         overrides.insert((token.span.start_byte, token.span.end_byte), style);
     }
     overrides
+}
+
+fn token_is_prefix_before_resolved_resource_tail(
+    lexed: &LexedSource,
+    token_index: usize,
+    index: &BindingIndex,
+    path: &Path,
+) -> bool {
+    let mut candidate_index = token_index;
+    while candidate_index + 2 < lexed.tokens.len()
+        && lexed.tokens[candidate_index + 1].kind == TokenKind::DoubleColon
+        && is_path_segment_token(lexed.tokens[candidate_index + 2].kind)
+    {
+        candidate_index += 2;
+        let candidate = &lexed.tokens[candidate_index];
+        if index
+            .definition(path, candidate.span.start_byte)
+            .is_some_and(|definition| {
+                matches!(
+                    definition.kind,
+                    SymbolKind::Resource | SymbolKind::ResourceIdentity
+                )
+            })
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn best_reference_for_token<'a>(
@@ -1303,6 +1338,50 @@ mod tests {
             &parsed.parsed.file,
             &index,
             Some((&binding_index, &file)),
+        ));
+        assert!(
+            !snapshot.program.modules.is_empty(),
+            "checked fixture should provide binding facts"
+        );
+        (index, decoded)
+    }
+
+    fn decoded_for_checked_file(
+        files: &[(&str, &str)],
+        active_relative: &str,
+    ) -> (LineIndex, DecodedTokens) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for (relative, source) in files {
+            let file = src.join(relative);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(file, source).unwrap();
+        }
+
+        let active_source = files
+            .iter()
+            .find_map(|(relative, source)| (*relative == active_relative).then_some(*source))
+            .expect("active source file should be in the fixture");
+        let active_file = src.join(active_relative);
+        let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+        let binding_index = build_binding_index(&snapshot);
+        let parsed = snapshot
+            .files
+            .iter()
+            .find(|analyzed| analyzed.path == active_file)
+            .expect("analyzed active source file");
+        let index = LineIndex::new(active_source);
+        let decoded = absolute(&semantic_tokens_with_bindings(
+            &lex_source(active_source),
+            &parsed.parsed.file,
+            &index,
+            Some((&binding_index, &active_file)),
         ));
         assert!(
             !snapshot.program.modules.is_empty(),
@@ -2089,6 +2168,109 @@ fn f(): int
             "    return m::helper()",
             "helper",
             legend_index(&SemanticTokenType::FUNCTION),
+            0,
+        );
+    }
+
+    #[test]
+    fn checked_qualified_resource_constructor_prefix_is_namespace_while_leaf_stays_struct() {
+        let state_source = "\
+module shelf::state
+
+resource Book at ^state_books(id: int)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+resource Book at ^app_books(code: string)
+    required label: string
+
+pub fn make()
+    const book = state::Book(title: \"x\")
+";
+        let (index, decoded) = decoded_for_checked_file(
+            &[
+                ("shelf/state.mw", state_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    const book = state::Book(title: \"x\")",
+            "state",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    const book = state::Book(title: \"x\")",
+            "Book",
+            legend_index(&SemanticTokenType::STRUCT),
+            0,
+        );
+    }
+
+    #[test]
+    fn checked_qualified_resource_identity_constructor_colors_prefixes_and_leaf() {
+        let state_source = "\
+module shelf::state
+
+resource Book at ^state_books(id: int)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+resource Book at ^app_books(code: string)
+    required label: string
+
+pub fn make_id()
+    const id = state::Book::Id(1)
+";
+        let (index, decoded) = decoded_for_checked_file(
+            &[
+                ("shelf/state.mw", state_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    const id = state::Book::Id(1)",
+            "state",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    const id = state::Book::Id(1)",
+            "Book",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    const id = state::Book::Id(1)",
+            "Id",
+            legend_index(&SemanticTokenType::STRUCT),
             0,
         );
     }
