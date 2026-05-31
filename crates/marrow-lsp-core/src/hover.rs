@@ -22,6 +22,7 @@ use marrow_syntax::{
     ResourceMember, SourceSpan, TokenKind, lex_source,
 };
 
+use crate::language_facts;
 use crate::store::{Availability, StoreReader, StoredValue, saved_path_at};
 use crate::types::render_type;
 
@@ -44,6 +45,9 @@ pub fn hover_with_index(
     offset: usize,
     reader: Option<&StoreReader>,
 ) -> Option<Hover> {
+    if let Some(value) = default_library_call_hover(snapshot, file, offset) {
+        return Some(markdown_hover(default_library_hover_markdown(&value)));
+    }
     if let Some(value) = function_hover(snapshot, index, file, offset, reader) {
         return Some(markdown_hover(value));
     }
@@ -259,6 +263,54 @@ fn function_hover(
     }
 
     Some(value)
+}
+
+fn default_library_call_hover(
+    snapshot: &AnalysisSnapshot,
+    file: &Path,
+    offset: usize,
+) -> Option<String> {
+    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
+    let tokens = lex_source(&analyzed.source).tokens;
+    let index = tokens.iter().position(|token| {
+        is_path_segment_token(token.kind)
+            && token.span.start_byte <= offset
+            && offset <= token.span.end_byte
+    })?;
+    if let Some(value) = std_library_call_hover(&tokens, &analyzed.source, index) {
+        return Some(value);
+    }
+    if is_bare_call_leaf(&tokens, index) {
+        let name = tokens[index].text(&analyzed.source);
+        if let Some(value) = language_facts::bare_builtin_hover(name) {
+            return Some(value);
+        }
+        if let Some(value) = language_facts::scalar_conversion_hover(name) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn std_library_call_hover(
+    tokens: &[marrow_syntax::Token],
+    source: &str,
+    index: usize,
+) -> Option<String> {
+    if !is_std_library_call(tokens, source, index) {
+        return None;
+    }
+    language_facts::std_operation_hover(tokens[index - 2].text(source), tokens[index].text(source))
+}
+
+fn default_library_hover_markdown(fact: &str) -> String {
+    let Some((signature, context)) = fact.split_once("\n\n") else {
+        return marrow_code_block(fact);
+    };
+    let mut value = marrow_code_block(signature);
+    value.push_str("\n\n");
+    value.push_str(context);
+    value
 }
 
 fn is_rich_symbol_hover_target(
@@ -1024,6 +1076,64 @@ fn qualified_name_token_bounds(
     Some((start, end, index))
 }
 
+fn is_std_library_call(tokens: &[marrow_syntax::Token], source: &str, index: usize) -> bool {
+    index >= 4
+        && is_call_leaf(tokens, index)
+        && tokens[index - 1].kind == TokenKind::DoubleColon
+        && is_path_segment_token(tokens[index - 2].kind)
+        && tokens[index - 3].kind == TokenKind::DoubleColon
+        && is_path_segment_token(tokens[index - 4].kind)
+        && tokens[index - 4].text(source) == "std"
+        && starts_at_callee_root(tokens, index - 4)
+}
+
+fn is_bare_call_leaf(tokens: &[marrow_syntax::Token], index: usize) -> bool {
+    is_call_leaf(tokens, index) && starts_at_callee_root(tokens, index)
+}
+
+fn is_call_leaf(tokens: &[marrow_syntax::Token], index: usize) -> bool {
+    is_path_segment_token(tokens[index].kind)
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == TokenKind::LeftParen)
+}
+
+fn starts_at_callee_root(tokens: &[marrow_syntax::Token], index: usize) -> bool {
+    !previous_significant_kind(tokens, index).is_some_and(|kind| {
+        matches!(
+            kind,
+            TokenKind::DoubleColon
+                | TokenKind::Dot
+                | TokenKind::QuestionDot
+                | TokenKind::Keyword(Keyword::Fn)
+        )
+    })
+}
+
+fn previous_significant_kind(tokens: &[marrow_syntax::Token], index: usize) -> Option<TokenKind> {
+    tokens[..index]
+        .iter()
+        .rev()
+        .find(|token| !is_trivia(token.kind))
+        .map(|token| token.kind)
+}
+
+fn is_path_segment_token(kind: TokenKind) -> bool {
+    matches!(kind, TokenKind::Identifier | TokenKind::Keyword(_))
+}
+
+fn is_trivia(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Indent
+            | TokenKind::Dedent
+            | TokenKind::Newline
+            | TokenKind::Eof
+            | TokenKind::Comment
+            | TokenKind::DocComment
+    )
+}
+
 fn markdown_hover(value: String) -> Hover {
     Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -1315,6 +1425,19 @@ mod tests {
         markup.value
     }
 
+    fn hover_value_at(
+        snapshot: &AnalysisSnapshot,
+        index: &BindingIndex,
+        file: &std::path::Path,
+        offset: usize,
+    ) -> Option<String> {
+        let hover = hover_with_index(snapshot, index, file, offset, None)?;
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        Some(markup.value)
+    }
+
     #[test]
     fn hover_renders_a_parameters_type_as_a_marrow_block() {
         let source = "module a\n\npub fn f(n: int): int\n    return n\n";
@@ -1382,6 +1505,183 @@ pub fn answer(): int
             panic!("expected markup contents");
         };
         assert_eq!(markup.value, "```marrow\nfn answer(): int\n```");
+    }
+
+    #[test]
+    fn hover_over_bare_builtin_call_shows_default_library_signature() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn f(): bool
+    return exists(^books(1))
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let value = hover_value(&snapshot, &index, &file, source, "exists(^books");
+
+        assert!(
+            value.starts_with("```marrow\nexists(path): bool\n```"),
+            "builtin signature should lead the hover: {value}"
+        );
+        assert!(
+            value.contains("default library"),
+            "builtin hover should identify default-library context: {value}"
+        );
+        assert!(
+            value.contains("builtin"),
+            "builtin hover should identify the source kind: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_std_call_leaf_shows_signature_and_capability() {
+        let source = "\
+module a
+
+pub fn f(): int
+    return std::text::length(\"abc\")
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let value = hover_value(&snapshot, &index, &file, source, "length(\"abc");
+
+        assert!(
+            value.starts_with("```marrow\nstd::text::length(string): int\n```"),
+            "std signature should lead the hover: {value}"
+        );
+        assert!(
+            value.contains("Capability: pure"),
+            "std hover should include capability context: {value}"
+        );
+        assert!(
+            value.contains("default library"),
+            "std hover should identify default-library context: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_scalar_conversion_call_shows_default_library_signature() {
+        let source = "\
+module a
+
+pub fn f(): int
+    return int(\"1\")
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let value = hover_value(&snapshot, &index, &file, source, "int(\"1");
+
+        assert!(
+            value.starts_with("```marrow\nint(value): int\n```"),
+            "scalar conversion signature should lead the hover: {value}"
+        );
+        assert!(
+            value.contains("conversion"),
+            "scalar hover should identify conversion context: {value}"
+        );
+        assert!(
+            value.contains("default library"),
+            "scalar hover should identify default-library context: {value}"
+        );
+    }
+
+    #[test]
+    fn builtin_call_hover_wins_over_same_named_user_function_but_not_declaration() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    required title: string
+
+fn exists(value: unknown): bool
+    return false
+
+fn f(): bool
+    return exists(^books(1))
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+
+        let declaration_offset = offset_of(source, "fn exists") + "fn ".len();
+        let declaration = hover_value_at(&snapshot, &index, &file, declaration_offset)
+            .expect("a hover at the user function declaration");
+        assert_eq!(
+            declaration, "```marrow\nfn exists(value: unknown): bool\n```",
+            "declaration hover should remain the user function"
+        );
+        assert!(
+            !declaration.contains("default library"),
+            "declaration hover should not include builtin docs: {declaration}"
+        );
+
+        let call = hover_value(&snapshot, &index, &file, source, "exists(^books");
+        assert!(
+            call.starts_with("```marrow\nexists(path): bool\n```"),
+            "call hover should use the builtin signature: {call}"
+        );
+        assert!(
+            call.contains("default library"),
+            "call hover should identify default-library context: {call}"
+        );
+    }
+
+    #[test]
+    fn qualified_builtin_like_leaves_do_not_get_default_library_hover() {
+        let foo_source = "\
+module foo
+
+pub fn exists(): bool
+    return false
+";
+        let foo_std_text_source = "\
+module foo::std::text
+
+pub fn length(value: string): int
+    return 0
+";
+        let app_source = "\
+module app
+
+use foo
+use foo::std::text
+
+pub fn f(): bool
+    const found = foo::exists()
+    const text_len = foo::std::text::length(\"abc\")
+    return found
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("foo.mw", foo_source),
+                ("foo/std/text.mw", foo_std_text_source),
+                ("app.mw", app_source),
+            ],
+            "app.mw",
+        );
+        let index = index_for(&snapshot);
+
+        let exists_value = hover_value(&snapshot, &index, &file, app_source, "exists()");
+        assert!(
+            !exists_value.contains("exists(path): bool"),
+            "qualified foo::exists call should not get builtin hover: {exists_value}"
+        );
+        assert!(
+            !exists_value.contains("default library"),
+            "qualified foo::exists call should not get default-library docs: {exists_value}"
+        );
+
+        let length_value = hover_value(&snapshot, &index, &file, app_source, "length(\"abc");
+        assert!(
+            !length_value.contains("std::text::length(string): int"),
+            "qualified foo::std::text::length call should not get std hover: {length_value}"
+        );
+        assert!(
+            !length_value.contains("default library"),
+            "qualified foo::std::text::length call should not get default-library docs: {length_value}"
+        );
     }
 
     #[test]
