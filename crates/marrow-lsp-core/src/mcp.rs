@@ -38,7 +38,7 @@ use crate::workspace::Workspace;
 /// A clamp on the saved bytes a `run`/test captures into its result. Output is a
 /// program's own `print`/`write` stream; a runaway loop must not balloon the
 /// reply, so it is truncated with a marker once it crosses this.
-const OUTPUT_CAP: usize = 64 * 1024;
+const OUTPUT_CAP: usize = 8 * 1024;
 
 /// A clamp on the children one `saved_children` page returns to the agent, on top
 /// of the [`StoreReader`]'s own cap — the reader already truncates, but the count

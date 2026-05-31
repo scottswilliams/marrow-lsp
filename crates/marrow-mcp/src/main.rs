@@ -131,23 +131,207 @@ fn handle_tools_call(id: Json, params: &Json, policy: Policy) -> Json {
         .cloned()
         .unwrap_or_else(|| json!({}));
     match server::call(name, &arguments, policy) {
-        Ok(result) => ok(id, tool_result(&result)),
+        Ok(result) => ok(id, tool_result(name, &result)),
         Err(message) => error(id, INVALID_PARAMS, &message),
     }
 }
 
-/// Wrap a tool's JSON result in the MCP `tools/call` result envelope: the
-/// serialized JSON as a text content block (for clients that read text) plus the
-/// same value as `structuredContent` (for clients that read structured output).
-/// `isError` is false — a tool that ran is a successful call even when its result
-/// reports a Marrow diagnostic; the agent reads that from the structured content.
-fn tool_result(result: &Json) -> Json {
-    let text = serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
+/// Wrap a tool's JSON result in the MCP `tools/call` result envelope: a concise
+/// one-line human-readable summary as a text content block (for clients that read
+/// text and to keep the agent's context small) plus the full value as
+/// `structuredContent` (for clients that read structured output). `isError` is
+/// false — a tool that ran is a successful call even when its result reports a
+/// Marrow diagnostic; the agent reads the detail from the structured content.
+fn tool_result(name: &str, result: &Json) -> Json {
     json!({
-        "content": [{ "type": "text", "text": text }],
+        "content": [{ "type": "text", "text": summarize(name, result) }],
         "structuredContent": result,
         "isError": false,
     })
+}
+
+/// A concise, single-line summary of a tool result for the text content block.
+/// The full result always rides along in `structuredContent`, so this line only
+/// needs to orient the agent — a count, a value, an outcome — at a fraction of the
+/// context cost of the pretty-printed JSON. It is panic-free: every field is read
+/// through `.get` with a fallback, and an unrecognized shape lands on `"ok"`.
+fn summarize(name: &str, result: &Json) -> String {
+    // A surfaced refusal or fault speaks for itself, regardless of which tool ran.
+    if result.get("dataAccess").and_then(Json::as_str) == Some("disabled") {
+        return "data access disabled".to_string();
+    }
+    if let Some(error) = result.get("error").and_then(Json::as_str) {
+        return format!("error: {}", clip(error));
+    }
+
+    match name {
+        "mw_check" => count_summary(result, "diagnostics", "no diagnostics", "diagnostic"),
+        "mw_type_at" => match result.get("type").and_then(Json::as_str) {
+            Some(ty) => clip(ty),
+            None => "no type".to_string(),
+        },
+        "mw_complete" => count_summary(result, "items", "no completions", "completion"),
+        "mw_resource_schema" => count_summary(result, "resources", "no resources", "resource"),
+        "mw_saved_roots" => {
+            if result.get("available").and_then(Json::as_bool) != Some(true) {
+                return "data unavailable".to_string();
+            }
+            count_summary(result, "roots", "no saved roots", "saved root")
+        }
+        "mw_saved_get" => {
+            if result.get("available").and_then(Json::as_bool) != Some(true) {
+                return "not present".to_string();
+            }
+            match result.get("value") {
+                Some(value) => format!("value {}", clip(&compact(value))),
+                // No value rendered: a record node that is absent or holds only
+                // children carries its `presence` word, which is the honest line.
+                None => match result.get("presence").and_then(Json::as_str) {
+                    Some(presence) => clip(presence),
+                    None => "present".to_string(),
+                },
+            }
+        }
+        "mw_saved_children" => {
+            if result.get("available").and_then(Json::as_bool) != Some(true) {
+                return "data unavailable".to_string();
+            }
+            let children = array_len(result, "children");
+            let base = match children {
+                0 => "no children".to_string(),
+                1 => "1 child".to_string(),
+                n => format!("{n} children"),
+            };
+            if result.get("more").and_then(Json::as_bool) == Some(true) {
+                format!("{base} (more)")
+            } else {
+                base
+            }
+        }
+        "mw_data_integrity" => {
+            if result.get("available").and_then(Json::as_bool) != Some(true) {
+                return "data unavailable".to_string();
+            }
+            let scanned = result.get("scanned").and_then(Json::as_u64).unwrap_or(0);
+            let findings = array_len(result, "findings");
+            let base = if findings == 0 {
+                format!("clean, {scanned} scanned")
+            } else {
+                format!(
+                    "{findings} finding{}, {scanned} scanned",
+                    plural(findings as u64)
+                )
+            };
+            if result.get("truncated").and_then(Json::as_bool) == Some(true) {
+                format!("{base} (truncated)")
+            } else {
+                base
+            }
+        }
+        "mw_run" => run_summary(result),
+        _ => "ok".to_string(),
+    }
+}
+
+/// Summarize `mw_run`: test mode carries a `tests` array (pass/fail counts), run
+/// mode carries a `value`/`output`. Either mode degrades to its `diagnostics` when
+/// the program did not check or run.
+fn run_summary(result: &Json) -> String {
+    // Diagnostics come first: a non-empty list means the program never produced a
+    // value or a test outcome — it failed to check, or test discovery faulted,
+    // which leaves an empty `tests` array beside the diagnostics. Reporting tests
+    // first would dress that failure up as a clean "0/0 tests passed".
+    if array_len(result, "diagnostics") > 0 {
+        let count = array_len(result, "diagnostics");
+        let first = result
+            .get("diagnostics")
+            .and_then(Json::as_array)
+            .and_then(|d| d.first())
+            .and_then(|d| d.get("message"))
+            .and_then(Json::as_str)
+            .unwrap_or("see diagnostics");
+        return format!(
+            "{count} diagnostic{}: {}",
+            plural(count as u64),
+            clip(first)
+        );
+    }
+    if let Some(tests) = result.get("tests").and_then(Json::as_array) {
+        let total = tests.len();
+        let passed = tests
+            .iter()
+            .filter(|t| t.get("outcome").and_then(Json::as_str) == Some("passed"))
+            .count();
+        return format!("{passed}/{total} tests passed");
+    }
+    match result.get("value") {
+        Some(Json::Null) | None => {
+            if has_output(result) {
+                "ran, no value (output captured)".to_string()
+            } else {
+                "ran, no value".to_string()
+            }
+        }
+        Some(value) => format!("value {}", clip(&compact(value))),
+    }
+}
+
+/// Whether a run captured any `print`/`write` output, so a value-less run still
+/// reports that it produced something.
+fn has_output(result: &Json) -> bool {
+    result
+        .get("output")
+        .and_then(Json::as_str)
+        .is_some_and(|output| !output.is_empty())
+}
+
+/// `"3 things"` / `"1 thing"` / the empty phrase, from an array field's length.
+fn count_summary(result: &Json, field: &str, empty: &str, noun: &str) -> String {
+    let count = array_len(result, field);
+    if count == 0 {
+        empty.to_string()
+    } else {
+        format!("{count} {noun}{}", plural(count as u64))
+    }
+}
+
+/// The length of an array-valued field, or 0 when it is missing or not an array.
+fn array_len(result: &Json, field: &str) -> usize {
+    result
+        .get(field)
+        .and_then(Json::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+/// `"s"` for a plural count, the empty string for one.
+fn plural(count: u64) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+/// The first line of a string, so a multi-line message never breaks the one-line
+/// summary contract.
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
+}
+
+/// An inline fragment bounded to one short line: the first line, trimmed to a
+/// character budget with an ellipsis, so one oversized value, type, or message
+/// cannot blow the summary back up into the bulk the `content` block is meant to
+/// avoid.
+fn clip(text: &str) -> String {
+    const MAX: usize = 120;
+    let line = first_line(text);
+    if line.chars().count() <= MAX {
+        return line.to_string();
+    }
+    let kept: String = line.chars().take(MAX).collect();
+    format!("{kept}…")
+}
+
+/// A compact JSON rendering of a value for an inline summary (no pretty-printing).
+fn compact(value: &Json) -> String {
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 /// A successful JSON-RPC response carrying `result`.
@@ -234,13 +418,153 @@ mod tests {
             !diagnostics.is_empty(),
             "a malformed snippet should report a diagnostic: {result}"
         );
-        // And the text block mirrors it for text-only clients.
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("diagnostics")
+        // And the text block carries the concise summary, not the full JSON: the
+        // malformed snippet's diagnostics read as a count, matching what the
+        // structured content holds.
+        let expected = summarize("mw_check", &result["structuredContent"]);
+        assert!(expected.contains("diagnostic"), "{expected}");
+        assert_eq!(result["content"][0]["text"], expected);
+    }
+
+    #[test]
+    fn summarize_reports_a_concise_line_and_keeps_the_full_result() {
+        // Each case: the tool name, its full result, and the expected one-line
+        // summary. The full result must always survive in `structuredContent`.
+        let cases: Vec<(&str, Json, &str)> = vec![
+            ("mw_check", json!({ "diagnostics": [] }), "no diagnostics"),
+            (
+                "mw_check",
+                json!({ "diagnostics": [{}, {}, {}] }),
+                "3 diagnostics",
+            ),
+            ("mw_type_at", json!({ "type": "int" }), "int"),
+            ("mw_type_at", json!({ "type": Json::Null }), "no type"),
+            ("mw_complete", json!({ "items": [{}, {}] }), "2 completions"),
+            ("mw_complete", json!({ "items": [{}] }), "1 completion"),
+            (
+                "mw_resource_schema",
+                json!({ "resources": [{}, {}] }),
+                "2 resources",
+            ),
+            (
+                "mw_saved_roots",
+                json!({ "available": true, "roots": ["a", "b"] }),
+                "2 saved roots",
+            ),
+            (
+                "mw_saved_roots",
+                json!({ "available": false, "roots": [] }),
+                "data unavailable",
+            ),
+            (
+                "mw_saved_get",
+                json!({ "available": true, "value": "\"Mort\"", "type": "string" }),
+                "value \"\\\"Mort\\\"\"",
+            ),
+            ("mw_saved_get", json!({ "available": false }), "not present"),
+            (
+                "mw_saved_children",
+                json!({ "available": true, "children": [{}, {}], "more": true }),
+                "2 children (more)",
+            ),
+            (
+                "mw_data_integrity",
+                json!({ "available": true, "findings": [], "scanned": 5, "truncated": false }),
+                "clean, 5 scanned",
+            ),
+            (
+                "mw_data_integrity",
+                json!({ "available": true, "findings": [{}], "scanned": 9, "truncated": false }),
+                "1 finding, 9 scanned",
+            ),
+            (
+                "mw_run",
+                json!({ "value": 42, "output": "", "diagnostics": [] }),
+                "value 42",
+            ),
+            (
+                "mw_run",
+                json!({ "value": Json::Null, "output": "loud\n", "diagnostics": [] }),
+                "ran, no value (output captured)",
+            ),
+            (
+                "mw_run",
+                json!({ "value": Json::Null, "output": "", "diagnostics": [] }),
+                "ran, no value",
+            ),
+            (
+                "mw_run",
+                json!({ "diagnostics": [], "output": "", "tests": [
+                    { "outcome": "passed" },
+                    { "outcome": "failed" },
+                    { "outcome": "passed" },
+                ] }),
+                "2/3 tests passed",
+            ),
+            (
+                "mw_run",
+                json!({ "diagnostics": [{ "message": "boom" }], "output": "" }),
+                "1 diagnostic: boom",
+            ),
+            // Test discovery faulted: an empty `tests` array rides beside the
+            // diagnostics, and the diagnostic — not "0/0 tests passed" — is the line.
+            (
+                "mw_run",
+                json!({ "diagnostics": [{ "message": "no such module" }], "output": "", "tests": [] }),
+                "1 diagnostic: no such module",
+            ),
+            // An available saved path with no rendered value reports its presence
+            // word rather than implying a value is present.
+            (
+                "mw_saved_get",
+                json!({ "available": true, "presence": "absent" }),
+                "absent",
+            ),
+        ];
+        for (name, result, expected) in cases {
+            let summary = summarize(name, &result);
+            assert_eq!(summary, expected, "{name}: {result}");
+            assert!(
+                summary.lines().count() <= 1,
+                "summary must be one line: {summary:?}"
+            );
+            // The envelope keeps the full result untouched in structuredContent.
+            let envelope = tool_result(name, &result);
+            assert_eq!(envelope["structuredContent"], result);
+            assert_eq!(envelope["content"][0]["text"], expected);
+            assert_eq!(envelope["isError"], false);
+        }
+    }
+
+    #[test]
+    fn summarize_surfaces_an_error_envelope() {
+        let result = json!({ "diagnostics": [], "error": "the file path is not absolute" });
+        assert_eq!(
+            summarize("mw_check", &result),
+            "error: the file path is not absolute"
         );
+    }
+
+    #[test]
+    fn summarize_reports_the_data_disabled_envelope() {
+        let result = json!({
+            "available": false,
+            "dataAccess": "disabled",
+            "message": "data access not enabled; relaunch ...",
+        });
+        for tool in [
+            "mw_saved_roots",
+            "mw_saved_get",
+            "mw_saved_children",
+            "mw_data_integrity",
+        ] {
+            assert_eq!(summarize(tool, &result), "data access disabled");
+        }
+    }
+
+    #[test]
+    fn summarize_falls_back_to_ok_for_an_unknown_shape() {
+        assert_eq!(summarize("mw_mystery", &json!({ "weird": 1 })), "ok");
     }
 
     #[test]
