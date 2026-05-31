@@ -95,6 +95,10 @@ const marrowSemanticScopes = packageManifest.contributes?.semanticTokenScopes?.f
 assert.ok(marrowSemanticScopes, "Marrow contributes semantic token fallback scopes");
 
 assertScopeMapping(marrowSemanticScopes, "namespace", ["entity.name.namespace.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "namespace.defaultLibrary", [
+  "support.namespace.builtin.marrow",
+  "entity.name.namespace.marrow",
+]);
 assertScopeMapping(marrowSemanticScopes, "function", ["entity.name.function.marrow"]);
 assertScopeMapping(marrowSemanticScopes, "function.defaultLibrary", [
   "support.function.builtin.marrow",
@@ -120,6 +124,7 @@ assertScopeMapping(marrowSemanticScopes, "keyword", [
   "keyword.declaration.marrow",
   "storage.modifier.marrow",
 ]);
+assertScopeMapping(marrowSemanticScopes, "booleanLiteral", ["constant.language.boolean.marrow"]);
 assertScopeMapping(marrowSemanticScopes, "variable", ["variable.other.marrow"]);
 assertScopeMapping(marrowSemanticScopes, "string", [
   "string.quoted.double.marrow",
@@ -151,6 +156,7 @@ assertScopeMapping(marrowSemanticScopes, "operator", [
   "keyword.operator.comparison.marrow",
   "keyword.operator.assignment.marrow",
   "keyword.operator.arithmetic.marrow",
+  "keyword.operator.concat.marrow",
 ]);
 assertScopeMapping(marrowSemanticScopes, "savedRoot", [
   "variable.other.saved.marrow",

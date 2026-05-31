@@ -99,6 +99,11 @@
         "id": "savedRoot",
         "superType": "variable",
         "description": "Saved data root"
+      },
+      {
+        "id": "booleanLiteral",
+        "superType": "keyword",
+        "description": "Boolean literal"
       }
     ],
     "semanticTokenScopes": [
@@ -106,6 +111,10 @@
         "language": "marrow",
         "scopes": {
           "namespace": [
+            "entity.name.namespace.marrow"
+          ],
+          "namespace.defaultLibrary": [
+            "support.namespace.builtin.marrow",
             "entity.name.namespace.marrow"
           ],
           "function": [
@@ -139,6 +148,9 @@
             "keyword.declaration.marrow",
             "storage.modifier.marrow"
           ],
+          "booleanLiteral": [
+            "constant.language.boolean.marrow"
+          ],
           "variable": [
             "variable.other.marrow"
           ],
@@ -171,7 +183,8 @@
             "keyword.operator.range.marrow",
             "keyword.operator.comparison.marrow",
             "keyword.operator.assignment.marrow",
-            "keyword.operator.arithmetic.marrow"
+            "keyword.operator.arithmetic.marrow",
+            "keyword.operator.concat.marrow"
           ],
           "savedRoot": [
             "variable.other.saved.marrow",

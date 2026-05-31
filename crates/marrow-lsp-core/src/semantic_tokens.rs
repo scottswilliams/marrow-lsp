@@ -33,6 +33,10 @@ use crate::{
 /// the legend advertises it as a custom type a theme can color.
 const MARROW_SAVED_ROOT: SemanticTokenType = SemanticTokenType::new("savedRoot");
 
+/// Boolean value literals (`true` and `false`). They are lexed as keywords but
+/// colored as values so themes can distinguish them from control words.
+const MARROW_BOOLEAN_LITERAL: SemanticTokenType = SemanticTokenType::new("booleanLiteral");
+
 /// The token types this server emits, in the order their indices encode. The
 /// legend the client receives is this list; a token's `token_type` field is an
 /// index into it.
@@ -52,6 +56,7 @@ const TOKEN_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::ENUM_MEMBER,
     SemanticTokenType::PROPERTY,
     SemanticTokenType::PARAMETER,
+    MARROW_BOOLEAN_LITERAL,
 ];
 
 /// The token modifiers this server emits.
@@ -76,6 +81,7 @@ const TYPE_ENUM: u32 = 11;
 const TYPE_ENUM_MEMBER: u32 = 12;
 const TYPE_PROPERTY: u32 = 13;
 const TYPE_PARAMETER: u32 = 14;
+const TYPE_BOOLEAN_LITERAL: u32 = 15;
 
 /// Modifier bits, matching `TOKEN_MODIFIERS`.
 const MOD_MODIFICATION: u32 = 1 << 0;
@@ -1024,7 +1030,10 @@ fn builtin_overrides(lexed: &LexedSource, source: &str) -> HashMap<ByteSpan, Tok
 fn insert_builtin_namespace_prefix(overrides: &mut HashMap<ByteSpan, TokenStyle>, token: &Token) {
     overrides.insert(
         (token.span.start_byte, token.span.end_byte),
-        TokenStyle::plain(TYPE_NAMESPACE),
+        TokenStyle {
+            token_type: TYPE_NAMESPACE,
+            modifiers: MOD_DEFAULT_LIBRARY,
+        },
     );
 }
 
@@ -1100,12 +1109,11 @@ fn token_type(kind: TokenKind) -> Option<u32> {
         | TokenKind::InterpolationText
         | TokenKind::InterpolationEnd => Some(TYPE_STRING),
         TokenKind::Comment | TokenKind::DocComment => Some(TYPE_COMMENT),
-        TokenKind::Keyword(keyword) => Some(if is_operator_keyword(keyword) {
-            TYPE_OPERATOR
-        } else if is_type_keyword(keyword) {
-            TYPE_TYPE
-        } else {
-            TYPE_KEYWORD
+        TokenKind::Keyword(keyword) => Some(match keyword {
+            Keyword::True | Keyword::False => TYPE_BOOLEAN_LITERAL,
+            _ if is_operator_keyword(keyword) => TYPE_OPERATOR,
+            _ if is_type_keyword(keyword) => TYPE_TYPE,
+            _ => TYPE_KEYWORD,
         }),
         TokenKind::DoubleColon => Some(TYPE_NAMESPACE),
         TokenKind::Colon
@@ -1126,6 +1134,7 @@ fn token_type(kind: TokenKind) -> Option<u32> {
         | TokenKind::Star
         | TokenKind::Slash
         | TokenKind::Percent
+        | TokenKind::Underscore
         | TokenKind::At => Some(TYPE_OPERATOR),
         // The `^` sigil is handled before this is reached; structural delimiters
         // and the interpolation-expression braces are left to the grammar.
@@ -1396,6 +1405,110 @@ mod tests {
                 .token_modifiers
                 .contains(&SemanticTokenModifier::DEFAULT_LIBRARY),
             "the legend must advertise the defaultLibrary modifier"
+        );
+    }
+
+    #[test]
+    fn boolean_literal_token_is_appended_after_parameter() {
+        let boolean_literal = SemanticTokenType::new("booleanLiteral");
+
+        assert_eq!(
+            legend_index(&boolean_literal),
+            legend_index(&SemanticTokenType::PARAMETER) + 1,
+            "booleanLiteral should be appended after parameter so existing token indices stay stable"
+        );
+    }
+
+    #[test]
+    fn true_and_false_color_as_boolean_literals() {
+        let source = "\
+module m
+
+fn f(): bool
+    return true and false
+";
+        let (index, decoded) = decoded_for(source);
+        let boolean_literal = SemanticTokenType::new("booleanLiteral");
+        let boolean_literal = legend_index(&boolean_literal);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return true and false",
+            "true",
+            boolean_literal,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return true and false",
+            "false",
+            boolean_literal,
+            0,
+        );
+    }
+
+    #[test]
+    fn concat_underscore_colors_as_operator() {
+        let source = "\
+module m
+
+fn f(a: string, b: string): string
+    return a _ b
+";
+        let (index, decoded) = decoded_for(source);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return a _ b",
+            "_",
+            legend_index(&SemanticTokenType::OPERATOR),
+            0,
+        );
+    }
+
+    #[test]
+    fn std_namespaces_are_default_library() {
+        let source = "\
+module m
+
+fn f()
+    const len = std::text::length(\"abc\")
+";
+        let (index, decoded) = decoded_for(source);
+        let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const len = std::text::length(\"abc\")",
+            "std",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            default_library,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const len = std::text::length(\"abc\")",
+            "text",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            default_library,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const len = std::text::length(\"abc\")",
+            "length",
+            legend_index(&SemanticTokenType::FUNCTION),
+            default_library,
         );
     }
 
@@ -1907,7 +2020,7 @@ fn f()
             "    std::assert::isTrue(true)",
             "std",
             namespace,
-            0,
+            default_library,
         );
         assert_token(
             source,
@@ -1916,7 +2029,7 @@ fn f()
             "    std::assert::isTrue(true)",
             "assert",
             namespace,
-            0,
+            default_library,
         );
         assert_token(
             source,
