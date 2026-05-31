@@ -18,8 +18,8 @@ use marrow_check::{
 use marrow_schema::{Element, EnumSchema, ResourceSchema};
 use marrow_store::backend::Presence;
 use marrow_syntax::{
-    Declaration, EnumDecl, EnumMember, FunctionDecl, KeyParam, Keyword, ParamMode, ResourceDecl,
-    ResourceMember, SourceSpan, TokenKind, lex_source,
+    Block, Declaration, EnumDecl, EnumMember, FunctionDecl, KeyParam, Keyword, ParamMode,
+    ResourceDecl, ResourceMember, SourceSpan, Statement, TokenKind, TypeRef, lex_source,
 };
 
 use crate::language_facts;
@@ -119,18 +119,24 @@ fn type_name_hover(
     if type_at(&snapshot.program, file, &analyzed.parsed, offset).is_some() {
         return None;
     }
-    if !is_type_annotation_target(&analyzed.source, offset) {
+    if !is_type_annotation_target(&analyzed.parsed.file, offset) {
         return None;
     }
-    let segments = qualified_name_at(&analyzed.source, offset)?;
-    if let [resource, id] = segments.as_slice()
-        && id == "Id"
+    let (segments, segment_index) = qualified_name_at_with_position(&analyzed.source, offset)?;
+    if segments.len() >= 2
+        && segments.last().is_some_and(|segment| segment == "Id")
+        && segment_index + 2 >= segments.len()
     {
-        let schema = resource_schema_for_identity_type_name(snapshot, file, resource)?;
+        let schema = resource_schema_for_identity_type_name(snapshot, file, &segments)?;
         return resource_identity_hover(schema, reader);
     }
-    if let Some(schema) = enum_schema_for_type_name(snapshot, file, &segments) {
-        return Some(enum_hover(schema));
+    if segment_index + 1 == segments.len() {
+        if let Some(schema) = resource_schema_for_type_name(snapshot, file, &segments) {
+            return Some(resource_hover(schema, reader));
+        }
+        if let Some(schema) = enum_schema_for_type_name(snapshot, file, &segments) {
+            return Some(enum_hover(schema));
+        }
     }
     None
 }
@@ -143,9 +149,12 @@ fn saved_root_hover(
 ) -> Option<String> {
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     let segments = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)?;
-    let [marrow_store::path::PathSegment::Root(root)] = segments.as_slice() else {
+    let Some(marrow_store::path::PathSegment::Root(root)) = segments.first() else {
         return None;
     };
+    if !offset_is_on_saved_root(&analyzed.source, offset, root) {
+        return None;
+    }
     let schema = marrow_check::resolve::resolve_resource_by_root(&snapshot.program, root)?;
     Some(resource_hover(schema, reader))
 }
@@ -562,8 +571,7 @@ fn is_resource_saved_root_declaration(
     let Some(store) = &resource.store else {
         return false;
     };
-    let Some((start, end)) = saved_root_identifier_span(&analyzed.source, symbol.span, &store.root)
-    else {
+    let Some((start, end)) = saved_root_span(&analyzed.source, symbol.span, &store.root) else {
         return false;
     };
     start <= offset && offset <= end
@@ -673,11 +681,7 @@ fn declaration_identifier_span(
         .map(|token| (token.span.start_byte, token.span.end_byte))
 }
 
-fn saved_root_identifier_span(
-    source: &str,
-    span: SourceSpan,
-    root: &str,
-) -> Option<(usize, usize)> {
+fn saved_root_span(source: &str, span: SourceSpan, root: &str) -> Option<(usize, usize)> {
     let tokens = lex_source(source).tokens;
     tokens.windows(2).find_map(|pair| {
         let [previous, token] = pair else {
@@ -689,10 +693,24 @@ fn saved_root_identifier_span(
             && span_covers(span, token.span.end_byte)
             && token.text(source) == root
         {
-            Some((token.span.start_byte, token.span.end_byte))
+            Some((previous.span.start_byte, token.span.end_byte))
         } else {
             None
         }
+    })
+}
+
+fn offset_is_on_saved_root(source: &str, offset: usize, root: &str) -> bool {
+    let tokens = lex_source(source).tokens;
+    tokens.windows(2).any(|pair| {
+        let [previous, token] = pair else {
+            return false;
+        };
+        previous.kind == TokenKind::Caret
+            && token.kind == TokenKind::Identifier
+            && token.text(source) == root
+            && previous.span.start_byte <= offset
+            && offset <= token.span.end_byte
     })
 }
 
@@ -907,18 +925,37 @@ fn resource_schema_for_symbol<'a>(
 fn resource_schema_for_identity_type_name<'a>(
     snapshot: &'a AnalysisSnapshot,
     file: &Path,
-    name: &str,
+    segments: &[String],
 ) -> Option<&'a ResourceSchema> {
     let from_module = module_name_for_file(snapshot, file)?;
-    let segments = [name.to_string(), "Id".to_string()];
     match resolve(
         &snapshot.program,
         from_module,
-        &segments,
+        segments,
         ResolvableKind::ResourceIdentity,
     ) {
         Resolution::Found(def) => match def.item {
             DefItem::Resource(schema) if has_identity_keys(schema) => Some(schema),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn resource_schema_for_type_name<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    file: &Path,
+    segments: &[String],
+) -> Option<&'a ResourceSchema> {
+    let from_module = module_name_for_file(snapshot, file)?;
+    match resolve(
+        &snapshot.program,
+        from_module,
+        segments,
+        ResolvableKind::Resource,
+    ) {
+        Resolution::Found(def) => match def.item {
+            DefItem::Resource(schema) => Some(schema),
             _ => None,
         },
         _ => None,
@@ -1176,25 +1213,23 @@ fn resource_signature(schema: &ResourceSchema) -> String {
 fn identity_summary(schema: &ResourceSchema) -> Option<String> {
     let saved = schema.saved_root.as_ref()?;
     if saved.identity_keys.is_empty() {
-        return Some("**Identity**\n- keyless singleton".to_string());
+        return Some("**Identity**\n- keyless singleton; no generated identity type".to_string());
     }
-    Some(format!(
-        "**Identity**\n{}",
+    let mut lines = vec![format!("- generated identity type: `{}::Id`", schema.name)];
+    lines.extend(
         saved
             .identity_keys
             .iter()
-            .map(|key| format!("- `{}: {}`", key.name, key.ty))
-            .collect::<Vec<_>>()
-            .join("\n")
-    ))
+            .map(|key| format!("- `{}: {}`", key.name, key.ty)),
+    );
+    Some(format!("**Identity**\n{}", lines.join("\n")))
 }
 
 fn resource_member_summary(schema: &ResourceSchema) -> Option<String> {
-    let mut lines = schema
-        .members
-        .iter()
-        .map(resource_member_line)
-        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    for member in &schema.members {
+        resource_member_lines(member, "", &mut lines);
+    }
     lines.extend(schema.indexes.iter().map(|index| {
         let unique = if index.unique { " unique" } else { "" };
         format!("index {}({}){unique}", index.name, index.args.join(", "))
@@ -1202,15 +1237,29 @@ fn resource_member_summary(schema: &ResourceSchema) -> Option<String> {
     bounded_summary("Members", lines)
 }
 
-fn resource_member_line(member: &marrow_schema::Node) -> String {
-    let keys = key_params(&member.key_params);
+fn resource_member_lines(member: &marrow_schema::Node, prefix: &str, lines: &mut Vec<String>) {
+    let name = resource_member_path_segment(member);
+    let path = if prefix.is_empty() {
+        name
+    } else {
+        format!("{prefix}.{name}")
+    };
     match &member.element {
         Element::Slot { ty, required } => {
             let required = if *required { "required " } else { "" };
-            format!("{required}{}{}: {}", member.name, keys, ty)
+            lines.push(format!("{required}{path}: {ty}"));
         }
-        Element::Group => format!("{}{}", member.name, keys),
+        Element::Group => {
+            lines.push(path.clone());
+            for child in &member.members {
+                resource_member_lines(child, &path, lines);
+            }
+        }
     }
+}
+
+fn resource_member_path_segment(member: &marrow_schema::Node) -> String {
+    format!("{}{}", member.name, key_params(&member.key_params))
 }
 
 fn key_params(keys: &[marrow_schema::KeyDef]) -> String {
@@ -1282,14 +1331,135 @@ fn append_section(value: &mut String, section: Option<String>) {
     }
 }
 
-fn is_type_annotation_target(source: &str, offset: usize) -> bool {
-    let tokens = lex_source(source).tokens;
-    let Some((start, _end, _index)) = qualified_name_token_bounds(&tokens, offset) else {
-        return false;
-    };
-    tokens
-        .get(start.wrapping_sub(1))
-        .is_some_and(|token| token.kind == TokenKind::Colon)
+fn is_type_annotation_target(source: &marrow_syntax::SourceFile, offset: usize) -> bool {
+    source
+        .declarations
+        .iter()
+        .any(|declaration| declaration_type_annotation_at(declaration, offset))
+}
+
+fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> bool {
+    match declaration {
+        Declaration::Const(declaration) => declaration
+            .ty
+            .as_ref()
+            .is_some_and(|ty| type_ref_covers(ty, offset)),
+        Declaration::Resource(resource) => {
+            resource
+                .members
+                .iter()
+                .any(|member| resource_member_type_annotation_at(member, offset))
+                || resource.store.as_ref().is_some_and(|store| {
+                    store
+                        .keys
+                        .iter()
+                        .any(|key| type_ref_covers(&key.ty, offset))
+                })
+        }
+        Declaration::Function(function) => {
+            function
+                .params
+                .iter()
+                .any(|param| type_ref_covers(&param.ty, offset))
+                || function
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|ty| type_ref_covers(ty, offset))
+                || block_type_annotation_at(&function.body, offset)
+        }
+        Declaration::Enum(_) => false,
+    }
+}
+
+fn resource_member_type_annotation_at(member: &ResourceMember, offset: usize) -> bool {
+    match member {
+        ResourceMember::Field(field) => {
+            type_ref_covers(&field.ty, offset)
+                || field
+                    .keys
+                    .iter()
+                    .any(|key| type_ref_covers(&key.ty, offset))
+        }
+        ResourceMember::Group(group) => {
+            group
+                .keys
+                .iter()
+                .any(|key| type_ref_covers(&key.ty, offset))
+                || group
+                    .members
+                    .iter()
+                    .any(|member| resource_member_type_annotation_at(member, offset))
+        }
+        ResourceMember::Index(_) => false,
+    }
+}
+
+fn block_type_annotation_at(block: &Block, offset: usize) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|statement| statement_type_annotation_at(statement, offset))
+}
+
+fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
+    match statement {
+        Statement::Const { ty, .. } => ty.as_ref().is_some_and(|ty| type_ref_covers(ty, offset)),
+        Statement::Var { keys, ty, .. } => {
+            keys.iter().any(|key| type_ref_covers(&key.ty, offset))
+                || ty.as_ref().is_some_and(|ty| type_ref_covers(ty, offset))
+        }
+        Statement::If {
+            then_block,
+            else_ifs,
+            else_block,
+            ..
+        } => {
+            block_type_annotation_at(then_block, offset)
+                || else_ifs
+                    .iter()
+                    .any(|else_if| block_type_annotation_at(&else_if.block, offset))
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_type_annotation_at(block, offset))
+        }
+        Statement::While { body, .. }
+        | Statement::For { body, .. }
+        | Statement::Transaction { body, .. }
+        | Statement::Lock { body, .. } => block_type_annotation_at(body, offset),
+        Statement::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            block_type_annotation_at(body, offset)
+                || catch.as_ref().is_some_and(|catch| {
+                    catch
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| type_ref_covers(ty, offset))
+                        || block_type_annotation_at(&catch.block, offset)
+                })
+                || finally
+                    .as_ref()
+                    .is_some_and(|block| block_type_annotation_at(block, offset))
+        }
+        Statement::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| block_type_annotation_at(&arm.block, offset)),
+        Statement::Assign { .. }
+        | Statement::Delete { .. }
+        | Statement::Merge { .. }
+        | Statement::Return { .. }
+        | Statement::Break { .. }
+        | Statement::Continue { .. }
+        | Statement::Throw { .. }
+        | Statement::Expr { .. } => false,
+    }
+}
+
+fn type_ref_covers(ty: &TypeRef, offset: usize) -> bool {
+    span_covers(ty.span, offset)
 }
 
 fn is_resource_constructor_leaf(source: &str, offset: usize) -> bool {
@@ -1304,16 +1474,23 @@ fn is_resource_constructor_leaf(source: &str, offset: usize) -> bool {
 }
 
 fn qualified_name_at(source: &str, offset: usize) -> Option<Vec<String>> {
+    qualified_name_at_with_position(source, offset).map(|(segments, _)| segments)
+}
+
+fn qualified_name_at_with_position(source: &str, offset: usize) -> Option<(Vec<String>, usize)> {
     let tokens = lex_source(source).tokens;
-    let (start, end, _) = qualified_name_token_bounds(&tokens, offset)?;
+    let (start, end, index) = qualified_name_token_bounds(&tokens, offset)?;
     let mut segments = Vec::new();
-    for token in tokens[start..=end]
-        .iter()
-        .filter(|token| token.kind == TokenKind::Identifier)
-    {
-        segments.push(token.text(source).to_string());
+    let mut current_segment = None;
+    for (token_index, token) in tokens[start..=end].iter().enumerate() {
+        if token.kind == TokenKind::Identifier {
+            if start + token_index == index {
+                current_segment = Some(segments.len());
+            }
+            segments.push(token.text(source).to_string());
+        }
     }
-    (!segments.is_empty()).then_some(segments)
+    (!segments.is_empty()).then_some((segments, current_segment?))
 }
 
 fn qualified_name_token_bounds(
@@ -2794,6 +2971,10 @@ resource Book at ^books(id: int)
             "identity key should be summarized: {value}"
         );
         assert!(
+            value.contains("Book::Id"),
+            "identity summary should name the generated identity type: {value}"
+        );
+        assert!(
             value.contains("required title: string"),
             "field summary should include member type: {value}"
         );
@@ -2930,6 +3111,338 @@ pub fn make()
     }
 
     #[test]
+    fn hover_over_resource_type_annotation_shows_resource_hover() {
+        let source = "\
+module a
+
+;; Books saved by id.
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn echo(book: Book): Book
+    var local: Book
+    return book
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+
+        for needle in ["book: Book", "): Book", "local: Book"] {
+            let offset = offset_of(source, needle) + needle.rfind("Book").unwrap();
+            let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markup");
+            };
+            let value = markup.value;
+
+            assert!(
+                value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
+                "resource annotation hover should lead with resource signature: {value}"
+            );
+            assert!(
+                value.contains("Books saved by id."),
+                "resource annotation hover should include resource docs: {value}"
+            );
+            assert!(
+                value.contains("Book::Id"),
+                "resource annotation hover should name the generated identity type: {value}"
+            );
+            assert!(
+                value.contains("required title: string"),
+                "resource annotation hover should include member summary: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_over_same_named_resource_type_annotation_uses_current_module_schema() {
+        let first_source = "\
+module shelf::first
+
+;; First module books.
+resource Book at ^first_books(id: int)
+    required title: string
+";
+        let second_source = "\
+module shelf::second
+
+;; Second module books.
+resource Book at ^second_books(code: string)
+    required subtitle: string
+
+pub fn echo(book: Book): Book
+    return book
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/first.mw", first_source),
+                ("shelf/second.mw", second_source),
+            ],
+            "shelf/second.mw",
+        );
+        let index = index_for(&snapshot);
+        let offset = offset_of(second_source, "book: Book") + "book: ".len();
+        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nresource Book at ^second_books(code: string)\n```"),
+            "resource annotation hover should use the current module schema: {value}"
+        );
+        assert!(
+            value.contains("Second module books."),
+            "resource annotation hover should include the current module docs: {value}"
+        );
+        assert!(
+            value.contains("subtitle: string"),
+            "resource annotation hover should include the current module members: {value}"
+        );
+        assert!(
+            !value.contains("^first_books"),
+            "resource annotation hover should not use the other module root: {value}"
+        );
+        assert!(
+            !value.contains("First module books."),
+            "resource annotation hover should not use the other module docs: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_wrapped_qualified_resource_type_annotation_shows_resource_hover() {
+        let state_source = "\
+module shelf::state
+
+;; Books from state.
+resource Book at ^state_books(id: int)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+;; App-local books.
+resource Book at ^app_books(code: string)
+    required subtitle: string
+
+pub fn books(items: sequence[state::Book])
+    return
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/state.mw", state_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let annotation = offset_of(app_source, "state::Book");
+        let qualifier_hover = hover_with_index(&snapshot, &index, &file, annotation + 1, None);
+        if let Some(Hover {
+            contents: HoverContents::Markup(markup),
+            ..
+        }) = qualifier_hover
+        {
+            assert!(
+                !markup
+                    .value
+                    .starts_with("```marrow\nresource Book at ^state_books"),
+                "module qualifier should not pretend to be the resource: {}",
+                markup.value
+            );
+        }
+
+        let leaf = annotation + "state::".len();
+        let hover = hover_with_index(&snapshot, &index, &file, leaf, None).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nresource Book at ^state_books(id: int)\n```"),
+            "wrapped resource annotation hover should use the qualified module schema: {value}"
+        );
+        assert!(
+            value.contains("Books from state."),
+            "wrapped resource annotation hover should include foreign docs: {value}"
+        );
+        assert!(
+            value.contains("required title: string"),
+            "wrapped resource annotation hover should include foreign members: {value}"
+        );
+        assert!(
+            !value.contains("^app_books"),
+            "wrapped resource annotation hover should not use app-local same-named resource: {value}"
+        );
+        assert!(
+            !value.contains("App-local books."),
+            "wrapped resource annotation hover should not include app-local docs: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_qualified_resource_identity_annotation_shows_identity_hover() {
+        let state_source = "\
+module shelf::state
+
+;; Books from state.
+resource Book at ^books(id: int, locale: string)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+pub fn load(id: state::Book::Id): state::Book::Id
+    return id
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/state.mw", state_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let annotation = offset_of(app_source, "state::Book::Id");
+        let qualifier_hover = hover_with_index(&snapshot, &index, &file, annotation + 1, None);
+        if let Some(Hover {
+            contents: HoverContents::Markup(markup),
+            ..
+        }) = qualifier_hover
+        {
+            assert!(
+                !markup.value.starts_with("```marrow\nBook::Id\n```"),
+                "module qualifier should not pretend to be the identity: {}",
+                markup.value
+            );
+            assert!(
+                !markup
+                    .value
+                    .starts_with("```marrow\nresource Book at ^books"),
+                "module qualifier should not pretend to be the resource: {}",
+                markup.value
+            );
+        }
+
+        let identity_leaf = annotation + "state::Book::".len();
+        let hover =
+            hover_with_index(&snapshot, &index, &file, identity_leaf, None).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nBook::Id\n```"),
+            "qualified identity annotation hover should lead with the generated identity type: {value}"
+        );
+        assert!(
+            value.contains("Books from state."),
+            "qualified identity annotation hover should include resource docs: {value}"
+        );
+        assert!(
+            value.contains("id: int"),
+            "qualified identity annotation hover should include the first key: {value}"
+        );
+        assert!(
+            value.contains("locale: string"),
+            "qualified identity annotation hover should include composite keys: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_wrapped_qualified_resource_identity_annotation_shows_identity_hover() {
+        let state_source = "\
+module shelf::state
+
+;; Books from state.
+resource Book at ^state_books(id: int, locale: string)
+    required title: string
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+;; App-local books.
+resource Book at ^app_books(code: string)
+    required subtitle: string
+
+pub fn ids(ids: sequence[state::Book::Id])
+    return
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/state.mw", state_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let annotation = offset_of(app_source, "state::Book::Id");
+        let qualifier_hover = hover_with_index(&snapshot, &index, &file, annotation + 1, None);
+        if let Some(Hover {
+            contents: HoverContents::Markup(markup),
+            ..
+        }) = qualifier_hover
+        {
+            assert!(
+                !markup.value.starts_with("```marrow\nBook::Id\n```"),
+                "module qualifier should not pretend to be the identity: {}",
+                markup.value
+            );
+            assert!(
+                !markup
+                    .value
+                    .starts_with("```marrow\nresource Book at ^state_books"),
+                "module qualifier should not pretend to be the resource: {}",
+                markup.value
+            );
+        }
+
+        for offset in [
+            annotation + "state::".len(),
+            annotation + "state::Book::".len(),
+        ] {
+            let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markup");
+            };
+            let value = markup.value;
+
+            assert!(
+                value.starts_with("```marrow\nBook::Id\n```"),
+                "wrapped identity annotation hover should lead with the generated identity type: {value}"
+            );
+            assert!(
+                value.contains("Books from state."),
+                "wrapped identity annotation hover should include foreign docs: {value}"
+            );
+            assert!(
+                value.contains("id: int"),
+                "wrapped identity annotation hover should include the first key: {value}"
+            );
+            assert!(
+                value.contains("locale: string"),
+                "wrapped identity annotation hover should include composite keys: {value}"
+            );
+            assert!(
+                !value.contains("code: string"),
+                "wrapped identity annotation hover should not use app-local identity keys: {value}"
+            );
+            assert!(
+                !value.contains("App-local books."),
+                "wrapped identity annotation hover should not include app-local docs: {value}"
+            );
+        }
+    }
+
+    #[test]
     fn hover_over_same_named_resource_declaration_uses_that_module_schema() {
         let first_source = "\
 module shelf::first
@@ -2980,6 +3493,60 @@ resource Book at ^second_books(code: string)
         assert!(
             !value.contains("First module books."),
             "resource hover should not use the first module docs: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_saved_root_caret_and_chained_use_shows_resource_hover() {
+        let source = "\
+module a
+
+;; Books saved by id.
+resource Book at ^books(id: int)
+    ;; Display title.
+    required title: string
+
+pub fn f(): string
+    return ^books(1).title
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let declaration_caret = offset_of(source, "^books");
+        let declaration_root = declaration_caret + 1;
+        let use_caret = source.rfind("^books").unwrap();
+        let use_root = use_caret + 1;
+
+        for offset in [declaration_caret, declaration_root, use_caret, use_root] {
+            let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markup");
+            };
+            let value = markup.value;
+
+            assert!(
+                value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
+                "saved root hover should show the resource signature: {value}"
+            );
+            assert!(
+                value.contains("Books saved by id."),
+                "saved root hover should include resource docs: {value}"
+            );
+        }
+
+        let title = source.rfind(").title").unwrap() + ").".len() + 1;
+        let hover = hover_with_index(&snapshot, &index, &file, title, None).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nrequired title: string\n```"),
+            "saved field hover should stay on the member: {value}"
+        );
+        assert!(
+            value.contains("Display title."),
+            "saved field hover should keep member docs: {value}"
         );
     }
 
@@ -3090,6 +3657,53 @@ resource Book at ^books(id: int)
         assert!(
             value.contains("- ... 1 more"),
             "bounded summary should report the hidden member count: {value}"
+        );
+    }
+
+    #[test]
+    fn resource_member_summary_shows_nested_members_bounded() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    details
+        required subtitle: string
+        pages: int
+    editions(number: int)
+        isbn: string
+        format: string
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let value = hover_value(&snapshot, &index, &file, source, "Book at ^books");
+
+        assert!(
+            value.contains("- `details`"),
+            "group itself should be shown: {value}"
+        );
+        assert!(
+            value.contains("- `required details.subtitle: string`"),
+            "nested required field should be summarized with its path: {value}"
+        );
+        assert!(
+            value.contains("- `details.pages: int`"),
+            "nested plain field should be summarized with its path: {value}"
+        );
+        assert!(
+            value.contains("- `editions(number: int)`"),
+            "keyed layer itself should be shown: {value}"
+        );
+        assert!(
+            value.contains("- `editions(number: int).isbn: string`"),
+            "nested keyed-layer member should be shown before the bound: {value}"
+        );
+        assert!(
+            !value.contains("- `editions(number: int).format: string`"),
+            "sixth flattened member should be hidden behind the bound: {value}"
+        );
+        assert!(
+            value.contains("- ... 1 more"),
+            "bounded nested summary should report the hidden member count: {value}"
         );
     }
 
@@ -3276,6 +3890,12 @@ pub fn load(id: Settings::Id)
                 markup.value
             );
         }
+
+        let value = hover_value(&snapshot, &index, &file, source, "Settings at ^settings");
+        assert!(
+            value.contains("no generated identity type"),
+            "keyless resource hover should say it has no generated identity type: {value}"
+        );
     }
 
     #[test]
