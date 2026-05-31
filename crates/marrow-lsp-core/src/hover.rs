@@ -18,7 +18,7 @@ use marrow_check::{
 use marrow_schema::{Element, EnumSchema, ResourceSchema};
 use marrow_store::backend::Presence;
 use marrow_syntax::{
-    Declaration, EnumDecl, EnumMember, FunctionDecl, Keyword, ParamMode, ResourceDecl,
+    Declaration, EnumDecl, EnumMember, FunctionDecl, KeyParam, Keyword, ParamMode, ResourceDecl,
     ResourceMember, SourceSpan, TokenKind, lex_source,
 };
 
@@ -52,6 +52,9 @@ pub fn hover_with_index(
         return Some(markdown_hover(value));
     }
     if let Some(value) = rich_symbol_hover(snapshot, index, file, offset, reader) {
+        return Some(markdown_hover(value));
+    }
+    if let Some(value) = resource_member_hover(snapshot, index, file, offset, reader) {
         return Some(markdown_hover(value));
     }
     if let Some(value) = resource_constructor_hover(snapshot, file, offset, reader) {
@@ -139,6 +142,39 @@ fn saved_root_hover(
     };
     let schema = marrow_check::resolve::resolve_resource_by_root(&snapshot.program, root)?;
     Some(resource_hover(schema, reader))
+}
+
+fn resource_member_hover(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+    reader: Option<&StoreReader>,
+) -> Option<String> {
+    let symbol = index.definition(file, offset)?;
+    if !matches!(
+        symbol.kind,
+        SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index
+    ) || !is_resource_member_hover_target(snapshot, index, file, offset, &symbol)
+    {
+        return None;
+    }
+
+    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
+    let member = resource_member_at(&parsed_file.parsed.file, symbol.span)?;
+    let mut value = marrow_code_block(&resource_member_signature(member));
+    append_docs(&mut value, join_docs(resource_member_docs(member)));
+
+    if let Some(reader) = reader
+        && let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file)
+        && let Some(segments) = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)
+        && let Some(line) = live_value_line(reader, &segments, &snapshot.program)
+    {
+        value.push_str("\n\n");
+        value.push_str(&line);
+    }
+
+    Some(value)
 }
 
 fn resource_constructor_hover(
@@ -434,6 +470,45 @@ fn is_enum_member_declaration_name(
         return false;
     };
     offset_is_on_declaration_name(&analyzed.source, symbol.span, &member.name, offset)
+}
+
+fn is_resource_member_hover_target(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+    symbol: &SymbolRef,
+) -> bool {
+    is_resource_member_declaration_name(snapshot, file, offset, symbol)
+        || index.references(symbol).iter().any(|reference| {
+            reference.file == file
+                && reference.span != symbol.span
+                && span_covers(reference.span, offset)
+                && offset_is_on_last_identifier(snapshot, file, reference.span, offset)
+        })
+}
+
+fn is_resource_member_declaration_name(
+    snapshot: &AnalysisSnapshot,
+    file: &Path,
+    offset: usize,
+    symbol: &SymbolRef,
+) -> bool {
+    if symbol.file != file {
+        return false;
+    }
+    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == symbol.file) else {
+        return false;
+    };
+    let Some(member) = resource_member_at(&analyzed.parsed.file, symbol.span) else {
+        return false;
+    };
+    offset_is_on_declaration_name(
+        &analyzed.source,
+        symbol.span,
+        resource_member_name(member),
+        offset,
+    )
 }
 
 fn offset_is_on_declaration_name(
@@ -1286,6 +1361,89 @@ fn enum_member_in(members: &[EnumMember], span: SourceSpan) -> Option<&EnumMembe
         }
     }
     None
+}
+
+fn resource_member_at(
+    source: &marrow_syntax::SourceFile,
+    span: SourceSpan,
+) -> Option<&ResourceMember> {
+    for declaration in &source.declarations {
+        let Declaration::Resource(resource) = declaration else {
+            continue;
+        };
+        if let Some(member) = resource_member_in(&resource.members, span) {
+            return Some(member);
+        }
+    }
+    None
+}
+
+fn resource_member_in(members: &[ResourceMember], span: SourceSpan) -> Option<&ResourceMember> {
+    for member in members {
+        match member {
+            ResourceMember::Field(field) if field.span == span => return Some(member),
+            ResourceMember::Group(group) if group.span == span => return Some(member),
+            ResourceMember::Index(index) if index.span == span => return Some(member),
+            ResourceMember::Group(group) => {
+                if let Some(member) = resource_member_in(&group.members, span) {
+                    return Some(member);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn resource_member_signature(member: &ResourceMember) -> String {
+    match member {
+        ResourceMember::Field(field) => {
+            let required = if field.required { "required " } else { "" };
+            format!(
+                "{required}{}{}: {}",
+                field.name,
+                syntax_key_params(&field.keys),
+                field.ty
+            )
+        }
+        ResourceMember::Group(group) => {
+            format!("{}{}", group.name, syntax_key_params(&group.keys))
+        }
+        ResourceMember::Index(index) => {
+            let unique = if index.unique { " unique" } else { "" };
+            format!("index {}({}){unique}", index.name, index.args.join(", "))
+        }
+    }
+}
+
+fn resource_member_name(member: &ResourceMember) -> &str {
+    match member {
+        ResourceMember::Field(field) => &field.name,
+        ResourceMember::Group(group) => &group.name,
+        ResourceMember::Index(index) => &index.name,
+    }
+}
+
+fn resource_member_docs(member: &ResourceMember) -> &[String] {
+    match member {
+        ResourceMember::Field(field) => &field.docs,
+        ResourceMember::Group(group) => &group.docs,
+        ResourceMember::Index(index) => &index.docs,
+    }
+}
+
+fn syntax_key_params(keys: &[KeyParam]) -> String {
+    if keys.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "({})",
+            keys.iter()
+                .map(|key| format!("{}: {}", key.name, key.ty))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 
 /// The `docs` of the resource member (field, group/layer, or index) whose span is
@@ -2176,6 +2334,65 @@ pub fn clear()
         assert!(
             !value.contains("**live**"),
             "no reader means no live line: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_saved_field_use_shows_member_signature_and_docs() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    ;; The displayed title.
+    required title: string
+
+pub fn f(): string
+    return ^books(1).title
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let offset = source.rfind(").title").unwrap() + ").".len() + 1;
+        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nrequired title: string\n```"),
+            "field member signature should lead the hover: {value}"
+        );
+        assert!(
+            value.contains("The displayed title."),
+            "field docs should follow the member signature: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_resource_field_declaration_name_shows_member_signature() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    ;; The displayed title.
+    required title: string
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let offset = offset_of(source, "required title") + "required ".len() + 1;
+        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nrequired title: string\n```"),
+            "field declaration hover should lead with the member signature: {value}"
+        );
+        assert!(
+            value.contains("The displayed title."),
+            "field docs should follow the member signature: {value}"
         );
     }
 
