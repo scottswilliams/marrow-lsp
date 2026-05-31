@@ -11,8 +11,8 @@ use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedFunction, CheckedParam, DefItem, Resolution,
-    ResolvableKind, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
+    AnalysisSnapshot, BindingIndex, CheckedFunction, CheckedModule, CheckedParam, DefItem,
+    Resolution, ResolvableKind, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
     expand_module_alias, resolve, type_at,
 };
 use marrow_schema::{Element, EnumSchema, ResourceSchema};
@@ -57,6 +57,9 @@ pub fn hover_with_index(
     if let Some(value) = parameter_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
+    if let Some(value) = project_module_hover(snapshot, index, file, offset) {
+        return Some(markdown_hover(value));
+    }
     if let Some(value) = rich_symbol_hover(snapshot, index, file, offset, reader) {
         return Some(markdown_hover(value));
     }
@@ -75,6 +78,86 @@ pub fn hover_with_index(
 
     let docs = symbol_docs_at_hover_target(snapshot, index, file, offset);
     hover_with_live(snapshot, file, offset, docs.as_deref(), reader)
+}
+
+fn project_module_hover(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<String> {
+    let module_name = project_module_name_at(snapshot, index, file, offset)?;
+    let module = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| !module.name.is_empty() && module.name == module_name)?;
+    Some(project_module_hover_markdown(module))
+}
+
+fn project_module_name_at(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<String> {
+    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
+    let (segments, cursor_segment, declaration) =
+        module_path_at_with_position(&analyzed.source, offset)?;
+    if declaration {
+        return Some(segments[..=cursor_segment].join("::"));
+    }
+    if binding_index_should_win_project_module_hover(index, file, offset) {
+        return None;
+    }
+    if cursor_segment + 1 == segments.len() {
+        return None;
+    }
+    let prefix = segments[..=cursor_segment].join("::");
+    let current = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.source_file == file)?;
+    let aliases = build_alias_map(&current.imports);
+    Some(expand_module_alias(&prefix, &aliases))
+}
+
+fn binding_index_should_win_project_module_hover(
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+) -> bool {
+    let Some(symbol) = index.definition(file, offset) else {
+        return false;
+    };
+    matches!(
+        symbol.kind,
+        SymbolKind::Enum | SymbolKind::EnumMember | SymbolKind::ResourceIdentity
+    )
+}
+
+fn project_module_hover_markdown(module: &CheckedModule) -> String {
+    let mut value = marrow_code_block(&format!("module {}", module.name));
+    value.push_str("\n\n**Project module**");
+
+    let mut facts = Vec::new();
+    push_module_count(&mut facts, module.functions.len(), "function", "functions");
+    push_module_count(&mut facts, module.resources.len(), "resource", "resources");
+    push_module_count(&mut facts, module.enums.len(), "enum", "enums");
+    if !facts.is_empty() {
+        value.push('\n');
+        value.push_str(&facts.join("\n"));
+    }
+    value
+}
+
+fn push_module_count(lines: &mut Vec<String>, count: usize, singular: &str, plural: &str) {
+    match count {
+        0 => {}
+        1 => lines.push(format!("- 1 {singular}")),
+        _ => lines.push(format!("- {count} {plural}")),
+    }
 }
 
 fn rich_symbol_hover(
@@ -1493,6 +1576,53 @@ fn qualified_name_at_with_position(source: &str, offset: usize) -> Option<(Vec<S
     (!segments.is_empty()).then_some((segments, current_segment?))
 }
 
+fn module_path_at_with_position(source: &str, offset: usize) -> Option<(Vec<String>, usize, bool)> {
+    let tokens = lex_source(source).tokens;
+    let index = tokens.iter().position(|token| {
+        is_path_segment_token(token.kind)
+            && token.span.start_byte <= offset
+            && offset <= token.span.end_byte
+    })?;
+    let mut start = index;
+    while start >= 2
+        && tokens[start - 1].kind == TokenKind::DoubleColon
+        && is_path_segment_token(tokens[start - 2].kind)
+    {
+        start -= 2;
+    }
+    let mut end = index;
+    while end + 2 < tokens.len()
+        && tokens[end + 1].kind == TokenKind::DoubleColon
+        && is_path_segment_token(tokens[end + 2].kind)
+    {
+        end += 2;
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor_segment = None;
+    let mut token_index = start;
+    loop {
+        if !is_path_segment_token(tokens[token_index].kind) {
+            return None;
+        }
+        if token_index == index {
+            cursor_segment = Some(segments.len());
+        }
+        segments.push(tokens[token_index].text(source).to_string());
+        if token_index == end {
+            break;
+        }
+        if token_index + 2 > end || tokens[token_index + 1].kind != TokenKind::DoubleColon {
+            return None;
+        }
+        token_index += 2;
+    }
+
+    let declaration = previous_significant_kind(&tokens, start)
+        .is_some_and(|kind| matches!(kind, TokenKind::Keyword(Keyword::Module | Keyword::Use)));
+    Some((segments, cursor_segment?, declaration))
+}
+
 fn qualified_name_token_bounds(
     tokens: &[marrow_syntax::Token],
     offset: usize,
@@ -2576,6 +2706,345 @@ pub fn run(): int
         assert!(
             length_value.contains("default library"),
             "std::text::length leaf hover should identify the builtin dispatch: {length_value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_project_module_leaf_in_use_shows_project_module_context() {
+        let books_source = "\
+module shelf::books
+
+pub fn titleOf(): string
+    return \"Dune\"
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): string
+    return books::titleOf()
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/books.mw", books_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
+        let value = hover_value_at(&snapshot, &index, &file, leaf + 1)
+            .expect("a hover over the imported module leaf");
+
+        assert!(
+            value.starts_with("```marrow\nmodule shelf::books\n```"),
+            "module hover should lead with the imported module path: {value}"
+        );
+        assert!(
+            value.contains("Project module"),
+            "module hover should identify project-module context: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_project_module_qualifier_keeps_function_leaf_hover() {
+        let books_source = "\
+module shelf::books
+
+;; Formats a book title.
+pub fn titleOf(): string
+    return \"Dune\"
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): string
+    return books::titleOf()
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/books.mw", books_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let call = offset_of(app_source, "books::titleOf()");
+        let qualifier = hover_value_at(&snapshot, &index, &file, call + 1)
+            .expect("a hover over the imported module qualifier");
+
+        assert!(
+            qualifier.starts_with("```marrow\nmodule shelf::books\n```"),
+            "module qualifier should show its project module: {qualifier}"
+        );
+        assert!(
+            qualifier.contains("Project module"),
+            "module qualifier should identify project-module context: {qualifier}"
+        );
+        assert!(
+            !qualifier.contains("fn titleOf("),
+            "module qualifier should not pretend to be the function leaf: {qualifier}"
+        );
+        assert!(
+            !qualifier.contains("Formats a book title."),
+            "module qualifier should not inherit function docs: {qualifier}"
+        );
+
+        let leaf = call + "books::".len();
+        let function = hover_value_at(&snapshot, &index, &file, leaf + 1)
+            .expect("a hover over the function leaf");
+        assert!(
+            function.starts_with("```marrow\nfn titleOf(): string\n```"),
+            "function leaf should keep the rich function hover: {function}"
+        );
+        assert!(
+            function.contains("Formats a book title."),
+            "function leaf should keep function docs: {function}"
+        );
+    }
+
+    #[test]
+    fn hover_over_fully_qualified_project_module_segment_keeps_function_leaf_hover() {
+        let books_source = "\
+module shelf::books
+
+;; Formats a book title.
+pub fn titleOf(): string
+    return \"Dune\"
+";
+        let app_source = "\
+module shelf::app
+
+pub fn run(): string
+    return shelf::books::titleOf()
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/books.mw", books_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let call = offset_of(app_source, "shelf::books::titleOf()");
+        let books = call + "shelf::".len();
+        let qualifier = hover_value_at(&snapshot, &index, &file, books + 1)
+            .expect("a hover over the fully qualified module segment");
+
+        assert!(
+            qualifier.starts_with("```marrow\nmodule shelf::books\n```"),
+            "fully qualified module segment should show the project module: {qualifier}"
+        );
+        assert!(
+            qualifier.contains("Project module"),
+            "fully qualified module segment should identify project-module context: {qualifier}"
+        );
+
+        let leaf = call + "shelf::books::".len();
+        let function = hover_value_at(&snapshot, &index, &file, leaf + 1)
+            .expect("a hover over the function leaf");
+        assert!(
+            function.starts_with("```marrow\nfn titleOf(): string\n```"),
+            "fully qualified function leaf should keep the function hover: {function}"
+        );
+        assert!(
+            function.contains("Formats a book title."),
+            "fully qualified function leaf should keep function docs: {function}"
+        );
+    }
+
+    #[test]
+    fn hover_over_project_module_qualifier_does_not_show_qualified_enum_hover() {
+        let state_source = "\
+module shelf::state
+
+;; Publication state.
+pub enum Status
+    ;; Open for edits.
+    open
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+pub fn status(): state::Status
+    return state::Status::open
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/state.mw", state_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let qualifier = offset_of(app_source, "state::Status::open");
+        let value = hover_value_at(&snapshot, &index, &file, qualifier + 1)
+            .expect("a hover over the module qualifier");
+
+        assert!(
+            value.starts_with("```marrow\nmodule shelf::state\n```"),
+            "module qualifier should show module context: {value}"
+        );
+        assert!(
+            value.contains("Project module"),
+            "module qualifier should identify project-module context: {value}"
+        );
+        assert!(
+            !value.starts_with("```marrow\nenum Status\n```"),
+            "module qualifier should not pretend to be the enum: {value}"
+        );
+        assert!(
+            !value.contains("Publication state."),
+            "module qualifier should not inherit enum docs: {value}"
+        );
+        assert!(
+            !value.contains("Open for edits."),
+            "module qualifier should not inherit enum member docs: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_enum_path_head_wins_over_same_named_project_module() {
+        let status_source = "\
+module status
+
+pub fn code(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+;; Local status enum.
+enum status
+    active
+
+pub fn current(): status
+    return status::active
+";
+        let (snapshot, file) = analyze_files(
+            &[("status.mw", status_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+        let index = index_for(&snapshot);
+        let head = offset_of(app_source, "status::active");
+        let value = hover_value_at(&snapshot, &index, &file, head + 1)
+            .expect("a hover over the enum path head");
+
+        assert!(
+            value.starts_with("```marrow\nenum status\n```"),
+            "enum path head should keep the enum hover: {value}"
+        );
+        assert!(
+            value.contains("Local status enum."),
+            "enum path head should keep enum docs: {value}"
+        );
+        assert!(
+            !value.starts_with("```marrow\nmodule status\n```"),
+            "enum path head should not be stolen by the same-named module: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_resource_identity_head_wins_over_same_named_project_module() {
+        let book_source = "\
+module book
+
+pub fn code(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+;; Saved books.
+resource book at ^books(id: int)
+    required title: string
+
+pub fn load(): book::Id
+    return book::Id(1)
+";
+        let (snapshot, file) = analyze_files(
+            &[("book.mw", book_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+        let index = index_for(&snapshot);
+        let head = offset_of(app_source, "book::Id(1)");
+        let value = hover_value_at(&snapshot, &index, &file, head + 1)
+            .expect("a hover over the resource identity path head");
+
+        assert!(
+            value.starts_with("```marrow\nbook::Id\n```"),
+            "identity path head should keep the generated identity hover: {value}"
+        );
+        assert!(
+            value.contains("Saved books."),
+            "identity path head should keep resource docs: {value}"
+        );
+        assert!(
+            !value.starts_with("```marrow\nmodule book\n```"),
+            "identity path head should not be stolen by the same-named module: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_project_std_text_module_without_builtin_dispatch_is_project_context() {
+        let std_text_source = "\
+module std::text
+
+;; Project-only text helper.
+pub fn custom(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+pub fn run(): int
+    return std::text::custom()
+";
+        let (snapshot, file) = analyze_files(
+            &[("std/text.mw", std_text_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+        let index = index_for(&snapshot);
+        let text = offset_of(app_source, "std::text::custom") + "std::".len();
+        let module = hover_value_at(&snapshot, &index, &file, text + 1)
+            .expect("a hover over the project std::text module");
+
+        assert!(
+            module.starts_with("```marrow\nmodule std::text\n```"),
+            "project std::text module should lead with the project module path: {module}"
+        );
+        assert!(
+            module.contains("Project module"),
+            "project std::text module should identify project context: {module}"
+        );
+        assert!(
+            !module.contains("default library"),
+            "project std::text module should not get default-library docs without builtin dispatch: {module}"
+        );
+
+        let custom = hover_value_at(
+            &snapshot,
+            &index,
+            &file,
+            offset_of(app_source, "custom()") + 1,
+        )
+        .expect("a hover over the project function leaf");
+        assert!(
+            custom.starts_with("```marrow\nfn custom(): int\n```"),
+            "project function leaf should keep its function hover: {custom}"
+        );
+        assert!(
+            custom.contains("Project-only text helper."),
+            "project function leaf should keep function docs: {custom}"
+        );
+        assert!(
+            !custom.contains("default library"),
+            "project function leaf should not get default-library docs: {custom}"
         );
     }
 
