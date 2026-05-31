@@ -7,6 +7,9 @@
     { "include": "#strings" },
     { "include": "#saved-sigil" },
     { "include": "#stable-id" },
+    { "include": "#module-path" },
+    { "include": "#use-path" },
+    { "include": "#declaration-names" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#constants" },
@@ -126,6 +129,67 @@
         "1": { "name": "storage.modifier.annotation.marrow" }
       }
     },
+    "module-path": {
+      "name": "meta.declaration.module.marrow",
+      "begin": "\\b(module)\\b\\s*",
+      "end": "(?=$|[;{])",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.marrow" }
+      },
+      "patterns": [
+        {
+          "name": "entity.name.namespace.module.marrow",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "punctuation.separator.namespace.marrow",
+          "match": "::"
+        }
+      ]
+    },
+    "use-path": {
+      "name": "meta.use.marrow",
+      "begin": "\\b(use)\\b\\s*",
+      "end": "(?=;|$)",
+      "beginCaptures": {
+        "1": { "name": "keyword.declaration.marrow" }
+      },
+      "patterns": [
+        {
+          "name": "entity.name.namespace.marrow",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "punctuation.separator.namespace.marrow",
+          "match": "::"
+        }
+      ]
+    },
+    "declaration-names": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.marrow" },
+            "2": { "name": "entity.name.function.marrow" }
+          }
+        },
+        {
+          "match": "\\b(resource)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.marrow" },
+            "2": { "name": "entity.name.type.resource.marrow" }
+          }
+        },
+        {
+          "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.marrow" },
+            "2": { "name": "entity.name.type.enum.marrow" }
+          }
+        }
+      ]
+    },
     "keywords": {
       "patterns": [
         {
@@ -134,7 +198,7 @@
         },
         {
           "name": "keyword.declaration.marrow",
-          "match": "\\b(module|use|pub|fn|resource|at|index|unique|required|const|var|sequence)\\b"
+          "match": "\\b(module|use|pub|fn|resource|enum|at|index|unique|required|const|var|sequence)\\b"
         },
         {
           "name": "storage.modifier.marrow",
