@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use marrow_check::CheckedProgram;
+use marrow_schema::{Element, IndexSchema, KeyDef, Node, ResourceSchema, Type};
 use marrow_store::backend::Presence;
 use marrow_store::path::{ChildSegment, PathSegment, SavedKey};
 
@@ -83,8 +84,7 @@ impl SegmentJson {
             SegmentJson::Root(name) => PathSegment::Root(name),
             SegmentJson::Key(key) => PathSegment::RecordKey(key.into_key()?),
             SegmentJson::Field(name) => PathSegment::Field(name),
-            SegmentJson::Layer(name) => PathSegment::ChildLayer(name),
-            SegmentJson::Index(name) => PathSegment::Index(name),
+            SegmentJson::Layer(name) | SegmentJson::Index(name) => PathSegment::Field(name),
             SegmentJson::IndexKey(key) => PathSegment::IndexKey(key.into_key()?),
         })
     }
@@ -117,8 +117,44 @@ pub struct SavedChildrenParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChildJson {
-    Key { key: KeyJson },
-    Name { name: String },
+    Key {
+        key: KeyJson,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        r#type: Option<String>,
+        #[serde(rename = "appendSegment", skip_serializing_if = "Option::is_none")]
+        append_segment: Option<SegmentJson>,
+    },
+    Name {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        r#type: Option<String>,
+        #[serde(rename = "appendSegment", skip_serializing_if = "Option::is_none")]
+        append_segment: Option<SegmentJson>,
+    },
+}
+
+/// Optional schema metadata for a child. These fields are absent from the raw
+/// compatibility path and present only when the LSP Data Explorer asks with a
+/// checked program.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub append_segment: Option<SegmentJson>,
 }
 
 /// `marrow/savedChildren` reply: the immediate children, whether more remained
@@ -194,6 +230,43 @@ pub fn saved_children(
     }
 }
 
+/// Handle `marrow/savedChildren` for the editor Data Explorer. This preserves the
+/// raw child shape and adds optional schema metadata for the immediate children
+/// of the requested path.
+pub fn saved_children_with_schema(
+    params: SavedChildrenParams,
+    program: &CheckedProgram,
+    reader: Option<&StoreReader>,
+) -> SavedChildrenResult {
+    let unavailable = SavedChildrenResult {
+        available: false,
+        children: Vec::new(),
+        more: false,
+    };
+    let Some(path) = decode_path(params.path) else {
+        return unavailable;
+    };
+    match reader.map(|reader| reader.children(&path)) {
+        Some(Availability::Available(Children { entries, more })) => {
+            let context = schema_context(program, &path);
+            SavedChildrenResult {
+                available: true,
+                children: entries
+                    .iter()
+                    .map(|child| {
+                        child_json_with_metadata(
+                            child,
+                            child_metadata_with_path_fallback(&context, &path, child),
+                        )
+                    })
+                    .collect(),
+                more,
+            }
+        }
+        _ => unavailable,
+    }
+}
+
 /// Handle `marrow/savedGet`. The path is typed against `program` so a typed leaf
 /// reports its type and renders its value. A malformed key, a missing reader, or
 /// an unavailable store answer `available: false`.
@@ -223,6 +296,324 @@ pub fn saved_get(
     }
 }
 
+enum SchemaContext<'a> {
+    Unknown,
+    Root {
+        resource: &'a ResourceSchema,
+        next_key: usize,
+        include_indexes: bool,
+    },
+    Members {
+        members: &'a [Node],
+    },
+    LayerKeys {
+        node: &'a Node,
+        next_key: usize,
+    },
+    IndexKeys {
+        resource: &'a ResourceSchema,
+        index: &'a IndexSchema,
+        next_key: usize,
+    },
+    Leaf,
+}
+
+fn schema_context<'a>(program: &'a CheckedProgram, path: &[PathSegment]) -> SchemaContext<'a> {
+    let Some((PathSegment::Root(root), rest)) = path.split_first() else {
+        return SchemaContext::Unknown;
+    };
+    let Some(resource) = marrow_check::resolve::resolve_resource_by_root(program, root) else {
+        return SchemaContext::Unknown;
+    };
+    let Some(saved_root) = resource.saved_root.as_ref() else {
+        return SchemaContext::Unknown;
+    };
+    let identity_arity = saved_root.identity_keys.len();
+
+    if rest.is_empty() {
+        return if identity_arity == 0 {
+            SchemaContext::Members {
+                members: &resource.members,
+            }
+        } else {
+            SchemaContext::Root {
+                resource,
+                next_key: 0,
+                include_indexes: true,
+            }
+        };
+    }
+
+    if let Some((name, index_keys)) = named_branch(rest)
+        && let Some(index) = resource.indexes.iter().find(|index| index.name == name)
+    {
+        return if index_keys < rest.len() - 1 || index_keys >= index.args.len() {
+            SchemaContext::Leaf
+        } else {
+            SchemaContext::IndexKeys {
+                resource,
+                index,
+                next_key: index_keys,
+            }
+        };
+    }
+
+    let identity_keys = rest
+        .iter()
+        .take_while(|segment| matches!(segment, PathSegment::RecordKey(_)))
+        .count();
+    if identity_keys < identity_arity {
+        return if identity_keys == rest.len() {
+            SchemaContext::Root {
+                resource,
+                next_key: identity_keys,
+                include_indexes: false,
+            }
+        } else {
+            SchemaContext::Unknown
+        };
+    }
+    if identity_keys != identity_arity {
+        return SchemaContext::Unknown;
+    }
+
+    let members = &rest[identity_keys..];
+    if members.is_empty() {
+        return SchemaContext::Members {
+            members: &resource.members,
+        };
+    }
+    member_context(&resource.members, members)
+}
+
+fn path_contains_named_segment(path: &[PathSegment]) -> bool {
+    path.iter().any(|segment| segment_name(segment).is_some())
+}
+
+fn named_branch(segments: &[PathSegment]) -> Option<(&str, usize)> {
+    let (first, rest) = segments.split_first()?;
+    let name = segment_name(first)?;
+    let key_count = rest
+        .iter()
+        .take_while(|segment| matches!(segment, PathSegment::IndexKey(_)))
+        .count();
+    Some((name, key_count))
+}
+
+fn member_context<'a>(mut members: &'a [Node], mut rest: &[PathSegment]) -> SchemaContext<'a> {
+    loop {
+        let Some((segment, tail)) = rest.split_first() else {
+            return SchemaContext::Members { members };
+        };
+        let Some(name) = segment_name(segment) else {
+            return SchemaContext::Unknown;
+        };
+        let Some(node) = members.iter().find(|node| node.name == name) else {
+            return SchemaContext::Unknown;
+        };
+        let key_count = tail
+            .iter()
+            .take_while(|segment| matches!(segment, PathSegment::IndexKey(_)))
+            .count();
+        let after_keys = &tail[key_count..];
+        if key_count < node.key_params.len() {
+            return if after_keys.is_empty() {
+                SchemaContext::LayerKeys {
+                    node,
+                    next_key: key_count,
+                }
+            } else {
+                SchemaContext::Unknown
+            };
+        }
+        if key_count > node.key_params.len() {
+            return SchemaContext::Unknown;
+        }
+        if after_keys.is_empty() {
+            return match &node.element {
+                Element::Group => SchemaContext::Members {
+                    members: &node.members,
+                },
+                Element::Slot { .. } => SchemaContext::Leaf,
+            };
+        }
+        if !matches!(node.element, Element::Group) {
+            return SchemaContext::Unknown;
+        }
+        members = &node.members;
+        rest = after_keys;
+    }
+}
+
+fn segment_name(segment: &PathSegment) -> Option<&str> {
+    match segment {
+        PathSegment::Field(name) | PathSegment::ChildLayer(name) | PathSegment::Index(name) => {
+            Some(name)
+        }
+        PathSegment::Root(_) | PathSegment::RecordKey(_) | PathSegment::IndexKey(_) => None,
+    }
+}
+
+fn child_metadata(context: &SchemaContext<'_>, child: &ChildSegment) -> ChildMetadata {
+    match (context, child) {
+        (
+            SchemaContext::Root {
+                resource, next_key, ..
+            },
+            ChildSegment::Key(key),
+        ) => resource
+            .saved_root
+            .as_ref()
+            .and_then(|root| root.identity_keys.get(*next_key))
+            .map(|key_def| {
+                key_metadata(
+                    "record_key",
+                    key_def,
+                    SegmentJson::Key(KeyJson::from_key(key)),
+                )
+            })
+            .unwrap_or_default(),
+        (
+            SchemaContext::Root {
+                resource,
+                include_indexes: true,
+                ..
+            },
+            ChildSegment::Name(name),
+        ) => resource
+            .indexes
+            .iter()
+            .find(|index| index.name == *name)
+            .map(index_metadata)
+            .unwrap_or_default(),
+        (SchemaContext::Members { members }, ChildSegment::Name(name)) => members
+            .iter()
+            .find(|node| node.name == *name)
+            .map(node_metadata)
+            .unwrap_or_default(),
+        (SchemaContext::LayerKeys { node, next_key }, ChildSegment::Key(key)) => node
+            .key_params
+            .get(*next_key)
+            .map(|key_def| {
+                key_metadata(
+                    "layer_key",
+                    key_def,
+                    SegmentJson::IndexKey(KeyJson::from_key(key)),
+                )
+            })
+            .unwrap_or_default(),
+        (
+            SchemaContext::IndexKeys {
+                resource,
+                index,
+                next_key,
+            },
+            ChildSegment::Key(key),
+        ) => index
+            .args
+            .get(*next_key)
+            .and_then(|arg| index_arg_type(resource, arg).map(|ty| (arg, ty)))
+            .map(|(arg, ty)| {
+                let ty = type_name(ty);
+                ChildMetadata {
+                    role: Some("index_key".to_string()),
+                    detail: Some(format!("{arg}: {ty}")),
+                    r#type: Some(ty),
+                    append_segment: Some(SegmentJson::IndexKey(KeyJson::from_key(key))),
+                }
+            })
+            .unwrap_or_default(),
+        _ => ChildMetadata::default(),
+    }
+}
+
+fn child_metadata_with_path_fallback(
+    context: &SchemaContext<'_>,
+    parent_path: &[PathSegment],
+    child: &ChildSegment,
+) -> ChildMetadata {
+    let mut metadata = child_metadata(context, child);
+    if metadata.append_segment.is_none()
+        && path_contains_named_segment(parent_path)
+        && let ChildSegment::Key(key) = child
+    {
+        metadata.append_segment = Some(SegmentJson::IndexKey(KeyJson::from_key(key)));
+    }
+    metadata
+}
+
+fn key_metadata(role: &str, key: &KeyDef, append_segment: SegmentJson) -> ChildMetadata {
+    let ty = type_name(&key.ty);
+    ChildMetadata {
+        role: Some(role.to_string()),
+        detail: Some(format!("{}: {ty}", key.name)),
+        r#type: Some(ty),
+        append_segment: Some(append_segment),
+    }
+}
+
+fn index_metadata(index: &IndexSchema) -> ChildMetadata {
+    ChildMetadata {
+        role: Some("index".to_string()),
+        detail: Some(format!("index {}({})", index.name, index.args.join(", "))),
+        r#type: None,
+        append_segment: Some(SegmentJson::Index(index.name.clone())),
+    }
+}
+
+fn node_metadata(node: &Node) -> ChildMetadata {
+    match &node.element {
+        Element::Slot { ty, required } if node.key_params.is_empty() => ChildMetadata {
+            role: Some("field".to_string()),
+            detail: required.then(|| "required".to_string()),
+            r#type: Some(type_name(ty)),
+            append_segment: Some(SegmentJson::Field(node.name.clone())),
+        },
+        Element::Slot { ty, .. } => ChildMetadata {
+            role: Some("layer".to_string()),
+            detail: key_params_detail(&node.key_params),
+            r#type: Some(type_name(ty)),
+            append_segment: Some(SegmentJson::Layer(node.name.clone())),
+        },
+        Element::Group => ChildMetadata {
+            role: Some(if node.key_params.is_empty() {
+                "group".to_string()
+            } else {
+                "layer".to_string()
+            }),
+            detail: key_params_detail(&node.key_params),
+            r#type: None,
+            append_segment: Some(SegmentJson::Layer(node.name.clone())),
+        },
+    }
+}
+
+fn index_arg_type<'a>(resource: &'a ResourceSchema, arg: &str) -> Option<&'a Type> {
+    resource
+        .saved_root
+        .as_ref()
+        .and_then(|root| root.identity_keys.iter().find(|key| key.name == arg))
+        .map(|key| &key.ty)
+        .or_else(|| resource.field_type(&[arg]))
+}
+
+fn key_params_detail(params: &[KeyDef]) -> Option<String> {
+    if params.is_empty() {
+        return None;
+    }
+    Some(
+        params
+            .iter()
+            .map(|key| format!("{}: {}", key.name, type_name(&key.ty)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn type_name(ty: &Type) -> String {
+    ty.to_string()
+}
+
 /// The leaf type name for a path, when the schema declares it as a typed leaf.
 fn leaf_type_name(program: &CheckedProgram, path: &[PathSegment]) -> Option<String> {
     match marrow_run::classify_saved_path(program, path) {
@@ -233,11 +624,31 @@ fn leaf_type_name(program: &CheckedProgram, path: &[PathSegment]) -> Option<Stri
 }
 
 fn child_json(child: &ChildSegment) -> ChildJson {
+    child_json_with_metadata(child, ChildMetadata::default())
+}
+
+fn child_json_with_metadata(child: &ChildSegment, metadata: ChildMetadata) -> ChildJson {
+    let ChildMetadata {
+        role,
+        detail,
+        r#type,
+        append_segment,
+    } = metadata;
     match child {
         ChildSegment::Key(key) => ChildJson::Key {
             key: KeyJson::from_key(key),
+            role,
+            detail,
+            r#type,
+            append_segment,
         },
-        ChildSegment::Name(name) => ChildJson::Name { name: name.clone() },
+        ChildSegment::Name(name) => ChildJson::Name {
+            name: name.clone(),
+            role,
+            detail,
+            r#type,
+            append_segment,
+        },
     }
 }
 
@@ -330,6 +741,180 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    struct SchemaFixture {
+        _dir: tempfile::TempDir,
+        project: crate::workspace::Project,
+        program: CheckedProgram,
+        store_path: std::path::PathBuf,
+    }
+
+    fn schema_fixture(source: &str) -> SchemaFixture {
+        use marrow_check::{ProjectSources, analyze_project};
+        use marrow_project::parse_config;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let config_text = r#"{
+            "sourceRoots": ["src"],
+            "store": { "backend": "native", "dataDir": "data" }
+        }"#;
+        std::fs::write(root.join("marrow.json"), config_text).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("src").join("shelf.mw"), source).unwrap();
+
+        let config = parse_config(config_text).unwrap();
+        let program = analyze_project(root, &config, &ProjectSources::new())
+            .unwrap()
+            .program;
+        let project = crate::workspace::Project {
+            root: root.to_path_buf(),
+            config,
+        };
+        let store_path = root.join("data").join("marrow.redb");
+        SchemaFixture {
+            _dir: dir,
+            project,
+            program,
+            store_path,
+        }
+    }
+
+    fn schema_children_source() -> &'static str {
+        "\
+module shelf
+
+resource Book at ^books(id: int)
+    required title: string
+    tags(pos: int): string
+
+    index byTitle(title) unique
+
+resource Edition at ^editions(isbn: string, locale: string)
+    required title: string
+"
+    }
+
+    fn seed_schema_children_store(path: &std::path::Path) {
+        use marrow_store::backend::Backend;
+        use marrow_store::path::{PathSegment, SavedKey, encode_key_value, encode_path};
+        use marrow_store::redb::RedbStore;
+
+        let mut store = RedbStore::open(path).unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("books".to_string()),
+                    PathSegment::RecordKey(SavedKey::Int(1)),
+                    PathSegment::Field("title".to_string()),
+                    PathSegment::IndexKey(SavedKey::Int(0)),
+                    PathSegment::Field("note".to_string()),
+                ]),
+                b"leaf orphan".to_vec(),
+            )
+            .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("books".to_string()),
+                    PathSegment::RecordKey(SavedKey::Int(1)),
+                    PathSegment::Field("title".to_string()),
+                ]),
+                b"Mort".to_vec(),
+            )
+            .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("books".to_string()),
+                    PathSegment::RecordKey(SavedKey::Int(1)),
+                    PathSegment::ChildLayer("tags".to_string()),
+                    PathSegment::IndexKey(SavedKey::Int(0)),
+                ]),
+                b"fantasy".to_vec(),
+            )
+            .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("books".to_string()),
+                    PathSegment::Index("byTitle".to_string()),
+                    PathSegment::IndexKey(SavedKey::Str("Mort".to_string())),
+                    PathSegment::IndexKey(SavedKey::Int(0)),
+                    PathSegment::Field("note".to_string()),
+                ]),
+                b"index orphan".to_vec(),
+            )
+            .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("books".to_string()),
+                    PathSegment::Index("byTitle".to_string()),
+                    PathSegment::IndexKey(SavedKey::Str("Mort".to_string())),
+                ]),
+                encode_key_value(&SavedKey::Int(1)),
+            )
+            .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("books".to_string()),
+                    PathSegment::RecordKey(SavedKey::Int(1)),
+                    PathSegment::Field("legacy".to_string()),
+                ]),
+                b"foreign".to_vec(),
+            )
+            .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("books".to_string()),
+                    PathSegment::RecordKey(SavedKey::Int(1)),
+                    PathSegment::Field("legacy".to_string()),
+                    PathSegment::IndexKey(SavedKey::Int(0)),
+                    PathSegment::Field("note".to_string()),
+                ]),
+                b"orphan".to_vec(),
+            )
+            .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("editions".to_string()),
+                    PathSegment::RecordKey(SavedKey::Str("978-0".to_string())),
+                    PathSegment::RecordKey(SavedKey::Str("en".to_string())),
+                    PathSegment::Field("title".to_string()),
+                ]),
+                b"Mort".to_vec(),
+            )
+            .unwrap();
+    }
+
+    fn assert_child_json(children: &[ChildJson], expected: serde_json::Value) {
+        let actual: Vec<serde_json::Value> = children
+            .iter()
+            .map(|child| serde_json::to_value(child).unwrap())
+            .collect();
+        assert!(
+            actual.iter().any(|child| child == &expected),
+            "missing child {expected}; actual children: {actual:#?}"
+        );
+    }
+
+    fn assert_no_child_metadata(children: &[ChildJson], kind: &str, name: &str) {
+        let actual = children
+            .iter()
+            .map(|child| serde_json::to_value(child).unwrap())
+            .find(|child| child["kind"] == kind && child["name"] == name)
+            .unwrap_or_else(|| panic!("missing {kind} child {name}"));
+        assert_eq!(
+            actual,
+            serde_json::json!({ "kind": kind, "name": name }),
+            "orphan/foreign children stay plain and navigable by fallback"
+        );
+    }
+
     #[test]
     fn a_path_round_trips_through_its_json_encoding() {
         let json = vec![
@@ -403,6 +988,240 @@ mod tests {
             None,
         );
         assert!(!children.available);
+    }
+
+    #[test]
+    fn saved_children_with_schema_labels_record_members_layers_and_indexes() {
+        let fixture = schema_fixture(schema_children_source());
+        seed_schema_children_store(&fixture.store_path);
+        let reader = StoreReader::for_project(&fixture.project).unwrap();
+
+        let root = saved_children_with_schema(
+            SavedChildrenParams {
+                path: vec![SegmentJson::Root("books".to_string())],
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+
+        assert!(root.available, "{root:?}");
+        assert_child_json(
+            &root.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "int": 1 },
+                "role": "record_key",
+                "detail": "id: int",
+                "type": "int",
+                "appendSegment": { "key": { "int": 1 } }
+            }),
+        );
+        assert_child_json(
+            &root.children,
+            serde_json::json!({
+                "kind": "name",
+                "name": "byTitle",
+                "role": "index",
+                "detail": "index byTitle(title)",
+                "appendSegment": { "index": "byTitle" }
+            }),
+        );
+
+        let record = saved_children_with_schema(
+            SavedChildrenParams {
+                path: vec![
+                    SegmentJson::Root("books".to_string()),
+                    SegmentJson::Key(KeyJson::Int(1)),
+                ],
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+
+        assert!(record.available, "{record:?}");
+        assert_child_json(
+            &record.children,
+            serde_json::json!({
+                "kind": "name",
+                "name": "title",
+                "role": "field",
+                "detail": "required",
+                "type": "string",
+                "appendSegment": { "field": "title" }
+            }),
+        );
+        assert_child_json(
+            &record.children,
+            serde_json::json!({
+                "kind": "name",
+                "name": "tags",
+                "role": "layer",
+                "detail": "pos: int",
+                "type": "string",
+                "appendSegment": { "layer": "tags" }
+            }),
+        );
+        assert_no_child_metadata(&record.children, "name", "legacy");
+    }
+
+    #[test]
+    fn saved_children_with_schema_uses_path_context_for_key_segments() {
+        let fixture = schema_fixture(schema_children_source());
+        seed_schema_children_store(&fixture.store_path);
+        let reader = StoreReader::for_project(&fixture.project).unwrap();
+
+        let layer = saved_children_with_schema(
+            SavedChildrenParams {
+                path: vec![
+                    SegmentJson::Root("books".to_string()),
+                    SegmentJson::Key(KeyJson::Int(1)),
+                    SegmentJson::Layer("tags".to_string()),
+                ],
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+        assert!(layer.available, "{layer:?}");
+        assert_child_json(
+            &layer.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "int": 0 },
+                "role": "layer_key",
+                "detail": "pos: int",
+                "type": "int",
+                "appendSegment": { "index_key": { "int": 0 } }
+            }),
+        );
+
+        let index = saved_children_with_schema(
+            SavedChildrenParams {
+                path: vec![
+                    SegmentJson::Root("books".to_string()),
+                    SegmentJson::Index("byTitle".to_string()),
+                ],
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+        assert!(index.available, "{index:?}");
+        assert_child_json(
+            &index.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "str": "Mort" },
+                "role": "index_key",
+                "detail": "title: string",
+                "type": "string",
+                "appendSegment": { "index_key": { "str": "Mort" } }
+            }),
+        );
+
+        let composite_record = saved_children_with_schema(
+            SavedChildrenParams {
+                path: vec![
+                    SegmentJson::Root("editions".to_string()),
+                    SegmentJson::Key(KeyJson::Str("978-0".to_string())),
+                ],
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+        assert!(composite_record.available, "{composite_record:?}");
+        assert_child_json(
+            &composite_record.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "str": "en" },
+                "role": "record_key",
+                "detail": "locale: string",
+                "type": "string",
+                "appendSegment": { "key": { "str": "en" } }
+            }),
+        );
+    }
+
+    #[test]
+    fn orphan_keyed_branches_get_index_key_append_segments_from_schema_path_context() {
+        let fixture = schema_fixture(schema_children_source());
+        seed_schema_children_store(&fixture.store_path);
+        let reader = StoreReader::for_project(&fixture.project).unwrap();
+        let unknown_path = vec![
+            SegmentJson::Root("books".to_string()),
+            SegmentJson::Key(KeyJson::Int(1)),
+            SegmentJson::Field("legacy".to_string()),
+        ];
+
+        let schema = saved_children_with_schema(
+            SavedChildrenParams {
+                path: unknown_path.clone(),
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+        assert!(schema.available, "{schema:?}");
+        assert_child_json(
+            &schema.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "int": 0 },
+                "appendSegment": { "index_key": { "int": 0 } }
+            }),
+        );
+
+        let leaf_path = vec![
+            SegmentJson::Root("books".to_string()),
+            SegmentJson::Key(KeyJson::Int(1)),
+            SegmentJson::Field("title".to_string()),
+        ];
+        let schema = saved_children_with_schema(
+            SavedChildrenParams {
+                path: leaf_path.clone(),
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+        assert!(schema.available, "{schema:?}");
+        assert_child_json(
+            &schema.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "int": 0 },
+                "appendSegment": { "index_key": { "int": 0 } }
+            }),
+        );
+
+        let index_result_path = vec![
+            SegmentJson::Root("books".to_string()),
+            SegmentJson::Index("byTitle".to_string()),
+            SegmentJson::IndexKey(KeyJson::Str("Mort".to_string())),
+        ];
+        let schema = saved_children_with_schema(
+            SavedChildrenParams {
+                path: index_result_path.clone(),
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+        assert!(schema.available, "{schema:?}");
+        assert_child_json(
+            &schema.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "int": 0 },
+                "appendSegment": { "index_key": { "int": 0 } }
+            }),
+        );
+
+        let raw = saved_children(SavedChildrenParams { path: leaf_path }, Some(&reader));
+        assert!(raw.available, "{raw:?}");
+        assert_child_json(
+            &raw.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "int": 0 }
+            }),
+        );
     }
 
     #[test]

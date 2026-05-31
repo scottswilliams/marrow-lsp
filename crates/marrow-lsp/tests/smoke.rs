@@ -777,12 +777,46 @@ fn custom_saved_get_returns_a_typed_value_from_a_seeded_store() {
     );
     let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
 
-    // Read `^books(1).title` through the custom request: a typed `string` value.
+    // List `^books(1)` through the custom request: the backend passes the checked
+    // program to the Data Explorer core, so saved children include schema labels.
     send(
         &mut stdin,
         &json!({
             "jsonrpc": "2.0",
             "id": 2,
+            "method": "marrow/savedChildren",
+            "params": {
+                "path": [
+                    { "root": "books" },
+                    { "key": { "int": 1 } }
+                ]
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    let result = &response["result"];
+    assert_eq!(result["available"], true, "the seeded store is readable");
+    assert_eq!(
+        result["children"],
+        json!([
+            {
+                "kind": "name",
+                "name": "title",
+                "role": "field",
+                "detail": "required",
+                "type": "string",
+                "appendSegment": { "field": "title" }
+            }
+        ])
+    );
+
+    // Read `^books(1).title` through the custom request: a typed `string` value.
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
             "method": "marrow/savedGet",
             "params": {
                 "path": [
@@ -793,7 +827,7 @@ fn custom_saved_get_returns_a_typed_value_from_a_seeded_store() {
             }
         }),
     );
-    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let response = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
     assert!(response.get("error").is_none(), "no error: {response:?}");
     let result = &response["result"];
     assert_eq!(result["available"], true, "the seeded store is readable");

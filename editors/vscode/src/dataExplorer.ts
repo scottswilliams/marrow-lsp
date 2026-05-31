@@ -25,7 +25,16 @@ type Segment =
   | { index: string }
   | { index_key: Key };
 
-type Child = { kind: "key"; key: Key } | { kind: "name"; name: string };
+type ChildMetadata = {
+  role?: string;
+  detail?: string;
+  type?: string;
+  appendSegment?: Segment;
+};
+
+type Child =
+  | ({ kind: "key"; key: Key } & ChildMetadata)
+  | ({ kind: "name"; name: string } & ChildMetadata);
 
 type Presence = "absent" | "value_only" | "children_only" | "value_and_children";
 
@@ -62,6 +71,9 @@ interface StoreNode {
   readonly path: Segment[];
   // Text shown for the tree item (root name, key value, or member name).
   readonly label: string;
+  readonly role?: string;
+  readonly detail?: string;
+  readonly type?: string;
 }
 
 interface PlaceholderNode {
@@ -97,22 +109,45 @@ function keyLabel(key: Key): string {
   return key.bytes;
 }
 
-// Map a server Child plus its parent path to a concrete tree node. A "key"
-// child extends the path with a key segment; a "name" child extends it with a
-// field segment. This mirrors how the core walks the store.
+// Map a server Child plus its parent path to a concrete tree node. Schema-aware
+// servers tell us the exact segment to append; raw/older servers fall back to
+// the original key-or-field behavior.
 function childToNode(parentPath: Segment[], child: Child): StoreNode {
+  const appendSegment = child.appendSegment ?? fallbackSegment(parentPath, child);
   if (child.kind === "key") {
     return {
       kind: "store",
-      path: [...parentPath, { key: child.key }],
+      path: [...parentPath, appendSegment],
       label: keyLabel(child.key),
+      role: child.role,
+      detail: child.detail,
+      type: child.type,
     };
   }
   return {
     kind: "store",
-    path: [...parentPath, { field: child.name }],
+    path: [...parentPath, appendSegment],
     label: child.name,
+    role: child.role,
+    detail: child.detail,
+    type: child.type,
   };
+}
+
+function fallbackSegment(parentPath: Segment[], child: Child): Segment {
+  if (child.kind === "key") {
+    if (pathContainsNamedSegment(parentPath)) {
+      return { index_key: child.key };
+    }
+    return { key: child.key };
+  }
+  return { field: child.name };
+}
+
+function pathContainsNamedSegment(path: Segment[]): boolean {
+  return path.some(
+    (segment) => "field" in segment || "layer" in segment || "index" in segment,
+  );
 }
 
 export class MarrowDataProvider implements vscode.TreeDataProvider<MarrowDataNode> {
@@ -145,6 +180,9 @@ export class MarrowDataProvider implements vscode.TreeDataProvider<MarrowDataNod
     // value/type description so the inline value is fetched once on expand.
     const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
     item.contextValue = "marrowData";
+    const schema = describeSchema(node, true);
+    item.description = schema;
+    item.tooltip = schema;
     return item;
   }
 
@@ -184,8 +222,11 @@ export class MarrowDataProvider implements vscode.TreeDataProvider<MarrowDataNod
         path: node.path,
       });
       if (result.available) {
-        item.description = describeValue(result);
-        item.tooltip = describeValue(result);
+        const value = describeValue(result);
+        const schema = describeSchema(node, result.type === undefined);
+        const description = joinDescriptions(value, schema);
+        item.description = description;
+        item.tooltip = description;
       }
     } catch {
       // A failed savedGet leaves the row without an inline value; the tree
@@ -249,4 +290,22 @@ function describeValue(result: SavedGetResult): string | undefined {
     return result.type !== undefined ? `(${result.type})` : undefined;
   }
   return result.type !== undefined ? `${result.value} (${result.type})` : result.value;
+}
+
+function describeSchema(node: StoreNode, includeType: boolean): string | undefined {
+  const detail = node.detail ?? node.role;
+  if (!includeType || node.type === undefined) {
+    return detail;
+  }
+  return detail === undefined ? `(${node.type})` : `${detail} (${node.type})`;
+}
+
+function joinDescriptions(
+  primary: string | undefined,
+  secondary: string | undefined,
+): string | undefined {
+  if (primary === undefined) {
+    return secondary;
+  }
+  return secondary === undefined ? primary : `${primary} - ${secondary}`;
 }

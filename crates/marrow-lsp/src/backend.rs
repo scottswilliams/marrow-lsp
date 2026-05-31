@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use marrow_lsp_core::data_explorer::{
     SavedChildrenParams, SavedChildrenResult, SavedGetParams, SavedGetResult, SavedRootsResult,
-    saved_children, saved_get, saved_roots,
+    saved_children_with_schema, saved_get, saved_roots,
 };
 use marrow_lsp_core::data_integrity::{DataIntegrityParams, DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
@@ -83,7 +83,9 @@ impl Backend {
     ) -> jsonrpc::Result<SavedChildrenResult> {
         let state = self.state.lock().await;
         let reader = self.reader(&state.workspace);
-        Ok(saved_children(params, reader.as_ref()))
+        let empty = EMPTY_PROGRAM.get_or_init(Default::default);
+        let program = state.workspace.program().unwrap_or(empty);
+        Ok(saved_children_with_schema(params, program, reader.as_ref()))
     }
 
     /// `marrow/savedGet`: the presence and schema-typed value at a saved path. The
