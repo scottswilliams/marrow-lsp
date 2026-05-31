@@ -19,8 +19,8 @@ use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, Semanti
 use marrow_check::{BindingIndex, SymbolKind, SymbolRef};
 use marrow_schema::stdlib;
 use marrow_syntax::{
-    Declaration, EnumMember, FieldDecl, GroupDecl, IndexDecl, Keyword, LexedSource, ResourceMember,
-    SourceFile, SourceSpan, Token, TokenKind,
+    Block, Declaration, EnumMember, FieldDecl, GroupDecl, IndexDecl, Keyword, LexedSource,
+    ResourceMember, SourceFile, SourceSpan, Statement, Token, TokenKind, TypeRef,
 };
 
 use crate::{
@@ -121,6 +121,7 @@ pub fn semantic_tokens_with_bindings(
     let reference_overrides = binding_index
         .map(|(binding_index, path)| reference_overrides(lexed, index.text(), binding_index, path))
         .unwrap_or_default();
+    let type_annotation_overrides = type_annotation_overrides(lexed, file, index.text());
     let builtin_overrides = builtin_overrides(lexed, index.text());
 
     let mut i = 0;
@@ -170,6 +171,11 @@ pub fn semantic_tokens_with_bindings(
             })
             .or_else(|| {
                 reference_overrides
+                    .get(&(token.span.start_byte, token.span.end_byte))
+                    .copied()
+            })
+            .or_else(|| {
+                type_annotation_overrides
                     .get(&(token.span.start_byte, token.span.end_byte))
                     .copied()
             })
@@ -583,6 +589,20 @@ fn reference_overrides(
         let Some(reference) =
             best_reference_for_token(token, &references, path, source, &definition)
         else {
+            if best_namespace_prefix_reference_for_token(
+                token,
+                &references,
+                path,
+                source,
+                &definition,
+            )
+            .is_some()
+            {
+                overrides.insert(
+                    (token.span.start_byte, token.span.end_byte),
+                    TokenStyle::plain(TYPE_NAMESPACE),
+                );
+            }
             continue;
         };
         let Some(style) = style_for_symbol_kind(reference.kind) else {
@@ -604,6 +624,22 @@ fn best_reference_for_token<'a>(
         .iter()
         .filter(|reference| reference.file == path)
         .filter(|reference| reference_matches_token(reference, token, source, definition))
+        .min_by_key(|reference| span_width(reference.span))
+}
+
+fn best_namespace_prefix_reference_for_token<'a>(
+    token: &Token,
+    references: &'a [SymbolRef],
+    path: &Path,
+    source: &str,
+    definition: &SymbolRef,
+) -> Option<&'a SymbolRef> {
+    references
+        .iter()
+        .filter(|reference| reference.file == path)
+        .filter(|reference| {
+            reference_matches_namespace_prefix(reference, token, source, definition)
+        })
         .min_by_key(|reference| span_width(reference.span))
 }
 
@@ -632,6 +668,21 @@ fn reference_matches_token(
     ) && token_is_leaf_in_reference(reference.span, token, source)
 }
 
+fn reference_matches_namespace_prefix(
+    reference: &SymbolRef,
+    token: &Token,
+    source: &str,
+    definition: &SymbolRef,
+) -> bool {
+    if reference.span == definition.span {
+        return false;
+    }
+    matches!(
+        reference.kind,
+        SymbolKind::Function | SymbolKind::Resource | SymbolKind::ResourceIdentity
+    ) && token_is_namespace_prefix_in_reference(reference.span, token, source)
+}
+
 fn token_is_leaf_in_reference(span: SourceSpan, token: &Token, source: &str) -> bool {
     if token.span.start_byte < span.start_byte || token.span.end_byte > span.end_byte {
         return false;
@@ -642,6 +693,15 @@ fn token_is_leaf_in_reference(span: SourceSpan, token: &Token, source: &str) -> 
     !text
         .chars()
         .any(|ch| ch == ':' || ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn token_is_namespace_prefix_in_reference(span: SourceSpan, token: &Token, source: &str) -> bool {
+    if token.span.start_byte < span.start_byte || token.span.end_byte >= span.end_byte {
+        return false;
+    }
+    source
+        .get(token.span.end_byte..span.end_byte)
+        .is_some_and(|text| text.contains("::"))
 }
 
 fn span_width(span: SourceSpan) -> usize {
@@ -660,6 +720,237 @@ fn style_for_symbol_kind(kind: SymbolKind) -> Option<TokenStyle> {
         SymbolKind::ModuleConst | SymbolKind::ModuleRef => return None,
     };
     Some(TokenStyle::plain(token_type))
+}
+
+fn type_annotation_overrides(
+    lexed: &LexedSource,
+    file: &SourceFile,
+    source: &str,
+) -> HashMap<ByteSpan, TokenStyle> {
+    let resources: Vec<&str> = file
+        .declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            Declaration::Resource(resource) => Some(resource.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut overrides = HashMap::new();
+    for declaration in &file.declarations {
+        match declaration {
+            Declaration::Const(const_decl) => {
+                if let Some(ty) = &const_decl.ty {
+                    add_type_annotation_overrides(&mut overrides, lexed, source, ty, &resources);
+                }
+            }
+            Declaration::Function(function) => {
+                for param in &function.params {
+                    add_type_annotation_overrides(
+                        &mut overrides,
+                        lexed,
+                        source,
+                        &param.ty,
+                        &resources,
+                    );
+                }
+                if let Some(ty) = &function.return_type {
+                    add_type_annotation_overrides(&mut overrides, lexed, source, ty, &resources);
+                }
+                add_block_type_annotation_overrides(
+                    &mut overrides,
+                    lexed,
+                    source,
+                    &function.body,
+                    &resources,
+                );
+            }
+            Declaration::Resource(resource) => {
+                for member in &resource.members {
+                    add_resource_member_type_annotation_overrides(
+                        &mut overrides,
+                        lexed,
+                        source,
+                        member,
+                        &resources,
+                    );
+                }
+            }
+            Declaration::Enum(_) => {}
+        }
+    }
+    overrides
+}
+
+fn add_block_type_annotation_overrides(
+    overrides: &mut HashMap<ByteSpan, TokenStyle>,
+    lexed: &LexedSource,
+    source: &str,
+    block: &Block,
+    resources: &[&str],
+) {
+    for statement in &block.statements {
+        match statement {
+            Statement::Const { ty, .. } => {
+                if let Some(ty) = ty {
+                    add_type_annotation_overrides(overrides, lexed, source, ty, resources);
+                }
+            }
+            Statement::Var { keys, ty, .. } => {
+                for key in keys {
+                    add_type_annotation_overrides(overrides, lexed, source, &key.ty, resources);
+                }
+                if let Some(ty) = ty {
+                    add_type_annotation_overrides(overrides, lexed, source, ty, resources);
+                }
+            }
+            Statement::If {
+                then_block,
+                else_ifs,
+                else_block,
+                ..
+            } => {
+                add_block_type_annotation_overrides(
+                    overrides, lexed, source, then_block, resources,
+                );
+                for else_if in else_ifs {
+                    add_block_type_annotation_overrides(
+                        overrides,
+                        lexed,
+                        source,
+                        &else_if.block,
+                        resources,
+                    );
+                }
+                if let Some(else_block) = else_block {
+                    add_block_type_annotation_overrides(
+                        overrides, lexed, source, else_block, resources,
+                    );
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::For { body, .. }
+            | Statement::Transaction { body, .. }
+            | Statement::Lock { body, .. } => {
+                add_block_type_annotation_overrides(overrides, lexed, source, body, resources);
+            }
+            Statement::Try {
+                body,
+                catch,
+                finally,
+                ..
+            } => {
+                add_block_type_annotation_overrides(overrides, lexed, source, body, resources);
+                if let Some(catch) = catch {
+                    if let Some(ty) = &catch.ty {
+                        add_type_annotation_overrides(overrides, lexed, source, ty, resources);
+                    }
+                    add_block_type_annotation_overrides(
+                        overrides,
+                        lexed,
+                        source,
+                        &catch.block,
+                        resources,
+                    );
+                }
+                if let Some(finally) = finally {
+                    add_block_type_annotation_overrides(
+                        overrides, lexed, source, finally, resources,
+                    );
+                }
+            }
+            Statement::Match { arms, .. } => {
+                for arm in arms {
+                    add_block_type_annotation_overrides(
+                        overrides, lexed, source, &arm.block, resources,
+                    );
+                }
+            }
+            Statement::Assign { .. }
+            | Statement::Delete { .. }
+            | Statement::Merge { .. }
+            | Statement::Return { .. }
+            | Statement::Break { .. }
+            | Statement::Continue { .. }
+            | Statement::Throw { .. }
+            | Statement::Expr { .. } => {}
+        }
+    }
+}
+
+fn add_resource_member_type_annotation_overrides(
+    overrides: &mut HashMap<ByteSpan, TokenStyle>,
+    lexed: &LexedSource,
+    source: &str,
+    member: &ResourceMember,
+    resources: &[&str],
+) {
+    match member {
+        ResourceMember::Field(field) => {
+            for key in &field.keys {
+                add_type_annotation_overrides(overrides, lexed, source, &key.ty, resources);
+            }
+            add_type_annotation_overrides(overrides, lexed, source, &field.ty, resources);
+        }
+        ResourceMember::Group(group) => {
+            for key in &group.keys {
+                add_type_annotation_overrides(overrides, lexed, source, &key.ty, resources);
+            }
+            for member in &group.members {
+                add_resource_member_type_annotation_overrides(
+                    overrides, lexed, source, member, resources,
+                );
+            }
+        }
+        ResourceMember::Index(_) => {}
+    }
+}
+
+fn add_type_annotation_overrides(
+    overrides: &mut HashMap<ByteSpan, TokenStyle>,
+    lexed: &LexedSource,
+    source: &str,
+    ty: &TypeRef,
+    resources: &[&str],
+) {
+    let significant_tokens = lexed
+        .tokens
+        .iter()
+        .filter(|token| token_in_span(token, ty.span) && !is_trivia(token.kind))
+        .collect::<Vec<_>>();
+
+    for (index, tokens) in significant_tokens.windows(3).enumerate() {
+        let [resource_token, separator, id_token] = tokens else {
+            continue;
+        };
+        if !is_path_segment_token(resource_token.kind)
+            || separator.kind != TokenKind::DoubleColon
+            || !is_path_segment_token(id_token.kind)
+            || id_token.text(source) != "Id"
+            || index
+                .checked_sub(1)
+                .and_then(|previous| significant_tokens.get(previous))
+                .is_some_and(|token| token.kind == TokenKind::DoubleColon)
+            || significant_tokens
+                .get(index + 3)
+                .is_some_and(|token| token.kind == TokenKind::DoubleColon)
+        {
+            continue;
+        }
+
+        let resource = resource_token.text(source);
+        if !resources.contains(&resource) {
+            continue;
+        }
+
+        overrides.insert(
+            (resource_token.span.start_byte, resource_token.span.end_byte),
+            TokenStyle::plain(TYPE_NAMESPACE),
+        );
+        overrides.insert(
+            (id_token.span.start_byte, id_token.span.end_byte),
+            TokenStyle::plain(TYPE_STRUCT),
+        );
+    }
 }
 
 fn builtin_overrides(lexed: &LexedSource, source: &str) -> HashMap<ByteSpan, TokenStyle> {
@@ -681,6 +972,10 @@ fn builtin_overrides(lexed: &LexedSource, source: &str) -> HashMap<ByteSpan, Tok
             None
         };
         if let Some(token_type) = token_type {
+            if is_std_library_call(lexed, source, index) {
+                insert_builtin_namespace_prefix(&mut overrides, &lexed.tokens[index - 4]);
+                insert_builtin_namespace_prefix(&mut overrides, &lexed.tokens[index - 2]);
+            }
             overrides.insert(
                 (token.span.start_byte, token.span.end_byte),
                 TokenStyle {
@@ -691,6 +986,13 @@ fn builtin_overrides(lexed: &LexedSource, source: &str) -> HashMap<ByteSpan, Tok
         }
     }
     overrides
+}
+
+fn insert_builtin_namespace_prefix(overrides: &mut HashMap<ByteSpan, TokenStyle>, token: &Token) {
+    overrides.insert(
+        (token.span.start_byte, token.span.end_byte),
+        TokenStyle::plain(TYPE_NAMESPACE),
+    );
 }
 
 fn is_call_leaf(lexed: &LexedSource, index: usize) -> bool {
@@ -1547,7 +1849,26 @@ fn f()
         let (index, decoded) = decoded_for_checked(source);
         let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
         let function = legend_index(&SemanticTokenType::FUNCTION);
+        let namespace = legend_index(&SemanticTokenType::NAMESPACE);
 
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    std::assert::isTrue(true)",
+            "std",
+            namespace,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    std::assert::isTrue(true)",
+            "assert",
+            namespace,
+            0,
+        );
         assert_token(
             source,
             &index,
@@ -1573,6 +1894,205 @@ fn f()
             "    const unknown_value = std::text::missing(\"abc\")",
             "missing",
             legend_index(&SemanticTokenType::VARIABLE),
+            0,
+        );
+    }
+
+    #[test]
+    fn checked_qualified_call_prefixes_are_namespaces_while_leaf_keeps_role() {
+        let source = "\
+module m
+
+pub fn helper(): int
+    return 1
+
+fn f(): int
+    return m::helper()
+";
+        let (index, decoded) = decoded_for_checked(source);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return m::helper()",
+            "m",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return m::helper()",
+            "helper",
+            legend_index(&SemanticTokenType::FUNCTION),
+            0,
+        );
+    }
+
+    #[test]
+    fn checked_resource_identity_constructor_prefix_is_namespace_while_leaf_stays_struct() {
+        let source = "\
+module m
+
+resource Author at ^authors(id: int)
+    name: string
+
+pub fn f(): Author::Id
+    return Author::Id(7)
+";
+        let (index, decoded) = decoded_for_checked(source);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "pub fn f(): Author::Id",
+            "Author",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "pub fn f(): Author::Id",
+            "Id",
+            legend_index(&SemanticTokenType::STRUCT),
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return Author::Id(7)",
+            "Author",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return Author::Id(7)",
+            "Id",
+            legend_index(&SemanticTokenType::STRUCT),
+            0,
+        );
+    }
+
+    #[test]
+    fn checked_nested_resource_identity_type_prefix_is_namespace_while_leaf_stays_struct() {
+        let source = "\
+module m
+
+resource Author at ^authors(id: int)
+    name: string
+
+pub fn f(
+    ids: sequence[Author::Id],
+): sequence[Author::Id]
+    return ids
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let namespace = legend_index(&SemanticTokenType::NAMESPACE);
+        let strukt = legend_index(&SemanticTokenType::STRUCT);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    ids: sequence[Author::Id],",
+            "Author",
+            namespace,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    ids: sequence[Author::Id],",
+            "Id",
+            strukt,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "): sequence[Author::Id]",
+            "Author",
+            namespace,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "): sequence[Author::Id]",
+            "Id",
+            strukt,
+            0,
+        );
+    }
+
+    #[test]
+    fn local_resource_identity_type_annotations_color_resource_and_id() {
+        let source = "\
+module m
+
+resource Author at ^authors(id: int)
+    name: string
+
+fn f(): Author::Id
+    const direct: Author::Id = nextId(^authors)
+    var later: Author::Id = direct
+    return direct
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let namespace = legend_index(&SemanticTokenType::NAMESPACE);
+        let strukt = legend_index(&SemanticTokenType::STRUCT);
+
+        for line in [
+            "    const direct: Author::Id = nextId(^authors)",
+            "    var later: Author::Id = direct",
+        ] {
+            assert_token(source, &index, &decoded, line, "Author", namespace, 0);
+            assert_token(source, &index, &decoded, line, "Id", strukt, 0);
+        }
+    }
+
+    #[test]
+    fn longer_resource_identity_type_paths_are_not_colored_as_resource_id() {
+        let source = "\
+module m
+
+resource Author at ^authors(id: int)
+    name: string
+
+fn bad_extra(x: Author::Id::Extra)
+    return
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let variable = legend_index(&SemanticTokenType::VARIABLE);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "fn bad_extra(x: Author::Id::Extra)",
+            "Author",
+            variable,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "fn bad_extra(x: Author::Id::Extra)",
+            "Id",
+            variable,
             0,
         );
     }
