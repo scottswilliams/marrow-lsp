@@ -466,22 +466,37 @@ mod tests {
         }
     }
 
-    /// Analyze a one-file project on disk and return the snapshot, the module file
-    /// path, and a file-index map over the source so navigation maps spans.
-    fn analyze(source: &str) -> (AnalysisSnapshot, PathBuf, Indices) {
+    /// Analyze a project on disk and return the snapshot, module file paths, and
+    /// file indices over the source so navigation maps spans.
+    fn analyze_files(files: &[(&str, &str)]) -> (AnalysisSnapshot, Vec<PathBuf>, Indices) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
-        let file = src.join("a.mw");
-        std::fs::write(&file, source).unwrap();
+        let mut paths = Vec::new();
+        let mut indices = HashMap::new();
+        for (relative, source) in files {
+            let file = src.join(relative);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&file, source).unwrap();
+            indices.insert(file.clone(), LineIndex::new((*source).to_string()));
+            paths.push(file);
+        }
         let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
         let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
         std::mem::forget(dir);
-        let mut indices = HashMap::new();
-        indices.insert(file.clone(), LineIndex::new(source.to_string()));
-        (snapshot, file, Indices(indices))
+        (snapshot, paths, Indices(indices))
+    }
+
+    /// Analyze a one-file project on disk and return the snapshot, the module file
+    /// path, and a file-index map over the source so navigation maps spans.
+    fn analyze(source: &str) -> (AnalysisSnapshot, PathBuf, Indices) {
+        let (snapshot, mut paths, indices) = analyze_files(&[("a.mw", source)]);
+        let file = paths.pop().unwrap();
+        (snapshot, file, indices)
     }
 
     fn offset_of(source: &str, needle: &str) -> usize {
@@ -493,6 +508,18 @@ mod tests {
         let index = LineIndex::new(source.to_string());
         let position = index.position(offset);
         (position.line, position.character)
+    }
+
+    fn range_text<'a>(source: &'a str, index: &LineIndex, range: Range) -> &'a str {
+        let start = index.offset(crate::positions::Position {
+            line: range.start.line,
+            character: range.start.character,
+        });
+        let end = index.offset(crate::positions::Position {
+            line: range.end.line,
+            character: range.end.character,
+        });
+        &source[start..end]
     }
 
     #[test]
@@ -665,5 +692,158 @@ pub fn f(): string
         assert_eq!(range.start.line, line);
         assert_eq!(range.start.character, character);
         assert_eq!(range.end.character, character + 1, "the range covers `n`");
+    }
+
+    #[test]
+    fn definition_from_enum_type_annotation_jumps_to_enum_name() {
+        let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+        let app_source = "\
+module app
+use a::b
+
+fn f(): b::Status
+    return b::Status::active
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+        let status_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let annotation = offset_of(app_source, "b::Status") + "b::".len();
+        let location = definition(&index, &indices, app_file, annotation + 1)
+            .expect("enum annotation resolves to its declaration");
+        let line_index = indices.0.get(status_file).unwrap();
+
+        assert_eq!(
+            range_text(status_source, line_index, location.range),
+            "Status"
+        );
+        let enum_name = offset_of(status_source, "enum Status") + "enum ".len();
+        let (line, character) = line_col(status_source, enum_name);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn references_from_enum_type_annotation_stay_on_that_enum() {
+        let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+        let app_source = "\
+module app
+use a::b
+
+enum Color
+    active
+
+fn f(): b::Status
+    const current: b::Status = b::Status::active
+    const color: Color = Color::active
+    return current
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+        let status_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+
+        let annotation =
+            offset_of(app_source, "const current: b::Status") + "const current: b::".len();
+        let refs = references(&index, &indices, app_file, annotation + 1, true)
+            .expect("references for enum annotation");
+        let texts: Vec<&str> = refs
+            .iter()
+            .map(|location| {
+                let path = location.uri.to_file_path().unwrap();
+                let (source, line_index) = if path == *status_file {
+                    (status_source, indices.0.get(status_file).unwrap())
+                } else {
+                    (app_source, indices.0.get(app_file).unwrap())
+                };
+                range_text(source, line_index, location.range)
+            })
+            .collect();
+
+        assert_eq!(
+            texts,
+            vec!["Status", "Status", "Status", "Status"],
+            "declaration, return annotation, local annotation, and literal prefix are enum refs"
+        );
+
+        let without_decl = references(&index, &indices, app_file, annotation + 1, false).unwrap();
+        assert_eq!(
+            without_decl.len(),
+            refs.len() - 1,
+            "excluding the declaration drops only the enum declaration"
+        );
+        assert!(
+            texts
+                .iter()
+                .all(|text| *text != "active" && *text != "Color"),
+            "enum references should not include member values or another enum: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn rename_from_enum_type_annotation_rewrites_leaf_enum_occurrences_only() {
+        let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+        let app_source = "\
+module app
+use a::b
+
+fn f(): b::Status
+    const current: b::Status = b::Status::active
+    return current
+";
+        let (snapshot, paths, indices) =
+            analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+        let status_file = &paths[0];
+        let app_file = &paths[1];
+        let index = build_binding_index(&snapshot);
+        let app_index = indices.0.get(app_file).unwrap();
+
+        let annotation =
+            offset_of(app_source, "const current: b::Status") + "const current: b::".len();
+        let prepared = prepare_rename(&index, &indices, app_file, annotation + 1)
+            .expect("enum annotation can prepare rename");
+        assert_eq!(range_text(app_source, app_index, prepared), "Status");
+
+        let edit = rename(&index, &indices, app_file, annotation + 1, "State")
+            .expect("enum annotation rename succeeds");
+        let changes = edit.changes.expect("changes present");
+        let mut replaced = Vec::new();
+        for (url, edits) in &changes {
+            let path = url.to_file_path().unwrap();
+            let (source, line_index) = if path == *status_file {
+                (status_source, indices.0.get(status_file).unwrap())
+            } else {
+                (app_source, app_index)
+            };
+            for edit in edits {
+                replaced.push(range_text(source, line_index, edit.range));
+                assert_eq!(edit.new_text, "State");
+            }
+        }
+        replaced.sort_unstable();
+
+        assert_eq!(
+            replaced,
+            vec!["Status", "Status", "Status", "Status"],
+            "rename touches the declaration, annotations, and literal enum prefix"
+        );
     }
 }

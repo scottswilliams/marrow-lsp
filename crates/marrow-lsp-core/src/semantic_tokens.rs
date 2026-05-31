@@ -1459,6 +1459,30 @@ fn helper(id: int): int
     }
 
     #[test]
+    fn enum_type_annotation_references_color_as_enums() {
+        let source = "\
+module m
+
+enum Status
+    active
+    archived
+
+fn f()
+    const current: Status = Status::active
+";
+        let (index, decoded) = decoded_for_checked(source);
+
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    const current: Status = Status::active",
+            "Status",
+            legend_index(&SemanticTokenType::ENUM),
+        );
+    }
+
+    #[test]
     fn known_default_library_calls_carry_default_library_modifier() {
         let source = "\
 module m

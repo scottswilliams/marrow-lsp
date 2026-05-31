@@ -2352,7 +2352,7 @@ pub fn set(Status: int)
     }
 
     #[test]
-    fn hover_over_imported_qualified_enum_type_annotation_shows_docs_and_members() {
+    fn hover_over_qualified_foreign_enum_type_annotation_shows_enum_hover() {
         let state_source = "\
 module shelf::state
 
@@ -2399,7 +2399,7 @@ pub fn set(status: state::Status)
     }
 
     #[test]
-    fn hover_over_bare_foreign_enum_type_annotation_does_not_show_enum_hover() {
+    fn hover_over_bare_project_enum_type_annotation_shows_enum_hover() {
         let state_source = "\
 module shelf::state
 
@@ -2423,18 +2423,24 @@ pub fn set(status: Status)
         );
         let index = index_for(&snapshot);
         let offset = offset_of(app_source, "status: Status") + "status: ".len();
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None);
-        if let Some(Hover {
-            contents: HoverContents::Markup(markup),
-            ..
-        }) = hover
-        {
-            assert!(
-                !markup.value.starts_with("```marrow\nenum Status\n```"),
-                "bare foreign enum annotation should be qualified: {}",
-                markup.value
-            );
-        }
+        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nenum Status\n```"),
+            "bare project enum annotation should lead with the enum signature: {value}"
+        );
+        assert!(
+            value.contains("Lifecycle state."),
+            "bare project enum annotation should include docs: {value}"
+        );
+        assert!(
+            value.contains("open"),
+            "bare project enum annotation should include member summary: {value}"
+        );
     }
 
     #[test]

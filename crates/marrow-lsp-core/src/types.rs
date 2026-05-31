@@ -16,6 +16,7 @@ pub(crate) fn render_type(ty: &MarrowType) -> String {
         MarrowType::Primitive(scalar) => scalar.name().to_string(),
         MarrowType::Error => "Error".to_string(),
         MarrowType::Resource(name) => name.clone(),
+        MarrowType::GroupEntry { resource, .. } => resource.clone(),
         MarrowType::Identity(resource) => format!("{resource}::Id"),
         MarrowType::Enum { module, name } if module.is_empty() => name.clone(),
         MarrowType::Enum { module, name } => format!("{module}::{name}"),
@@ -46,5 +47,15 @@ mod tests {
         };
 
         assert_eq!(render_type(&ty), "Status");
+    }
+
+    #[test]
+    fn group_entry_types_render_as_the_owning_resource() {
+        let ty = MarrowType::GroupEntry {
+            resource: "Order".to_string(),
+            layers: vec!["lines".to_string(), "discounts".to_string()],
+        };
+
+        assert_eq!(render_type(&ty), "Order");
     }
 }
