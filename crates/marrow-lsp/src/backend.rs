@@ -587,8 +587,9 @@ impl LanguageServer for Backend {
     }
 
     /// Show the single callable signature for the innermost call at the cursor.
-    /// Reads only the open document's cached lex/source and the last checked
-    /// program, so in-progress argument lists can still get help before they parse.
+    /// Reads the open document's cached lex/source, the last checked program for
+    /// callable shape, and the latest snapshot only for optional documentation.
+    /// This keeps in-progress argument lists useful before they parse.
     async fn signature_help(
         &self,
         params: SignatureHelpParams,
@@ -610,6 +611,7 @@ impl LanguageServer for Backend {
         };
         Ok(signature_help::signature_help(
             program,
+            state.workspace.latest(),
             &path,
             &document.text,
             &document.lexed,

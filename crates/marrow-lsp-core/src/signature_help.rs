@@ -2,18 +2,24 @@
 
 use std::path::Path;
 
-use lsp_types::{ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation};
+use lsp_types::{
+    Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, SignatureHelp,
+    SignatureInformation,
+};
 use marrow_check::{
-    CheckedFunction, CheckedProgram, Def, DefItem, Resolution, ResolvableKind, build_alias_map,
-    expand_alias, resolve,
+    AnalysisSnapshot, CheckedFunction, CheckedProgram, Def, DefItem, Resolution, ResolvableKind,
+    build_alias_map, expand_alias, resolve,
 };
 use marrow_schema::{Element, ResourceSchema, stdlib};
-use marrow_syntax::{Keyword, LexedSource, ParamMode, Token, TokenKind};
+use marrow_syntax::{
+    Declaration, FunctionDecl, Keyword, LexedSource, ParamMode, SourceSpan, Token, TokenKind,
+};
 
 use crate::{language_facts, types::render_type};
 
 pub fn signature_help(
     program: &CheckedProgram,
+    docs: Option<&AnalysisSnapshot>,
     file: &Path,
     source: &str,
     lexed: &LexedSource,
@@ -25,7 +31,7 @@ pub fn signature_help(
         .map(build_alias_map)
         .unwrap_or_default();
     let segments = expand_alias(&call.segments, &aliases);
-    let signature = signature_for(program, from_module, &segments)?;
+    let signature = signature_for(program, docs, from_module, &segments)?;
     Some(help(signature, call.active_parameter, call.named_argument))
 }
 
@@ -37,12 +43,14 @@ struct ActiveCall {
 
 struct Signature {
     label: String,
+    documentation: Option<String>,
     params: Vec<Parameter>,
 }
 
 struct Parameter {
     name: Option<String>,
     label: String,
+    documentation: Option<String>,
 }
 
 fn active_call(source: &str, lexed: &LexedSource, offset: usize) -> Option<ActiveCall> {
@@ -383,6 +391,7 @@ fn named_argument(
 
 fn signature_for(
     program: &CheckedProgram,
+    docs: Option<&AnalysisSnapshot>,
     from_module: &str,
     segments: &[String],
 ) -> Option<Signature> {
@@ -397,7 +406,7 @@ fn signature_for(
     if let Some(signature) = resource_signature(program, from_module, segments) {
         return Some(signature);
     }
-    function_signature(program, from_module, segments)
+    function_signature(program, docs, from_module, segments)
 }
 
 fn builtin_signature(segments: &[String]) -> Option<Signature> {
@@ -414,7 +423,9 @@ fn builtin_signature(segments: &[String]) -> Option<Signature> {
         .iter()
         .find(|builtin| builtin.name == name)
     {
-        return Some(signature_from_label(builtin.detail));
+        let mut signature = signature_from_label(builtin.detail);
+        signature.documentation = Some(builtin.description.to_string());
+        return Some(signature);
     }
     language_facts::scalar_conversion_detail(name).map(|detail| signature_from_label(&detail))
 }
@@ -464,6 +475,7 @@ fn identity_signature(
                     joined_param_labels(&params),
                     resource.name
                 ),
+                documentation: None,
                 params,
             })
         }
@@ -486,16 +498,17 @@ fn resource_signature(
 }
 
 fn resource_constructor_signature(resource: &ResourceSchema) -> Signature {
-    let params = resource
-        .members
-        .iter()
-        .filter_map(|node| match &node.element {
-            Element::Slot { ty, .. } if node.key_params.is_empty() => {
-                Some(named_param(&node.name, &ty.to_string()))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let params =
+        resource
+            .members
+            .iter()
+            .filter_map(|node| match &node.element {
+                Element::Slot { ty, .. } if node.key_params.is_empty() => Some(
+                    named_param_with_docs(&node.name, &ty.to_string(), join_docs(&node.docs)),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
     Signature {
         label: format!(
             "{}({}): {}",
@@ -503,37 +516,53 @@ fn resource_constructor_signature(resource: &ResourceSchema) -> Signature {
             joined_param_labels(&params),
             resource.name
         ),
+        documentation: join_docs(&resource.docs),
         params,
     }
 }
 
 fn function_signature(
     program: &CheckedProgram,
+    docs: Option<&AnalysisSnapshot>,
     from_module: &str,
     segments: &[String],
 ) -> Option<Signature> {
     match resolve(program, from_module, segments, ResolvableKind::Function) {
-        Resolution::Found(Def {
-            item: DefItem::Function(function),
-            ..
-        }) => Some(checked_function_signature(function)),
+        Resolution::Found(def) => match def.item {
+            DefItem::Function(function) => {
+                let docs = docs.and_then(|snapshot| {
+                    function_decl(snapshot, &def.module.source_file, function.span)
+                });
+                Some(checked_function_signature(function, docs))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
 
-fn checked_function_signature(function: &CheckedFunction) -> Signature {
+fn checked_function_signature(
+    function: &CheckedFunction,
+    docs: Option<&FunctionDecl>,
+) -> Signature {
     let params = function
         .params
         .iter()
-        .map(|param| {
+        .enumerate()
+        .map(|(index, param)| {
             let mode = match param.mode {
                 Some(ParamMode::Out) => "out ",
                 Some(ParamMode::InOut) => "inout ",
                 None => "",
             };
+            let documentation = docs
+                .and_then(|function| function.params.get(index))
+                .filter(|decl| decl.name == param.name)
+                .and_then(|decl| join_docs(&decl.docs));
             Parameter {
                 name: Some(param.name.clone()),
                 label: format!("{mode}{}: {}", param.name, render_type(&param.ty)),
+                documentation,
             }
         })
         .collect::<Vec<_>>();
@@ -542,7 +571,11 @@ fn checked_function_signature(function: &CheckedFunction) -> Signature {
         Some(ty) => format!("{}({params_label}): {}", function.name, render_type(ty)),
         None => format!("{}({params_label})", function.name),
     };
-    Signature { label, params }
+    Signature {
+        label,
+        documentation: docs.and_then(|function| join_docs(&function.docs)),
+        params,
+    }
 }
 
 fn std_signature(op: &stdlib::StdOp) -> Signature {
@@ -552,6 +585,7 @@ fn std_signature(op: &stdlib::StdOp) -> Signature {
         .map(|param| Parameter {
             name: None,
             label: std_param_label(param),
+            documentation: None,
         })
         .collect::<Vec<_>>();
     let params_label = joined_param_labels(&params);
@@ -559,7 +593,11 @@ fn std_signature(op: &stdlib::StdOp) -> Signature {
         Some(ret) => format!("std::{}::{}({params_label}): {ret}", op.module, op.op),
         None => format!("std::{}::{}({params_label})", op.module, op.op),
     };
-    Signature { label, params }
+    Signature {
+        label,
+        documentation: None,
+        params,
+    }
 }
 
 fn signature_from_label(label: &str) -> Signature {
@@ -578,7 +616,11 @@ fn signature_from_label(label: &str) -> Signature {
                             .split_once(':')
                             .map(|(name, _)| name.trim().to_string())
                             .or_else(|| Some(label.clone()));
-                        Parameter { name, label }
+                        Parameter {
+                            name,
+                            label,
+                            documentation: None,
+                        }
                     })
                     .collect()
             }
@@ -586,14 +628,20 @@ fn signature_from_label(label: &str) -> Signature {
         .unwrap_or_default();
     Signature {
         label: label.to_string(),
+        documentation: None,
         params,
     }
 }
 
 fn named_param(name: &str, ty: &str) -> Parameter {
+    named_param_with_docs(name, ty, None)
+}
+
+fn named_param_with_docs(name: &str, ty: &str, documentation: Option<String>) -> Parameter {
     Parameter {
         name: Some(name.to_string()),
         label: format!("{name}: {ty}"),
+        documentation,
     }
 }
 
@@ -621,19 +669,53 @@ fn std_return_label(ret: &stdlib::ReturnType) -> Option<String> {
     }
 }
 
+fn function_decl<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    file: &Path,
+    span: SourceSpan,
+) -> Option<&'a FunctionDecl> {
+    let analyzed = snapshot
+        .files
+        .iter()
+        .find(|file_info| file_info.path == file)?;
+    analyzed
+        .parsed
+        .file
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Function(function) if function.span == span => Some(function),
+            _ => None,
+        })
+}
+
+fn join_docs(lines: &[String]) -> Option<String> {
+    let joined = lines
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let joined = joined.trim();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.to_string())
+    }
+}
+
 fn help(signature: Signature, active: usize, named_argument: Option<String>) -> SignatureHelp {
     let active = active_parameter(&signature.params, active, named_argument.as_deref());
     SignatureHelp {
         signatures: vec![SignatureInformation {
             label: signature.label,
-            documentation: None,
+            documentation: markdown_documentation(signature.documentation),
             parameters: Some(
                 signature
                     .params
                     .into_iter()
                     .map(|param| ParameterInformation {
                         label: ParameterLabel::Simple(param.label),
-                        documentation: None,
+                        documentation: markdown_documentation(param.documentation),
                     })
                     .collect(),
             ),
@@ -642,6 +724,15 @@ fn help(signature: Signature, active: usize, named_argument: Option<String>) -> 
         active_signature: Some(0),
         active_parameter: active,
     }
+}
+
+fn markdown_documentation(value: Option<String>) -> Option<Documentation> {
+    value.map(|value| {
+        Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        })
+    })
 }
 
 fn active_parameter(
@@ -704,12 +795,12 @@ fn is_name_segment(kind: TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lsp_types::ParameterLabel;
-    use marrow_check::{ProjectSources, analyze_project};
+    use lsp_types::{Documentation, ParameterLabel};
+    use marrow_check::{AnalysisSnapshot, ProjectSources, analyze_project};
     use marrow_project::parse_config;
     use marrow_syntax::lex_source;
 
-    fn project() -> (CheckedProgram, std::path::PathBuf) {
+    fn project_snapshot() -> (AnalysisSnapshot, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
@@ -720,8 +811,11 @@ mod tests {
             "\
 module shelf::books
 
+;; Books stored in the public shelf.
 resource Book at ^books(id: int, edition: string)
+    ;; Title shown to readers.
     required title: string
+    ;; Page count from the catalog.
     pages: int
     tags(pos: int): string
 
@@ -731,7 +825,13 @@ resource Settings at ^settings
 resource Id
     required value: int
 
-pub fn titleOf(id: Book::Id, fallback: string): string
+;; Resolves the display title for a book.
+pub fn titleOf(
+    ;; Book identity to resolve.
+    id: Book::Id,
+    ;; Title to use when the book is missing.
+    fallback: string,
+): string
     return fallback
 ",
         )
@@ -744,7 +844,13 @@ module shelf::app
 
 use shelf::books
 
-fn add(left: int, right: int): int
+;; Adds two integers.
+fn add(
+    ;; Left addend.
+    left: int,
+    ;; Right addend.
+    right: int,
+): int
     return left + right
 
 fn books(id: int): int
@@ -768,6 +874,11 @@ pub fn run(): int
         .unwrap();
         let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
         let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+        (snapshot, app)
+    }
+
+    fn project() -> (CheckedProgram, std::path::PathBuf) {
+        let (snapshot, app) = project_snapshot();
         (snapshot.program, app)
     }
 
@@ -775,11 +886,38 @@ pub fn run(): int
         let offset = source.find('|').expect("a cursor marker `|`");
         let source = source.replacen('|', "", 1);
         let lexed = lex_source(&source);
-        signature_help(program, file, &source, &lexed, offset)
+        signature_help(program, None, file, &source, &lexed, offset)
+    }
+
+    fn help_with_docs_at(
+        snapshot: &AnalysisSnapshot,
+        file: &Path,
+        source: &str,
+    ) -> Option<SignatureHelp> {
+        let offset = source.find('|').expect("a cursor marker `|`");
+        let source = source.replacen('|', "", 1);
+        let lexed = lex_source(&source);
+        signature_help(
+            &snapshot.program,
+            Some(snapshot),
+            file,
+            &source,
+            &lexed,
+            offset,
+        )
     }
 
     fn signature_label(help: &SignatureHelp) -> &str {
         &help.signatures[0].label
+    }
+
+    fn signature_documentation(help: &SignatureHelp) -> &str {
+        documentation_value(
+            help.signatures[0]
+                .documentation
+                .as_ref()
+                .expect("signature documentation"),
+        )
     }
 
     fn parameter_labels(help: &SignatureHelp) -> Vec<String> {
@@ -793,6 +931,112 @@ pub fn run(): int
                 ParameterLabel::LabelOffsets(_) => panic!("expected simple labels"),
             })
             .collect()
+    }
+
+    fn parameter_documentation(help: &SignatureHelp, index: usize) -> &str {
+        let parameter = &help.signatures[0]
+            .parameters
+            .as_ref()
+            .expect("parameter information")[index];
+        documentation_value(
+            parameter
+                .documentation
+                .as_ref()
+                .expect("parameter documentation"),
+        )
+    }
+
+    fn documentation_value(documentation: &Documentation) -> &str {
+        match documentation {
+            Documentation::String(value) => value,
+            Documentation::MarkupContent(content) => &content.value,
+        }
+    }
+
+    #[test]
+    fn documented_user_function_signature_help_includes_signature_and_parameter_docs() {
+        let (snapshot, file) = project_snapshot();
+        let help = help_with_docs_at(
+            &snapshot,
+            &file,
+            "module shelf::app\n\npub fn run(): int\n    return add(|\n",
+        )
+        .expect("signature help");
+
+        assert_eq!(signature_label(&help), "add(left: int, right: int): int");
+        assert_eq!(signature_documentation(&help), "Adds two integers.");
+        assert_eq!(parameter_documentation(&help, 0), "Left addend.");
+        assert_eq!(parameter_documentation(&help, 1), "Right addend.");
+    }
+
+    #[test]
+    fn qualified_imported_function_signature_help_reads_docs_from_defining_module() {
+        let (snapshot, file) = project_snapshot();
+        let help = help_with_docs_at(
+            &snapshot,
+            &file,
+            "module shelf::app\n\nuse shelf::books\n\npub fn run(): string\n    return books::titleOf(|\n",
+        )
+        .expect("signature help");
+
+        assert_eq!(
+            signature_label(&help),
+            "titleOf(id: Book::Id, fallback: string): string"
+        );
+        assert_eq!(
+            signature_documentation(&help),
+            "Resolves the display title for a book."
+        );
+        assert_eq!(
+            parameter_documentation(&help, 0),
+            "Book identity to resolve."
+        );
+        assert_eq!(
+            parameter_documentation(&help, 1),
+            "Title to use when the book is missing."
+        );
+    }
+
+    #[test]
+    fn resource_constructor_signature_help_includes_resource_and_field_docs() {
+        let (snapshot, file) = project_snapshot();
+        let help = help_with_docs_at(
+            &snapshot,
+            &file,
+            "module shelf::app\n\nuse shelf::books\n\npub fn run(): Book\n    return books::Book(pages: |\n",
+        )
+        .expect("signature help");
+
+        assert_eq!(
+            signature_label(&help),
+            "Book(title: string, pages: int): Book"
+        );
+        assert_eq!(
+            signature_documentation(&help),
+            "Books stored in the public shelf."
+        );
+        assert_eq!(parameter_documentation(&help, 0), "Title shown to readers.");
+        assert_eq!(
+            parameter_documentation(&help, 1),
+            "Page count from the catalog."
+        );
+    }
+
+    #[test]
+    fn bare_builtin_signature_help_includes_language_facts_description() {
+        let (snapshot, file) = project_snapshot();
+        let help = help_with_docs_at(
+            &snapshot,
+            &file,
+            "module shelf::app\n\npub fn run(): int\n    return count(|\n",
+        )
+        .expect("signature help");
+
+        assert_eq!(signature_label(&help), "count(layer): int");
+        assert_eq!(
+            signature_documentation(&help),
+            "Returns child count for a saved path, 1 for a scalar, or 0 when absent."
+        );
     }
 
     #[test]
