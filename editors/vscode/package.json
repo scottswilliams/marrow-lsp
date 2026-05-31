@@ -89,6 +89,23 @@
         "path": "./syntaxes/marrow.tmLanguage.json"
       }
     ],
+    "semanticTokenTypes": [
+      {
+        "id": "savedRoot",
+        "superType": "variable",
+        "description": "Saved data root"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "marrow",
+        "scopes": {
+          "savedRoot": [
+            "variable.other.marrow"
+          ]
+        }
+      }
+    ],
     "debuggers": [
       {
         "type": "marrow",

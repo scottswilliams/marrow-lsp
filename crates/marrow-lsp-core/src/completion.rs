@@ -16,7 +16,7 @@ use marrow_check::{CheckedModule, CheckedProgram, scope_at};
 use marrow_schema::{Element, EnumSchema, Node, ResourceSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
 
-use crate::types::render_type;
+use crate::{language_facts, types::render_type};
 
 /// The Marrow keywords offered in statement/expression position. The type
 /// keywords are offered separately in type position, so they are left out here.
@@ -45,20 +45,6 @@ const KEYWORDS: &[&str] = &[
     "not",
     "and",
     "or",
-];
-
-/// The single-name builtins offered in expression position, each with a short
-/// signature hint. These dispatch before user functions at runtime.
-const BUILTINS: &[(&str, &str)] = &[
-    ("exists", "exists(path): bool"),
-    ("keys", "keys(layer): sequence"),
-    ("values", "values(layer): sequence"),
-    ("entries", "entries(layer): sequence"),
-    ("count", "count(layer): int"),
-    ("append", "append(layer, value): int"),
-    ("nextId", "nextId(^root): Id"),
-    ("print", "print(value)"),
-    ("write", "write(value)"),
 ];
 
 /// The built-in type names offered in type position.
@@ -438,8 +424,15 @@ fn bare_completions(
     for keyword in KEYWORDS {
         items.push(item(keyword, CompletionItemKind::KEYWORD));
     }
-    for (name, signature) in BUILTINS {
-        items.push(item(name, CompletionItemKind::FUNCTION).detail((*signature).to_string()));
+    for builtin in language_facts::bare_function_builtins() {
+        items.push(
+            item(builtin.name, CompletionItemKind::FUNCTION).detail(builtin.detail.to_string()),
+        );
+    }
+    for name in language_facts::scalar_conversion_names() {
+        if let Some(detail) = language_facts::scalar_conversion_detail(name) {
+            items.push(item(name, CompletionItemKind::FUNCTION).detail(detail));
+        }
     }
     items
 }
@@ -812,6 +805,23 @@ pub fn run(count: int): int
             labels.contains(&"exists".to_string()),
             "a builtin, got {labels:?}"
         );
+    }
+
+    #[test]
+    fn bare_identifier_lists_checker_single_name_builtins() {
+        let (program, file) = project();
+        let labels = complete(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    return |\n",
+        );
+
+        for builtin in ["reversed", "next", "prev", "Error"] {
+            assert!(
+                labels.contains(&builtin.to_string()),
+                "checker builtin {builtin:?} should be offered, got {labels:?}"
+            );
+        }
     }
 
     #[test]

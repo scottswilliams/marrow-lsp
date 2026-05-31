@@ -13,14 +13,20 @@
 //! local variable named `books`.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend};
+use marrow_check::{BindingIndex, SymbolKind, SymbolRef};
+use marrow_schema::stdlib;
 use marrow_syntax::{
     Declaration, EnumMember, FieldDecl, GroupDecl, IndexDecl, Keyword, LexedSource, ResourceMember,
     SourceFile, SourceSpan, Token, TokenKind,
 };
 
-use crate::positions::LineIndex;
+use crate::{
+    language_facts::{self, BareBuiltinKind},
+    positions::LineIndex,
+};
 
 /// A saved-data root (`^books`): the value type the editor's grammar cannot tell
 /// from a local variable. Not in the LSP's standard set, so it is named here and
@@ -48,9 +54,11 @@ const TOKEN_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::PARAMETER,
 ];
 
-/// The token modifiers this server emits. Only the saved-root sigil and name use
-/// one (`MODIFICATION`), marking them as data the language mutates in place.
-const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[SemanticTokenModifier::MODIFICATION];
+/// The token modifiers this server emits.
+const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
+    SemanticTokenModifier::MODIFICATION,
+    SemanticTokenModifier::DEFAULT_LIBRARY,
+];
 
 // Indices into `TOKEN_TYPES`, kept beside it so the two cannot drift.
 const TYPE_KEYWORD: u32 = 0;
@@ -69,8 +77,9 @@ const TYPE_ENUM_MEMBER: u32 = 12;
 const TYPE_PROPERTY: u32 = 13;
 const TYPE_PARAMETER: u32 = 14;
 
-/// The one modifier bit, `MODIFICATION` (index 0).
+/// Modifier bits, matching `TOKEN_MODIFIERS`.
 const MOD_MODIFICATION: u32 = 1 << 0;
+const MOD_DEFAULT_LIBRARY: u32 = 1 << 1;
 
 /// The legend the server advertises in its `initialize` capabilities. Token and
 /// modifier indices in [`semantic_tokens`] are positions in these lists.
@@ -93,10 +102,26 @@ pub fn semantic_tokens(
     file: &SourceFile,
     index: &LineIndex,
 ) -> Vec<SemanticToken> {
+    semantic_tokens_with_bindings(lexed, file, index, None)
+}
+
+/// Like [`semantic_tokens`], with optional project binding facts for resolved
+/// identifier uses. The binding index is supplied by the caller so semantic-token
+/// requests never rebuild project analysis.
+pub fn semantic_tokens_with_bindings(
+    lexed: &LexedSource,
+    file: &SourceFile,
+    index: &LineIndex,
+    binding_index: Option<(&BindingIndex, &Path)>,
+) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     let mut prev_line = 0u32;
     let mut prev_start = 0u32;
-    let overrides = declaration_overrides(lexed, file, index.text());
+    let declaration_overrides = declaration_overrides(lexed, file, index.text());
+    let reference_overrides = binding_index
+        .map(|(binding_index, path)| reference_overrides(lexed, index.text(), binding_index, path))
+        .unwrap_or_default();
+    let builtin_overrides = builtin_overrides(lexed, index.text());
 
     let mut i = 0;
     while i < lexed.tokens.len() {
@@ -134,16 +159,27 @@ pub fn semantic_tokens(
             continue;
         }
 
-        if let Some(ty) = overrides
+        if let Some(style) = declaration_overrides
             .get(&(token.span.start_byte, token.span.end_byte))
             .copied()
-            .or_else(|| token_type(token.kind))
+            .map(TokenStyle::plain)
+            .or_else(|| {
+                builtin_overrides
+                    .get(&(token.span.start_byte, token.span.end_byte))
+                    .copied()
+            })
+            .or_else(|| {
+                reference_overrides
+                    .get(&(token.span.start_byte, token.span.end_byte))
+                    .copied()
+            })
+            .or_else(|| token_type(token.kind).map(TokenStyle::plain))
         {
             push(
                 &mut tokens,
                 token,
-                ty,
-                0,
+                style.token_type,
+                style.modifiers,
                 index,
                 &mut prev_line,
                 &mut prev_start,
@@ -156,6 +192,21 @@ pub fn semantic_tokens(
 }
 
 type ByteSpan = (usize, usize);
+
+#[derive(Debug, Clone, Copy)]
+struct TokenStyle {
+    token_type: u32,
+    modifiers: u32,
+}
+
+impl TokenStyle {
+    fn plain(token_type: u32) -> Self {
+        Self {
+            token_type,
+            modifiers: 0,
+        }
+    }
+}
 
 fn declaration_overrides(
     lexed: &LexedSource,
@@ -514,13 +565,197 @@ fn is_path_segment_token(kind: TokenKind) -> bool {
     matches!(kind, TokenKind::Identifier | TokenKind::Keyword(_))
 }
 
+fn reference_overrides(
+    lexed: &LexedSource,
+    source: &str,
+    index: &BindingIndex,
+    path: &Path,
+) -> HashMap<ByteSpan, TokenStyle> {
+    let mut overrides = HashMap::new();
+    for token in &lexed.tokens {
+        if !is_path_segment_token(token.kind) {
+            continue;
+        }
+        let Some(definition) = index.definition(path, token.span.start_byte) else {
+            continue;
+        };
+        let references = index.references(&definition);
+        let Some(reference) =
+            best_reference_for_token(token, &references, path, source, &definition)
+        else {
+            continue;
+        };
+        let Some(style) = style_for_symbol_kind(reference.kind) else {
+            continue;
+        };
+        overrides.insert((token.span.start_byte, token.span.end_byte), style);
+    }
+    overrides
+}
+
+fn best_reference_for_token<'a>(
+    token: &Token,
+    references: &'a [SymbolRef],
+    path: &Path,
+    source: &str,
+    definition: &SymbolRef,
+) -> Option<&'a SymbolRef> {
+    references
+        .iter()
+        .filter(|reference| reference.file == path)
+        .filter(|reference| reference_matches_token(reference, token, source, definition))
+        .min_by_key(|reference| span_width(reference.span))
+}
+
+fn reference_matches_token(
+    reference: &SymbolRef,
+    token: &Token,
+    source: &str,
+    definition: &SymbolRef,
+) -> bool {
+    if reference.span.start_byte == token.span.start_byte
+        && reference.span.end_byte == token.span.end_byte
+    {
+        return true;
+    }
+    if reference.span == definition.span {
+        return false;
+    }
+    matches!(
+        reference.kind,
+        SymbolKind::Function
+            | SymbolKind::Resource
+            | SymbolKind::ResourceIdentity
+            | SymbolKind::Field
+            | SymbolKind::Layer
+            | SymbolKind::Index
+    ) && token_is_leaf_in_reference(reference.span, token, source)
+}
+
+fn token_is_leaf_in_reference(span: SourceSpan, token: &Token, source: &str) -> bool {
+    if token.span.start_byte < span.start_byte || token.span.end_byte > span.end_byte {
+        return false;
+    }
+    let Some(text) = source.get(token.span.end_byte..span.end_byte) else {
+        return false;
+    };
+    !text
+        .chars()
+        .any(|ch| ch == ':' || ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn span_width(span: SourceSpan) -> usize {
+    span.end_byte.saturating_sub(span.start_byte)
+}
+
+fn style_for_symbol_kind(kind: SymbolKind) -> Option<TokenStyle> {
+    let token_type = match kind {
+        SymbolKind::Param => TYPE_PARAMETER,
+        SymbolKind::Function => TYPE_FUNCTION,
+        SymbolKind::Resource | SymbolKind::ResourceIdentity => TYPE_STRUCT,
+        SymbolKind::Enum => TYPE_ENUM,
+        SymbolKind::EnumMember => TYPE_ENUM_MEMBER,
+        SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index => TYPE_PROPERTY,
+        SymbolKind::Local => TYPE_VARIABLE,
+        SymbolKind::ModuleConst | SymbolKind::ModuleRef => return None,
+    };
+    Some(TokenStyle::plain(token_type))
+}
+
+fn builtin_overrides(lexed: &LexedSource, source: &str) -> HashMap<ByteSpan, TokenStyle> {
+    let mut overrides = HashMap::new();
+    for (index, token) in lexed.tokens.iter().enumerate() {
+        if !is_call_leaf(lexed, index) {
+            continue;
+        }
+        let text = token.text(source);
+        let token_type = if is_std_library_call(lexed, source, index) {
+            Some(TYPE_FUNCTION)
+        } else if is_bare_call_leaf(lexed, index) {
+            match language_facts::bare_builtin_kind(text) {
+                Some(BareBuiltinKind::Function) => Some(TYPE_FUNCTION),
+                Some(BareBuiltinKind::ScalarConversion) => Some(TYPE_TYPE),
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(token_type) = token_type {
+            overrides.insert(
+                (token.span.start_byte, token.span.end_byte),
+                TokenStyle {
+                    token_type,
+                    modifiers: MOD_DEFAULT_LIBRARY,
+                },
+            );
+        }
+    }
+    overrides
+}
+
+fn is_call_leaf(lexed: &LexedSource, index: usize) -> bool {
+    is_path_segment_token(lexed.tokens[index].kind)
+        && lexed
+            .tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == TokenKind::LeftParen)
+}
+
+fn is_bare_call_leaf(lexed: &LexedSource, index: usize) -> bool {
+    is_call_leaf(lexed, index) && starts_at_callee_root(lexed, index)
+}
+
+fn is_std_library_call(lexed: &LexedSource, source: &str, index: usize) -> bool {
+    index >= 4
+        && lexed.tokens[index - 1].kind == TokenKind::DoubleColon
+        && is_path_segment_token(lexed.tokens[index - 2].kind)
+        && lexed.tokens[index - 3].kind == TokenKind::DoubleColon
+        && is_path_segment_token(lexed.tokens[index - 4].kind)
+        && lexed.tokens[index - 4].text(source) == "std"
+        && starts_at_callee_root(lexed, index - 4)
+        && stdlib::lookup(
+            lexed.tokens[index - 2].text(source),
+            lexed.tokens[index].text(source),
+        )
+        .is_some()
+}
+
+fn starts_at_callee_root(lexed: &LexedSource, index: usize) -> bool {
+    !previous_significant_kind(lexed, index).is_some_and(|kind| {
+        matches!(
+            kind,
+            TokenKind::DoubleColon | TokenKind::Dot | TokenKind::QuestionDot
+        )
+    })
+}
+
+fn previous_significant_kind(lexed: &LexedSource, index: usize) -> Option<TokenKind> {
+    lexed.tokens[..index]
+        .iter()
+        .rev()
+        .find(|token| !is_trivia(token.kind))
+        .map(|token| token.kind)
+}
+
+fn is_trivia(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Indent
+            | TokenKind::Dedent
+            | TokenKind::Newline
+            | TokenKind::Eof
+            | TokenKind::Comment
+            | TokenKind::DocComment
+    )
+}
+
 /// The semantic token type for a lexer token kind, or `None` for trivia and
 /// structural tokens the editor does not color (indentation, newlines, EOF,
 /// parentheses, commas).
 fn token_type(kind: TokenKind) -> Option<u32> {
     match kind {
         TokenKind::Identifier => Some(TYPE_VARIABLE),
-        TokenKind::Integer | TokenKind::Decimal => Some(TYPE_NUMBER),
+        TokenKind::Integer | TokenKind::Decimal | TokenKind::Duration => Some(TYPE_NUMBER),
         // The whole string — including a `$"...{x}..."` interpolation's literal
         // segments and braces — colors as a string; the interpolated expression
         // tokens between them are lexed as their own kinds and color normally.
@@ -530,7 +765,9 @@ fn token_type(kind: TokenKind) -> Option<u32> {
         | TokenKind::InterpolationText
         | TokenKind::InterpolationEnd => Some(TYPE_STRING),
         TokenKind::Comment | TokenKind::DocComment => Some(TYPE_COMMENT),
-        TokenKind::Keyword(keyword) => Some(if is_type_keyword(keyword) {
+        TokenKind::Keyword(keyword) => Some(if is_operator_keyword(keyword) {
+            TYPE_OPERATOR
+        } else if is_type_keyword(keyword) {
             TYPE_TYPE
         } else {
             TYPE_KEYWORD
@@ -559,6 +796,13 @@ fn token_type(kind: TokenKind) -> Option<u32> {
         // and the interpolation-expression braces are left to the grammar.
         _ => None,
     }
+}
+
+fn is_operator_keyword(keyword: Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Not | Keyword::And | Keyword::Or | Keyword::Is
+    )
 }
 
 /// Whether a keyword names a type (so it colors as a type, not a control word).
@@ -636,6 +880,8 @@ fn first_line_length(token: &Token, index: &LineIndex, start_character: u32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marrow_check::{ProjectSources, analyze_project, build_binding_index};
+    use marrow_project::parse_config;
     use marrow_syntax::{lex_source, parse_source};
 
     type DecodedToken = (u32, u32, u32, u32, u32);
@@ -674,10 +920,50 @@ mod tests {
             .unwrap_or_else(|| panic!("legend should contain {semantic_type:?}")) as u32
     }
 
+    fn modifier_bit(modifier: &SemanticTokenModifier) -> u32 {
+        let index = legend()
+            .token_modifiers
+            .iter()
+            .position(|candidate| candidate == modifier)
+            .unwrap_or_else(|| panic!("legend should contain {modifier:?}"));
+        1 << index
+    }
+
     fn decoded_for(source: &str) -> (LineIndex, DecodedTokens) {
         let index = LineIndex::new(source);
         let parsed = parse_source(source);
         let decoded = absolute(&semantic_tokens(&lex_source(source), &parsed.file, &index));
+        (index, decoded)
+    }
+
+    fn decoded_for_checked(source: &str) -> (LineIndex, DecodedTokens) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("m.mw");
+        std::fs::write(&file, source).unwrap();
+
+        let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+        let binding_index = build_binding_index(&snapshot);
+        let parsed = snapshot
+            .files
+            .iter()
+            .find(|analyzed| analyzed.path == file)
+            .expect("analyzed source file");
+        let index = LineIndex::new(source);
+        let decoded = absolute(&semantic_tokens_with_bindings(
+            &lex_source(source),
+            &parsed.parsed.file,
+            &index,
+            Some((&binding_index, &file)),
+        ));
+        assert!(
+            !snapshot.program.modules.is_empty(),
+            "checked fixture should provide binding facts"
+        );
         (index, decoded)
     }
 
@@ -714,6 +1000,41 @@ mod tests {
         );
     }
 
+    fn assert_token(
+        source: &str,
+        index: &LineIndex,
+        decoded: &[DecodedToken],
+        line_text: &str,
+        lexeme: &str,
+        expected_type: u32,
+        expected_modifiers: u32,
+    ) {
+        let line_start = source
+            .find(line_text)
+            .unwrap_or_else(|| panic!("source should contain line {line_text:?}"));
+        let in_line = line_text
+            .find(lexeme)
+            .unwrap_or_else(|| panic!("line {line_text:?} should contain {lexeme:?}"));
+        let position = index.position(line_start + in_line);
+        let length = lexeme.encode_utf16().count() as u32;
+        let token = decoded
+            .iter()
+            .find(|(line, start, len, _, _)| {
+                *line == position.line && *start == position.character && *len == length
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "semantic token for {lexeme:?} at {}:{} should exist in {decoded:?}",
+                    position.line, position.character
+                )
+            });
+        assert_eq!(
+            (token.3, token.4),
+            (expected_type, expected_modifiers),
+            "{lexeme:?} on {line_text:?} should have semantic token type/modifiers"
+        );
+    }
+
     #[test]
     fn legend_lists_standard_lsp_declaration_types() {
         let legend = legend();
@@ -731,6 +1052,16 @@ mod tests {
                 "legend should contain {semantic_type:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_legend_lists_the_default_library_modifier() {
+        assert!(
+            legend()
+                .token_modifiers
+                .contains(&SemanticTokenModifier::DEFAULT_LIBRARY),
+            "the legend must advertise the defaultLibrary modifier"
+        );
     }
 
     #[test]
@@ -988,6 +1319,416 @@ pub enum Genre
         assert!(
             decoded.iter().any(|(_, _, _, ty, _)| *ty == TYPE_NAMESPACE),
             "the `::` separator colors as a namespace operator"
+        );
+    }
+
+    #[test]
+    fn resolved_reference_uses_take_their_symbol_roles() {
+        let source = "\
+module m
+
+resource Book at ^books(id: int)
+    required title: string
+    tags(pos: int): string
+    index byTitle(title)
+
+enum Status
+    active
+    archived
+
+fn helper(id: int): int
+    return id
+
+fn paint(id: int, title: string): int
+    const book = Book(id)
+    const status = Status::archived
+    const found = ^books(id).title
+    const tag = ^books(id).tags(1)
+    const lookup = ^books.byTitle(title)
+    return helper(id)
+";
+        let (index, decoded) = decoded_for_checked(source);
+
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    return helper(id)",
+            "id",
+            legend_index(&SemanticTokenType::PARAMETER),
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    return helper(id)",
+            "helper",
+            legend_index(&SemanticTokenType::FUNCTION),
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    const book = Book(id)",
+            "Book",
+            legend_index(&SemanticTokenType::STRUCT),
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    const status = Status::archived",
+            "archived",
+            legend_index(&SemanticTokenType::ENUM_MEMBER),
+        );
+
+        let property = legend_index(&SemanticTokenType::PROPERTY);
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    const found = ^books(id).title",
+            "title",
+            property,
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    const tag = ^books(id).tags(1)",
+            "tags",
+            property,
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    const lookup = ^books.byTitle(title)",
+            "byTitle",
+            property,
+        );
+    }
+
+    #[test]
+    fn declaration_header_type_tokens_are_not_recolored_by_definition_spans() {
+        let source = "\
+module m
+
+resource Book at ^books(id: int)
+    required title: string
+    tags(pos: int): string
+
+fn helper(id: int): int
+    return id
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let ty = legend_index(&SemanticTokenType::TYPE);
+
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "resource Book at ^books(id: int)",
+            "int",
+            ty,
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    required title: string",
+            "string",
+            ty,
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    tags(pos: int): string",
+            "string",
+            ty,
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "fn helper(id: int): int",
+            "int",
+            ty,
+        );
+    }
+
+    #[test]
+    fn known_default_library_calls_carry_default_library_modifier() {
+        let source = "\
+module m
+
+resource Book at ^books(id: int)
+    tags(pos: int): string
+
+fn f(): bool
+    const clock_value = std::clock::now()
+    const has_book = exists(^books(1))
+    const ids = keys(^books)
+    const added = append(^books(1).tags, \"tag\")
+    const next = nextId(^books)
+    const c1 = int(\"1\")
+    const c2 = decimal(\"1.5\")
+    const c3 = string(1)
+    const c4 = bool(\"true\")
+    return has_book
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
+        let function = legend_index(&SemanticTokenType::FUNCTION);
+        let ty = legend_index(&SemanticTokenType::TYPE);
+
+        for (line, lexeme, expected_type) in [
+            ("    const clock_value = std::clock::now()", "now", function),
+            ("    const has_book = exists(^books(1))", "exists", function),
+            ("    const ids = keys(^books)", "keys", function),
+            (
+                "    const added = append(^books(1).tags, \"tag\")",
+                "append",
+                function,
+            ),
+            ("    const next = nextId(^books)", "nextId", function),
+            ("    const c1 = int(\"1\")", "int", ty),
+            ("    const c2 = decimal(\"1.5\")", "decimal", ty),
+            ("    const c3 = string(1)", "string", ty),
+            ("    const c4 = bool(\"true\")", "bool", ty),
+        ] {
+            assert_token(
+                source,
+                &index,
+                &decoded,
+                line,
+                lexeme,
+                expected_type,
+                default_library,
+            );
+        }
+    }
+
+    #[test]
+    fn standard_library_calls_use_the_shared_std_table() {
+        let source = "\
+module m
+
+fn f()
+    const text_len = std::text::length(\"abc\")
+    std::assert::isTrue(true)
+    const unknown_value = std::text::missing(\"abc\")
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
+        let function = legend_index(&SemanticTokenType::FUNCTION);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const text_len = std::text::length(\"abc\")",
+            "length",
+            function,
+            default_library,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    std::assert::isTrue(true)",
+            "isTrue",
+            function,
+            default_library,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const unknown_value = std::text::missing(\"abc\")",
+            "missing",
+            legend_index(&SemanticTokenType::VARIABLE),
+            0,
+        );
+    }
+
+    #[test]
+    fn std_library_call_must_start_at_callee_root() {
+        let source = "\
+module m
+
+fn f()
+    const text_len = foo::std::text::length(\"abc\")
+";
+        let (index, decoded) = decoded_for(source);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const text_len = foo::std::text::length(\"abc\")",
+            "length",
+            legend_index(&SemanticTokenType::VARIABLE),
+            0,
+        );
+    }
+
+    #[test]
+    fn bare_builtin_call_must_not_be_qualified_leaf() {
+        let source = "\
+module m
+
+fn f()
+    const found = foo::exists()
+";
+        let (index, decoded) = decoded_for(source);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const found = foo::exists()",
+            "exists",
+            legend_index(&SemanticTokenType::VARIABLE),
+            0,
+        );
+    }
+
+    #[test]
+    fn checker_single_name_builtins_are_default_library_calls() {
+        let source = "\
+module m
+
+resource Book at ^books(id: int)
+    required title: string
+
+fn f()
+    const items = keys(^books)
+    const rev_items = reversed(items)
+    const after = next(items)
+    const before = prev(items)
+";
+        let (index, decoded) = decoded_for(source);
+        let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
+        let function = legend_index(&SemanticTokenType::FUNCTION);
+
+        for (line, lexeme) in [
+            ("    const rev_items = reversed(items)", "reversed"),
+            ("    const after = next(items)", "next"),
+            ("    const before = prev(items)", "prev"),
+        ] {
+            assert_token(
+                source,
+                &index,
+                &decoded,
+                line,
+                lexeme,
+                function,
+                default_library,
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_call_leaf_wins_over_user_function_binding_reference() {
+        let source = "\
+module m
+
+resource Book at ^books(id: int)
+    required title: string
+
+fn exists(value: unknown): bool
+    return false
+
+fn f(): bool
+    return exists(^books(1))
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return exists(^books(1))",
+            "exists",
+            legend_index(&SemanticTokenType::FUNCTION),
+            default_library,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "fn exists(value: unknown): bool",
+            "exists",
+            legend_index(&SemanticTokenType::FUNCTION),
+            0,
+        );
+    }
+
+    #[test]
+    fn scalar_conversion_calls_use_the_shared_scalar_names() {
+        let source = "\
+module m
+
+fn f()
+    const b1 = bytes(\"abc\")
+    const d1 = date(\"2026-05-30\")
+    const i1 = instant(\"2026-05-30T00:00:00+00:00\")
+    const span1 = duration(\"1.hour\")
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
+        let ty = legend_index(&SemanticTokenType::TYPE);
+
+        for (line, lexeme) in [
+            ("    const b1 = bytes(\"abc\")", "bytes"),
+            ("    const d1 = date(\"2026-05-30\")", "date"),
+            (
+                "    const i1 = instant(\"2026-05-30T00:00:00+00:00\")",
+                "instant",
+            ),
+            ("    const span1 = duration(\"1.hour\")", "duration"),
+        ] {
+            assert_token(source, &index, &decoded, line, lexeme, ty, default_library);
+        }
+    }
+
+    #[test]
+    fn word_operators_color_as_operators() {
+        let source = "\
+module m
+
+fn f(a: bool, b: bool, value: unknown): bool
+    return not a or a and b or value is string
+";
+        let (index, decoded) = decoded_for(source);
+        let operator = legend_index(&SemanticTokenType::OPERATOR);
+
+        for lexeme in ["not", "or", "and", "is"] {
+            assert_token_type(
+                source,
+                &index,
+                &decoded,
+                "    return not a or a and b or value is string",
+                lexeme,
+                operator,
+            );
+        }
+    }
+
+    #[test]
+    fn duration_literals_color_as_numbers() {
+        let source = "module m\n\nconst WAIT: duration = 1.hour\n";
+        let (index, decoded) = decoded_for(source);
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "const WAIT: duration = 1.hour",
+            "1.hour",
+            legend_index(&SemanticTokenType::NUMBER),
         );
     }
 

@@ -579,20 +579,35 @@ impl LanguageServer for Backend {
     }
 
     /// Classify the document's cached lex into semantic tokens. Reads only the
-    /// cached lex, parse, and position index — no recompute.
+    /// cached lex, parse, position index, and cached analysis facts — no project
+    /// recompute.
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> jsonrpc::Result<Option<SemanticTokensResult>> {
         let url = params.text_document.uri;
-        let state = self.state.lock().await;
-        let Some(document) = state.documents.get(&url) else {
+        let Some(path) = url_to_path(&url) else {
             return Ok(None);
         };
-        let data = semantic_tokens::semantic_tokens(
+        let mut state = self.state.lock().await;
+        let State {
+            documents,
+            workspace,
+        } = &mut *state;
+        let Some(document) = documents.get(&url) else {
+            return Ok(None);
+        };
+        let binding_index = if snapshot_has_document_text(workspace.latest(), &path, &document.text)
+        {
+            workspace.binding_index()
+        } else {
+            None
+        };
+        let data = semantic_tokens::semantic_tokens_with_bindings(
             &document.lexed,
             &document.parsed.file,
             &document.index,
+            binding_index.map(|index| (index, path.as_path())),
         );
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
@@ -686,4 +701,48 @@ fn snapshot_indices<'a>(workspace: &'a Workspace, documents: &'a Documents) -> S
             .and_then(|url| documents.get(&url))
             .map(|document| &document.index)
     })
+}
+
+fn snapshot_has_document_text(
+    snapshot: Option<&AnalysisSnapshot>,
+    file: &std::path::Path,
+    text: &str,
+) -> bool {
+    snapshot
+        .and_then(|snapshot| snapshot.files.iter().find(|analyzed| analyzed.path == file))
+        .is_some_and(|analyzed| analyzed.source == text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_source_match_rejects_freshly_edited_document_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("m.mw");
+        let clean = "module m\n\nfn f(): int\n    return 1\n";
+        std::fs::write(&file, clean).unwrap();
+
+        let url = Url::from_file_path(&file).unwrap();
+        let mut documents = Documents::new();
+        documents.open(url.clone(), clean.to_string());
+        let mut workspace = Workspace::new();
+        workspace.recompute(&file, &documents).unwrap();
+
+        assert!(snapshot_has_document_text(workspace.latest(), &file, clean));
+
+        let edited = "module m\n\nfn f(): int\n    return 2\n";
+        documents.change(&url, edited.to_string());
+        let document = documents.get(&url).unwrap();
+
+        assert!(
+            !snapshot_has_document_text(workspace.latest(), &file, &document.text),
+            "semantic tokens should not apply binding facts to text newer than the snapshot"
+        );
+    }
 }

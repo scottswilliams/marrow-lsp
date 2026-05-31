@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod documents;
 pub mod formatting;
 pub mod hover;
+mod language_facts;
 pub mod mcp;
 pub mod navigation;
 pub mod positions;
