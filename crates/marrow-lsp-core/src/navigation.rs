@@ -1,11 +1,12 @@
-//! Go-to-definition, find-references, and rename over the project binding index.
+//! Go-to-definition, find-references, and rename over project analysis.
 //!
-//! These read the checker's [`BindingIndex`](marrow_check::BindingIndex) — the one
-//! resolution layer that maps every identifier use to the definition it names,
-//! respecting lexical scope, `use` aliases, and the saved-data schema. This module
-//! never re-resolves names: it converts the index's [`SymbolRef`]s into LSP
-//! locations and edits, and applies the index's rename-safety classification so a
-//! rename that would orphan stored data is refused rather than performed.
+//! Most navigation reads the checker's [`BindingIndex`](marrow_check::BindingIndex)
+//! — the one resolution layer that maps every identifier use to the definition it
+//! names, respecting lexical scope, `use` aliases, and the saved-data schema.
+//! Go-to-definition also has a small syntax-backed fallback for saved roots, since
+//! `^root` names durable data rather than a checker symbol. References and rename
+//! stay binding-index driven, and rename applies the index's safety classification
+//! so a rename that would orphan stored data is refused rather than performed.
 //!
 //! Spans into a file are mapped through that file's [`LineIndex`]. A caller supplies
 //! the index per file (the open buffer's when present, else one built from disk),
@@ -15,6 +16,7 @@ use std::path::Path;
 
 use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
 use marrow_check::{BindingIndex, RenameSafety, SymbolRef};
+use marrow_syntax::{Declaration, SourceSpan, TokenKind, lex_source};
 
 use crate::positions::LineIndex;
 
@@ -113,11 +115,15 @@ impl FileIndex for SnapshotIndices<'_> {
 /// location, or `None` when the cursor is not on a known symbol. A cursor already
 /// on a definition returns that definition.
 pub fn definition(
+    snapshot: &marrow_check::AnalysisSnapshot,
     index: &BindingIndex,
     indices: &impl FileIndex,
     file: &Path,
     offset: usize,
 ) -> Option<Location> {
+    if let Some(location) = saved_root_definition(snapshot, indices, file, offset) {
+        return Some(location);
+    }
     let symbol = index.definition(file, offset)?;
     symbol_location(&symbol, indices)
 }
@@ -240,6 +246,93 @@ fn symbol_location(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<Locat
         None => line_index.range(symbol.span.start_byte, symbol.span.end_byte),
     };
     Some(Location { uri: url, range })
+}
+
+fn saved_root_definition(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    indices: &impl FileIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<Location> {
+    let analyzed = snapshot
+        .files
+        .iter()
+        .find(|analyzed| analyzed.path == file)?;
+    let root = saved_root_at(&analyzed.source, offset)?;
+    let (declaration_file, start, end) = saved_root_declaration(snapshot, &root)?;
+    let line_index = indices.index_for(declaration_file)?;
+    let url = Url::from_file_path(declaration_file).ok()?;
+    Some(Location {
+        uri: url,
+        range: line_index.range(start, end),
+    })
+}
+
+fn saved_root_at(source: &str, offset: usize) -> Option<String> {
+    let tokens = lex_source(source).tokens;
+    tokens.windows(2).find_map(|pair| {
+        let [previous, token] = pair else {
+            return None;
+        };
+        if previous.kind == TokenKind::Caret
+            && token.kind == TokenKind::Identifier
+            && previous.span.start_byte <= offset
+            && offset <= token.span.end_byte
+        {
+            Some(token.text(source).to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn saved_root_declaration<'a>(
+    snapshot: &'a marrow_check::AnalysisSnapshot,
+    root: &str,
+) -> Option<(&'a Path, usize, usize)> {
+    for analyzed in &snapshot.files {
+        for declaration in &analyzed.parsed.file.declarations {
+            let Declaration::Resource(resource) = declaration else {
+                continue;
+            };
+            let Some(store) = &resource.store else {
+                continue;
+            };
+            if store.root == root {
+                let (start, end) =
+                    saved_root_identifier_span(&analyzed.source, resource.span, root)?;
+                return Some((analyzed.path.as_path(), start, end));
+            }
+        }
+    }
+    None
+}
+
+fn saved_root_identifier_span(
+    source: &str,
+    span: SourceSpan,
+    root: &str,
+) -> Option<(usize, usize)> {
+    let tokens = lex_source(source).tokens;
+    tokens.windows(2).find_map(|pair| {
+        let [previous, token] = pair else {
+            return None;
+        };
+        if previous.kind == TokenKind::Caret
+            && token.kind == TokenKind::Identifier
+            && span_covers(span, previous.span.start_byte)
+            && span_covers(span, token.span.end_byte)
+            && token.text(source) == root
+        {
+            Some((token.span.start_byte, token.span.end_byte))
+        } else {
+            None
+        }
+    })
+}
+
+fn span_covers(span: SourceSpan, offset: usize) -> bool {
+    span.start_byte <= offset && offset <= span.end_byte
 }
 
 /// The source spelling of a symbol's name: the identifier the checker resolved it
@@ -530,12 +623,116 @@ mod tests {
 
         // Cursor on the `n` in `return n`.
         let use_offset = offset_of(source, "return n") + "return ".len();
-        let location = definition(&index, &indices, &file, use_offset)
+        let location = definition(&snapshot, &index, &indices, &file, use_offset)
             .expect("a definition for the local use");
 
         // It lands on the `n` in `const n`, the binding site.
         let def_offset = offset_of(source, "const n") + "const ".len();
         let (line, character) = line_col(source, def_offset);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn definition_from_saved_root_use_jumps_to_saved_root_declaration() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn f(): string
+    return ^books(1).title
+";
+        let (snapshot, file, indices) = analyze(source);
+        let index = build_binding_index(&snapshot);
+
+        let use_offset = offset_of(source, "return ^books") + "return ^".len();
+        let location = definition(&snapshot, &index, &indices, &file, use_offset)
+            .expect("a saved-root use resolves to its declaration");
+        let line_index = indices.0.get(&file).unwrap();
+
+        assert_eq!(range_text(source, line_index, location.range), "books");
+        let declaration = offset_of(source, "resource Book at ^books") + "resource Book at ^".len();
+        let (line, character) = line_col(source, declaration);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn definition_from_saved_root_use_works_on_the_caret() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn f(): string
+    return ^books(1).title
+";
+        let (snapshot, file, indices) = analyze(source);
+        let index = build_binding_index(&snapshot);
+
+        let use_offset = offset_of(source, "return ^books") + "return ".len();
+        let location = definition(&snapshot, &index, &indices, &file, use_offset)
+            .expect("a saved-root caret resolves to its declaration");
+        let line_index = indices.0.get(&file).unwrap();
+
+        assert_eq!(range_text(source, line_index, location.range), "books");
+        let declaration = offset_of(source, "resource Book at ^books") + "resource Book at ^".len();
+        let (line, character) = line_col(source, declaration);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn definition_from_saved_root_declaration_selects_root_identifier_not_resource_name() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn f(): string
+    return ^books(1).title
+";
+        let (snapshot, file, indices) = analyze(source);
+        let index = build_binding_index(&snapshot);
+
+        let declaration = offset_of(source, "resource Book at ^books") + "resource Book at ^".len();
+        let location = definition(&snapshot, &index, &indices, &file, declaration + 1)
+            .expect("a saved-root declaration resolves to itself");
+        let line_index = indices.0.get(&file).unwrap();
+
+        assert_eq!(range_text(source, line_index, location.range), "books");
+        let (line, character) = line_col(source, declaration);
+        assert_eq!(location.range.start.line, line);
+        assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn definition_from_saved_root_declaration_works_on_the_caret() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    required title: string
+
+pub fn f(): string
+    return ^books(1).title
+";
+        let (snapshot, file, indices) = analyze(source);
+        let index = build_binding_index(&snapshot);
+
+        let declaration_caret =
+            offset_of(source, "resource Book at ^books") + "resource Book at ".len();
+        let location = definition(&snapshot, &index, &indices, &file, declaration_caret)
+            .expect("a saved-root declaration caret resolves to itself");
+        let line_index = indices.0.get(&file).unwrap();
+
+        assert_eq!(range_text(source, line_index, location.range), "books");
+        let declaration = declaration_caret + "^".len();
+        let (line, character) = line_col(source, declaration);
         assert_eq!(location.range.start.line, line);
         assert_eq!(location.range.start.character, character);
     }
@@ -716,7 +913,7 @@ fn f(): b::Status
         let index = build_binding_index(&snapshot);
 
         let annotation = offset_of(app_source, "b::Status") + "b::".len();
-        let location = definition(&index, &indices, app_file, annotation + 1)
+        let location = definition(&snapshot, &index, &indices, app_file, annotation + 1)
             .expect("enum annotation resolves to its declaration");
         let line_index = indices.0.get(status_file).unwrap();
 

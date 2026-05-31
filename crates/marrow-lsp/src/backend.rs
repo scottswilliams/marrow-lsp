@@ -332,9 +332,8 @@ impl LanguageServer for Backend {
         ))
     }
 
-    /// Go to the definition of the symbol under the cursor. Reads the cached
-    /// binding index (built once per recompute) — never re-resolves names or
-    /// recomputes the project.
+    /// Go to the definition under the cursor. Reads the cached snapshot plus
+    /// binding index — never recomputes the project.
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
@@ -357,11 +356,14 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
         let indices = snapshot_indices(workspace, documents);
+        let snapshot = workspace.latest().expect("ensured just above");
         let index = workspace
             .binding_index_cached()
             .expect("ensured just above");
-        Ok(navigation::definition(index, &indices, &path, offset)
-            .map(GotoDefinitionResponse::Scalar))
+        Ok(
+            navigation::definition(snapshot, index, &indices, &path, offset)
+                .map(GotoDefinitionResponse::Scalar),
+        )
     }
 
     /// Every reference to the symbol under the cursor, keeping or dropping the
