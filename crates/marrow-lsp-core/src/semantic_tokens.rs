@@ -622,7 +622,7 @@ fn reference_overrides(
             continue;
         }
         let Some(definition) = index.definition(path, token.span.start_byte) else {
-            if token_is_prefix_before_resolved_resource_tail(lexed, token_index, index, path) {
+            if token_is_prefix_before_resolved_namespace_tail(lexed, token_index, index, path) {
                 overrides.insert(
                     (token.span.start_byte, token.span.end_byte),
                     TokenStyle::plain(TYPE_NAMESPACE),
@@ -642,7 +642,7 @@ fn reference_overrides(
                 &definition,
             )
             .is_some()
-                || token_is_prefix_before_resolved_resource_tail(lexed, token_index, index, path)
+                || token_is_prefix_before_resolved_namespace_tail(lexed, token_index, index, path)
             {
                 overrides.insert(
                     (token.span.start_byte, token.span.end_byte),
@@ -659,7 +659,7 @@ fn reference_overrides(
     overrides
 }
 
-fn token_is_prefix_before_resolved_resource_tail(
+fn token_is_prefix_before_resolved_namespace_tail(
     lexed: &LexedSource,
     token_index: usize,
     index: &BindingIndex,
@@ -674,12 +674,7 @@ fn token_is_prefix_before_resolved_resource_tail(
         let candidate = &lexed.tokens[candidate_index];
         if index
             .definition(path, candidate.span.start_byte)
-            .is_some_and(|definition| {
-                matches!(
-                    definition.kind,
-                    SymbolKind::Resource | SymbolKind::ResourceIdentity
-                )
-            })
+            .is_some_and(|definition| resolved_tail_allows_namespace_prefix(definition.kind))
         {
             return true;
         }
@@ -751,10 +746,8 @@ fn reference_matches_namespace_prefix(
     if reference.span == definition.span {
         return false;
     }
-    matches!(
-        reference.kind,
-        SymbolKind::Function | SymbolKind::Resource | SymbolKind::ResourceIdentity
-    ) && token_is_namespace_prefix_in_reference(reference.span, token, source)
+    symbol_kind_can_have_namespace_prefix(reference.kind)
+        && token_is_namespace_prefix_in_reference(reference.span, token, source)
 }
 
 fn token_is_leaf_in_reference(span: SourceSpan, token: &Token, source: &str) -> bool {
@@ -780,6 +773,23 @@ fn token_is_namespace_prefix_in_reference(span: SourceSpan, token: &Token, sourc
 
 fn span_width(span: SourceSpan) -> usize {
     span.end_byte.saturating_sub(span.start_byte)
+}
+
+fn symbol_kind_can_have_namespace_prefix(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function
+            | SymbolKind::Resource
+            | SymbolKind::ResourceIdentity
+            | SymbolKind::Enum
+    )
+}
+
+fn resolved_tail_allows_namespace_prefix(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Resource | SymbolKind::ResourceIdentity | SymbolKind::Enum
+    )
 }
 
 fn style_for_symbol_kind(kind: SymbolKind) -> Option<TokenStyle> {
@@ -2022,6 +2032,142 @@ fn f()
             "    const current: Status = Status::active",
             "Status",
             legend_index(&SemanticTokenType::ENUM),
+        );
+    }
+
+    #[test]
+    fn checked_qualified_enum_type_prefix_is_namespace_while_leaf_stays_enum() {
+        let status_source = "\
+module a::b
+
+pub enum Status
+    active
+    archived
+";
+        let app_source = "\
+module app
+
+use a::b
+
+fn f(): b::Status
+    return b::Status::active
+";
+        let (index, decoded) = decoded_for_checked_file(
+            &[("a/b.mw", status_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "fn f(): b::Status",
+            "b",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "fn f(): b::Status",
+            "Status",
+            legend_index(&SemanticTokenType::ENUM),
+            0,
+        );
+    }
+
+    #[test]
+    fn checked_qualified_enum_member_prefixes_are_namespaces_while_leaves_keep_roles() {
+        let status_source = "\
+module a::b
+
+pub enum Status
+    active
+    archived
+";
+        let app_source = "\
+module app
+
+use a::b
+
+fn f(): b::Status
+    return b::Status::active
+";
+        let (index, decoded) = decoded_for_checked_file(
+            &[("a/b.mw", status_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    return b::Status::active",
+            "b",
+            legend_index(&SemanticTokenType::NAMESPACE),
+            0,
+        );
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    return b::Status::active",
+            "Status",
+            legend_index(&SemanticTokenType::ENUM),
+            0,
+        );
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "    return b::Status::active",
+            "active",
+            legend_index(&SemanticTokenType::ENUM_MEMBER),
+            0,
+        );
+    }
+
+    #[test]
+    fn checked_fully_qualified_enum_type_prefixes_are_namespaces_while_leaf_stays_enum() {
+        let status_source = "\
+module a::b::c
+
+pub enum Status
+    active
+    archived
+";
+        let app_source = "\
+module app
+
+fn f(): a::b::c::Status
+    return a::b::c::Status::active
+";
+        let (index, decoded) = decoded_for_checked_file(
+            &[("a/b/c.mw", status_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+        let namespace = legend_index(&SemanticTokenType::NAMESPACE);
+
+        for lexeme in ["a", "b", "c"] {
+            assert_token(
+                app_source,
+                &index,
+                &decoded,
+                "fn f(): a::b::c::Status",
+                lexeme,
+                namespace,
+                0,
+            );
+        }
+        assert_token(
+            app_source,
+            &index,
+            &decoded,
+            "fn f(): a::b::c::Status",
+            "Status",
+            legend_index(&SemanticTokenType::ENUM),
+            0,
         );
     }
 
