@@ -1517,6 +1517,14 @@ resource Book at ^books(id: int)
 
 pub fn f(): bool
     return exists(^books(1))
+
+pub fn g(): Book::Id
+    return nextId(^books)
+
+pub fn h()
+    write(\"a\")
+    print(\"b\")
+    return count(^books)
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
@@ -1533,6 +1541,42 @@ pub fn f(): bool
         assert!(
             value.contains("builtin"),
             "builtin hover should identify the source kind: {value}"
+        );
+        assert!(
+            value.contains("Returns true when the saved path exists."),
+            "builtin hover should include exists docs: {value}"
+        );
+
+        let next_id_value = hover_value(&snapshot, &index, &file, source, "nextId(^books");
+        assert!(
+            next_id_value.starts_with("```marrow\nnextId(^root): Id\n```"),
+            "builtin signature should lead the hover: {next_id_value}"
+        );
+        assert!(
+            next_id_value.contains("Returns the next id for a saved root."),
+            "builtin hover should include nextId docs: {next_id_value}"
+        );
+        assert!(
+            !next_id_value.contains("Returns true when the saved path exists."),
+            "builtin docs should be specific to the hovered builtin: {next_id_value}"
+        );
+
+        let write_value = hover_value(&snapshot, &index, &file, source, "write(\"a");
+        assert!(
+            write_value.contains("Writes rendered text to output without a newline."),
+            "write hover should describe output behavior without implying saved-state mutation: {write_value}"
+        );
+        let print_value = hover_value(&snapshot, &index, &file, source, "print(\"b");
+        assert!(
+            print_value.contains("Writes rendered text to output with a newline."),
+            "print hover should describe output behavior: {print_value}"
+        );
+        let count_value = hover_value(&snapshot, &index, &file, source, "count(^books");
+        assert!(
+            count_value.contains(
+                "Returns child count for a saved path, 1 for a scalar, or 0 when absent."
+            ),
+            "count hover should describe path/scalar/absent behavior: {count_value}"
         );
     }
 

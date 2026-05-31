@@ -3,60 +3,74 @@ use marrow_schema::{ScalarType, stdlib};
 pub(crate) struct BareBuiltin {
     pub(crate) name: &'static str,
     pub(crate) detail: &'static str,
+    pub(crate) description: &'static str,
 }
 
 const BARE_FUNCTION_BUILTINS: &[BareBuiltin] = &[
     BareBuiltin {
         name: "exists",
         detail: "exists(path): bool",
+        description: "Returns true when the saved path exists.",
     },
     BareBuiltin {
         name: "keys",
         detail: "keys(layer): sequence",
+        description: "Returns the keys in a layer.",
     },
     BareBuiltin {
         name: "values",
         detail: "values(layer): sequence",
+        description: "Returns the values in a layer.",
     },
     BareBuiltin {
         name: "entries",
         detail: "entries(layer): sequence",
+        description: "Returns the entries in a layer.",
     },
     BareBuiltin {
         name: "count",
         detail: "count(layer): int",
+        description: "Returns child count for a saved path, 1 for a scalar, or 0 when absent.",
     },
     BareBuiltin {
         name: "reversed",
         detail: "reversed(sequence): sequence",
+        description: "Returns the sequence in reverse order.",
     },
     BareBuiltin {
         name: "next",
         detail: "next(path): value",
+        description: "Returns the next key after a saved path.",
     },
     BareBuiltin {
         name: "prev",
         detail: "prev(path): value",
+        description: "Returns the previous key before a saved path.",
     },
     BareBuiltin {
         name: "append",
         detail: "append(layer, value): int",
+        description: "Appends a value to a layer and returns its key.",
     },
     BareBuiltin {
         name: "nextId",
         detail: "nextId(^root): Id",
+        description: "Returns the next id for a saved root.",
     },
     BareBuiltin {
         name: "write",
         detail: "write(value)",
+        description: "Writes rendered text to output without a newline.",
     },
     BareBuiltin {
         name: "print",
         detail: "print(value)",
+        description: "Writes rendered text to output with a newline.",
     },
     BareBuiltin {
         name: "Error",
         detail: "Error(code: ErrorCode, message: string): Error",
+        description: "Constructs an Error value.",
     },
 ];
 
@@ -94,7 +108,12 @@ pub(crate) fn bare_builtin_hover(name: &str) -> Option<String> {
     bare_function_builtins()
         .iter()
         .find(|builtin| builtin.name == name)
-        .map(|builtin| format!("{}\n\ndefault library builtin.", builtin.detail))
+        .map(|builtin| {
+            format!(
+                "{}\n\ndefault library builtin.\n\n{}",
+                builtin.detail, builtin.description
+            )
+        })
 }
 
 pub(crate) fn scalar_conversion_hover(name: &str) -> Option<String> {
