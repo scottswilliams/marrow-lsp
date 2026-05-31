@@ -12,7 +12,10 @@
 use std::path::Path;
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
-use marrow_check::{CheckedModule, CheckedProgram, scope_at};
+use marrow_check::{
+    CheckedModule, CheckedProgram, DefItem, Resolution, ResolvableKind, build_alias_map,
+    expand_alias, resolve, scope_at,
+};
 use marrow_schema::{Element, EnumSchema, Node, ResourceSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
 
@@ -328,19 +331,19 @@ fn namespace_completions(
         };
     }
 
+    if let Some(resource) = resource_for_namespace(program, file, qualifier) {
+        return vec![
+            item("Id", CompletionItemKind::CLASS)
+                .detail(format!("{}::Id", resource.name))
+                .docs_from(&resource.docs),
+        ];
+    }
+
+    if let Some(enum_schema) = enum_for_namespace(program, file, qualifier) {
+        return enum_member_completions(enum_schema);
+    }
+
     if let [name] = qualifier {
-        // A resource name exposes its identity type.
-        if let Some(resource) = resource_by_name(program, file, name) {
-            return vec![
-                item("Id", CompletionItemKind::CLASS)
-                    .detail(format!("{name}::Id"))
-                    .docs_from(&resource.docs),
-            ];
-        }
-        // An enum name exposes its member literals.
-        if let Some(enum_schema) = enum_by_name(program, name) {
-            return enum_member_completions(enum_schema);
-        }
         // A used module exposes its public functions and constants.
         if let Some(module) = module_named(program, file, name) {
             return module_member_completions(module);
@@ -468,9 +471,84 @@ fn enums(program: &CheckedProgram) -> impl Iterator<Item = &EnumSchema> {
         .flat_map(|module| module.enums.iter())
 }
 
-/// The first enum named `name`, searched across all modules.
-fn enum_by_name<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a EnumSchema> {
-    enums(program).find(|enum_schema| enum_schema.name == name)
+fn resource_for_namespace<'a>(
+    program: &'a CheckedProgram,
+    file: &Path,
+    qualifier: &[String],
+) -> Option<&'a ResourceSchema> {
+    if let [name] = qualifier {
+        return resource_by_name(program, file, name);
+    }
+    let mut identity_path = qualifier.to_vec();
+    identity_path.push("Id".to_string());
+    match resolve(
+        program,
+        module_name_for_file(program, file).unwrap_or_default(),
+        &identity_path,
+        ResolvableKind::ResourceIdentity,
+    ) {
+        Resolution::Found(def) => match def.item {
+            DefItem::Resource(resource) => Some(resource),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn enum_for_namespace<'a>(
+    program: &'a CheckedProgram,
+    file: &Path,
+    qualifier: &[String],
+) -> Option<&'a EnumSchema> {
+    let (name, module_prefix) = qualifier.split_last()?;
+    if module_prefix.is_empty() {
+        return enum_visible_by_bare_name(program, file, name);
+    }
+
+    let aliases = current_module(program, file)
+        .map(|module| build_alias_map(&module.imports))
+        .unwrap_or_default();
+    let expanded = expand_alias(qualifier, &aliases);
+    let (name, module_prefix) = expanded.split_last()?;
+    let module_name = module_prefix.join("::");
+    let module = module_by_name(program, &module_name)?;
+    let current_module = module_name_for_file(program, file);
+    if Some(module.name.as_str()) != current_module && !enum_is_public(module, name) {
+        return None;
+    }
+    module
+        .enums
+        .iter()
+        .find(|enum_schema| enum_schema.name == *name)
+}
+
+fn enum_visible_by_bare_name<'a>(
+    program: &'a CheckedProgram,
+    file: &Path,
+    name: &str,
+) -> Option<&'a EnumSchema> {
+    let current_module = current_module(program, file);
+    if let Some(schema) = current_module.and_then(|module| enum_in_module(module, name)) {
+        return Some(schema);
+    }
+    let current_module_name = current_module.map(|module| module.name.as_str());
+    program
+        .modules
+        .iter()
+        .filter(|module| {
+            Some(module.name.as_str()) != current_module_name && !module.name.is_empty()
+        })
+        .find_map(|module| {
+            let schema = enum_in_module(module, name)?;
+            enum_is_public(module, name).then_some(schema)
+        })
+}
+
+fn enum_in_module<'a>(module: &'a CheckedModule, name: &str) -> Option<&'a EnumSchema> {
+    module
+        .enums
+        .iter()
+        .find(|enum_schema| enum_schema.name == name)
 }
 
 fn resource_by_name<'a>(
@@ -489,6 +567,25 @@ fn resource_by_name<'a>(
                 .find(|resource| resource.name == name)
         })
         .or_else(|| resources(program).find(|resource| resource.name == name))
+}
+
+fn current_module<'a>(program: &'a CheckedProgram, file: &Path) -> Option<&'a CheckedModule> {
+    program
+        .modules
+        .iter()
+        .find(|module| module.source_file == file)
+}
+
+fn module_name_for_file<'a>(program: &'a CheckedProgram, file: &Path) -> Option<&'a str> {
+    current_module(program, file).map(|module| module.name.as_str())
+}
+
+fn module_by_name<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a CheckedModule> {
+    program.modules.iter().find(|module| module.name == name)
+}
+
+fn enum_is_public(module: &CheckedModule, name: &str) -> bool {
+    module.enum_public.get(name).copied().unwrap_or(true)
 }
 
 /// The resource whose saved root is `root`, searched across all modules. The
@@ -511,10 +608,7 @@ fn module_named<'a>(
     file: &Path,
     name: &str,
 ) -> Option<&'a CheckedModule> {
-    let current = program
-        .modules
-        .iter()
-        .find(|module| module.source_file == file);
+    let current = current_module(program, file);
     let imported = current.map(|module| &module.imports);
     program.modules.iter().find(|module| {
         let last = module.name.rsplit("::").next().unwrap_or(&module.name);
@@ -701,9 +795,10 @@ resource Book at ^books(id: int)
     index byShelf(shelf, id)
 
 ;; Lifecycle state.
-enum Status
+pub enum Status
     ;; Ready for use.
     active
+    ;; No longer active.
     archived
 
 ;; Returns a book title.
@@ -766,6 +861,46 @@ pub fn run(count: int): int
         )
     }
 
+    fn same_named_enum_project() -> (CheckedProgram, std::path::PathBuf) {
+        let app = std::path::PathBuf::from("/project/src/shelf/app.mw");
+        let library = std::path::PathBuf::from("/project/src/shelf/private.mw");
+        let enum_schema = |member: &str| EnumSchema {
+            name: "Status".to_string(),
+            docs: Vec::new(),
+            members: vec![marrow_schema::EnumMemberSchema {
+                name: member.to_string(),
+                docs: Vec::new(),
+                stable_id: None,
+                parent: None,
+                category: false,
+            }],
+        };
+        let module = |name: &str, source_file: std::path::PathBuf, member: &str, public: bool| {
+            let mut enum_public = std::collections::HashMap::new();
+            enum_public.insert("Status".to_string(), public);
+            CheckedModule {
+                name: name.to_string(),
+                source_file,
+                span: Default::default(),
+                imports: Vec::new(),
+                constants: Vec::new(),
+                functions: Vec::new(),
+                resources: Vec::new(),
+                enums: vec![enum_schema(member)],
+                enum_public,
+            }
+        };
+        (
+            CheckedProgram {
+                modules: vec![
+                    module("shelf::private", library, "foreignOnly", false),
+                    module("shelf::app", app.clone(), "currentOnly", false),
+                ],
+            },
+            app,
+        )
+    }
+
     /// Run completion on `source` at the cursor marked `|`, against `program` for
     /// the file at `file`. The marker is stripped before lexing.
     fn complete_items(
@@ -799,6 +934,12 @@ pub fn run(count: int): int
             Documentation::MarkupContent(markup) => &markup.value,
             Documentation::String(value) => value,
         }
+    }
+
+    fn assert_same_completion_shape(actual: &CompletionItem, expected: &CompletionItem) {
+        assert_eq!(actual.kind, expected.kind);
+        assert_eq!(actual.detail, expected.detail);
+        assert_eq!(actual.documentation, expected.documentation);
     }
 
     #[test]
@@ -956,6 +1097,42 @@ pub fn run(count: int): int
     }
 
     #[test]
+    fn used_module_qualified_resource_namespace_lists_id_with_bare_shape() {
+        let (program, file) = project();
+        let bare_items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
+        );
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x: books::Book::|\n",
+        );
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["Id"]);
+        assert_same_completion_shape(item_named(&items, "Id"), item_named(&bare_items, "Id"));
+    }
+
+    #[test]
+    fn fully_qualified_resource_namespace_lists_id_with_bare_shape() {
+        let (program, file) = project();
+        let bare_items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
+        );
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x: shelf::books::Book::|\n",
+        );
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["Id"]);
+        assert_same_completion_shape(item_named(&items, "Id"), item_named(&bare_items, "Id"));
+    }
+
+    #[test]
     fn enum_namespace_lists_members() {
         let (program, file) = project();
         let labels = complete(
@@ -982,6 +1159,68 @@ pub fn run(count: int): int
         assert_eq!(active.kind, Some(CompletionItemKind::ENUM_MEMBER));
         assert_eq!(active.detail.as_deref(), Some("Status"));
         assert_eq!(documentation_value(active), "Ready for use.");
+    }
+
+    #[test]
+    fn bare_enum_namespace_prefers_current_module_without_leaking_private_foreign_enum() {
+        let (program, file) = same_named_enum_project();
+        let labels = complete(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x = Status::|\n",
+        );
+
+        assert_eq!(labels, ["currentOnly"]);
+    }
+
+    #[test]
+    fn used_module_qualified_enum_namespace_lists_members_with_bare_shape() {
+        let (program, file) = project();
+        let bare_items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x = Status::|\n",
+        );
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x = books::Status::|\n",
+        );
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["active", "archived"]);
+        assert_same_completion_shape(
+            item_named(&items, "active"),
+            item_named(&bare_items, "active"),
+        );
+        assert_same_completion_shape(
+            item_named(&items, "archived"),
+            item_named(&bare_items, "archived"),
+        );
+    }
+
+    #[test]
+    fn fully_qualified_enum_namespace_lists_members_with_bare_shape() {
+        let (program, file) = project();
+        let bare_items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x = Status::|\n",
+        );
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x = shelf::books::Status::|\n",
+        );
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, ["active", "archived"]);
+        assert_same_completion_shape(
+            item_named(&items, "active"),
+            item_named(&bare_items, "active"),
+        );
+        assert_same_completion_shape(
+            item_named(&items, "archived"),
+            item_named(&bare_items, "archived"),
+        );
     }
 
     #[test]
@@ -1063,6 +1302,12 @@ pub fn run(count: int): int
             labels.contains(&"LIMIT".to_string()),
             "the used module's constant, got {labels:?}"
         );
+        for hidden in ["Id", "active", "archived"] {
+            assert!(
+                !labels.contains(&hidden.to_string()),
+                "`books::` should not offer {hidden:?}, got {labels:?}"
+            );
+        }
     }
 
     #[test]
