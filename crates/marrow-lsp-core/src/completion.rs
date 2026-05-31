@@ -329,8 +329,12 @@ fn namespace_completions(
 
     if let [name] = qualifier {
         // A resource name exposes its identity type.
-        if resources(program).any(|resource| &resource.name == name) {
-            return vec![item("Id", CompletionItemKind::CLASS).detail(format!("{name}::Id"))];
+        if let Some(resource) = resource_by_name(program, file, name) {
+            return vec![
+                item("Id", CompletionItemKind::CLASS)
+                    .detail(format!("{name}::Id"))
+                    .docs_from(&resource.docs),
+            ];
         }
         // An enum name exposes its member literals.
         if let Some(enum_schema) = enum_by_name(program, name) {
@@ -456,6 +460,24 @@ fn enums(program: &CheckedProgram) -> impl Iterator<Item = &EnumSchema> {
 /// The first enum named `name`, searched across all modules.
 fn enum_by_name<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a EnumSchema> {
     enums(program).find(|enum_schema| enum_schema.name == name)
+}
+
+fn resource_by_name<'a>(
+    program: &'a CheckedProgram,
+    file: &Path,
+    name: &str,
+) -> Option<&'a ResourceSchema> {
+    program
+        .modules
+        .iter()
+        .find(|module| module.source_file == file)
+        .and_then(|module| {
+            module
+                .resources
+                .iter()
+                .find(|resource| resource.name == name)
+        })
+        .or_else(|| resources(program).find(|resource| resource.name == name))
 }
 
 /// The resource whose saved root is `root`, searched across all modules. The
@@ -637,7 +659,7 @@ fn dedup(items: Vec<CompletionItem>) -> Vec<CompletionItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marrow_check::{ProjectSources, analyze_project};
+    use marrow_check::{CheckedModule, ProjectSources, analyze_project};
     use marrow_project::parse_config;
     use marrow_syntax::{lex_source, parse_source};
 
@@ -655,7 +677,9 @@ mod tests {
             "\
 module shelf::books
 
+;; Books saved by id.
 resource Book at ^books(id: int)
+    ;; Display title.
     required title: string
     required shelf: string
     tags(pos: int): string
@@ -665,10 +689,13 @@ resource Book at ^books(id: int)
 
     index byShelf(shelf, id)
 
+;; Lifecycle state.
 enum Status
+    ;; Ready for use.
     active
     archived
 
+;; Returns a book title.
 pub fn titleOf(id: Book::Id): string
     return ^books(id).title
 
@@ -696,17 +723,70 @@ pub fn run(count: int): int
         (snapshot.program, app)
     }
 
+    fn same_named_resource_project() -> (CheckedProgram, std::path::PathBuf) {
+        let app = std::path::PathBuf::from("/project/src/shelf/app.mw");
+        let library = std::path::PathBuf::from("/project/src/shelf/library.mw");
+        let book = |docs: &str| ResourceSchema {
+            name: "Book".to_string(),
+            docs: vec![docs.to_string()],
+            saved_root: None,
+            members: Vec::new(),
+            indexes: Vec::new(),
+        };
+        let module = |name: &str, source_file: std::path::PathBuf, docs: &str| CheckedModule {
+            name: name.to_string(),
+            source_file,
+            span: Default::default(),
+            imports: Vec::new(),
+            constants: Vec::new(),
+            functions: Vec::new(),
+            resources: vec![book(docs)],
+            enums: Vec::new(),
+        };
+        (
+            CheckedProgram {
+                modules: vec![
+                    module("shelf::library", library, "Library book docs."),
+                    module("shelf::app", app.clone(), "App book docs."),
+                ],
+            },
+            app,
+        )
+    }
+
     /// Run completion on `source` at the cursor marked `|`, against `program` for
     /// the file at `file`. The marker is stripped before lexing.
-    fn complete(program: &CheckedProgram, file: &std::path::Path, source: &str) -> Vec<String> {
+    fn complete_items(
+        program: &CheckedProgram,
+        file: &std::path::Path,
+        source: &str,
+    ) -> Vec<CompletionItem> {
         let offset = source.find('|').expect("a cursor marker `|`");
         let source = source.replacen('|', "", 1);
         let parsed = parse_source(&source);
         let lexed = lex_source(&source);
         completion(program, file, &source, &parsed, &lexed, offset)
+    }
+
+    fn complete(program: &CheckedProgram, file: &std::path::Path, source: &str) -> Vec<String> {
+        complete_items(program, file, source)
             .into_iter()
             .map(|item| item.label)
             .collect()
+    }
+
+    fn item_named<'a>(items: &'a [CompletionItem], label: &str) -> &'a CompletionItem {
+        items
+            .iter()
+            .find(|item| item.label == label)
+            .unwrap_or_else(|| panic!("expected completion {label:?}, got {items:?}"))
+    }
+
+    fn documentation_value(item: &CompletionItem) -> &str {
+        match item.documentation.as_ref().expect("completion docs") {
+            Documentation::MarkupContent(markup) => &markup.value,
+            Documentation::String(value) => value,
+        }
     }
 
     #[test]
@@ -836,6 +916,34 @@ pub fn run(count: int): int
     }
 
     #[test]
+    fn resource_namespace_id_completion_shows_identity_shape_and_docs() {
+        let (program, file) = project();
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
+        );
+        let id = item_named(&items, "Id");
+        assert_eq!(id.kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(id.detail.as_deref(), Some("Book::Id"));
+        assert_eq!(documentation_value(id), "Books saved by id.");
+    }
+
+    #[test]
+    fn resource_namespace_id_completion_prefers_current_module_docs() {
+        let (program, file) = same_named_resource_project();
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
+        );
+        let id = item_named(&items, "Id");
+        assert_eq!(id.kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(id.detail.as_deref(), Some("Book::Id"));
+        assert_eq!(documentation_value(id), "App book docs.");
+    }
+
+    #[test]
     fn enum_namespace_lists_members() {
         let (program, file) = project();
         let labels = complete(
@@ -848,6 +956,20 @@ pub fn run(count: int): int
             vec!["active".to_string(), "archived".to_string()],
             "`Status::` offers enum members"
         );
+    }
+
+    #[test]
+    fn enum_member_completion_keeps_kind_detail_and_docs() {
+        let (program, file) = project();
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x = Status::|\n",
+        );
+        let active = item_named(&items, "active");
+        assert_eq!(active.kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(active.detail.as_deref(), Some("Status"));
+        assert_eq!(documentation_value(active), "Ready for use.");
     }
 
     #[test]
@@ -870,6 +992,20 @@ pub fn run(count: int): int
             !labels.contains(&"length".to_string()),
             "ops from other modules must not leak in, got {labels:?}"
         );
+    }
+
+    #[test]
+    fn used_module_function_completion_shows_signature_kind_without_docs() {
+        let (program, file) = project();
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x = books::|\n",
+        );
+        let title_of = item_named(&items, "titleOf");
+        assert_eq!(title_of.kind, Some(CompletionItemKind::FUNCTION));
+        assert_eq!(title_of.detail.as_deref(), Some("(id: Book::Id): string"));
+        assert_eq!(title_of.documentation, None);
     }
 
     #[test]
