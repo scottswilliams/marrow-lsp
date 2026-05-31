@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod navigation;
 pub mod positions;
 pub mod semantic_tokens;
+pub mod signature_help;
 pub mod store;
 pub mod symbols;
 mod types;

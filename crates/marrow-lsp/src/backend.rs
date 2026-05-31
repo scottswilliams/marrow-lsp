@@ -17,7 +17,7 @@ use marrow_lsp_core::positions::Position as CorePosition;
 use marrow_lsp_core::store::StoreReader;
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
 use marrow_lsp_core::{
-    code_lens, completion, formatting, hover, navigation, semantic_tokens, symbols,
+    code_lens, completion, formatting, hover, navigation, semantic_tokens, signature_help, symbols,
 };
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
@@ -217,6 +217,10 @@ impl LanguageServer for Backend {
                         ["^", ".", ":", "("].iter().map(|c| c.to_string()).collect(),
                     ),
                     ..CompletionOptions::default()
+                }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(["(", ","].iter().map(|c| c.to_string()).collect()),
+                    ..SignatureHelpOptions::default()
                 }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -576,6 +580,37 @@ impl LanguageServer for Backend {
             offset,
         );
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    /// Show the single callable signature for the innermost call at the cursor.
+    /// Reads only the open document's cached lex/source and the last checked
+    /// program, so in-progress argument lists can still get help before they parse.
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> jsonrpc::Result<Option<SignatureHelp>> {
+        let position = params.text_document_position_params;
+        let url = position.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+
+        let state = self.state.lock().await;
+        let Some(document) = state.documents.get(&url) else {
+            return Ok(None);
+        };
+        let offset = document.index.offset(to_core_position(position.position));
+
+        let Some(program) = state.workspace.program() else {
+            return Ok(None);
+        };
+        Ok(signature_help::signature_help(
+            program,
+            &path,
+            &document.text,
+            &document.lexed,
+            offset,
+        ))
     }
 
     /// Classify the document's cached lex into semantic tokens. Reads only the

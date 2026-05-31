@@ -86,6 +86,11 @@ fn initialize_then_open_erroring_buffer_publishes_a_diagnostic() {
         response["result"]["capabilities"]["textDocumentSync"], 1,
         "full-text sync (1) should be advertised"
     );
+    assert_eq!(
+        response["result"]["capabilities"]["signatureHelpProvider"]["triggerCharacters"],
+        json!(["(", ","]),
+        "signature help should trigger while starting and continuing calls"
+    );
 
     send(
         &mut stdin,
@@ -120,6 +125,176 @@ fn initialize_then_open_erroring_buffer_publishes_a_diagnostic() {
         "the overlay's return-type error should be published"
     );
     assert_eq!(diagnostic["source"], "marrow");
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn signature_help_returns_null_without_a_checked_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("scratch.mw");
+    let source = "module scratch\n\npub fn run(): int\n    return int(";
+    std::fs::write(&file, source).unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": source
+                }
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/signatureHelp",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": 3,
+                    "character": source.lines().last().unwrap().len()
+                }
+            }
+        }),
+    );
+
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(
+        response["result"].is_null(),
+        "signature help outside a checked project should be null, got {response:?}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn signature_help_returns_null_for_scratch_file_after_project_program_exists() {
+    let scratch_dir = tempfile::tempdir().unwrap();
+    let scratch_file = scratch_dir.path().join("scratch.mw");
+    let scratch_source = "module scratch\n\npub fn run(): int\n    return int(";
+    std::fs::write(&scratch_file, scratch_source).unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let project_file = fixture_root().join("src/shelf/sample.mw");
+    let project_uri = url::Url::from_file_path(&project_file).unwrap().to_string();
+    let clean = "module shelf::sample\n\npub fn answer(): int\n    return 1\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": project_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &project_uri, Duration::from_secs(10));
+
+    let scratch_uri = url::Url::from_file_path(&scratch_file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": scratch_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": scratch_source
+                }
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/signatureHelp",
+            "params": {
+                "textDocument": { "uri": scratch_uri },
+                "position": {
+                    "line": 3,
+                    "character": scratch_source.lines().last().unwrap().len()
+                }
+            }
+        }),
+    );
+
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(
+        response["result"].is_null(),
+        "signature help for a scratch file outside the checked program should be null, got {response:?}"
+    );
 
     let _ = server.0.kill();
 }
