@@ -300,7 +300,7 @@ fn signature_help_returns_null_for_scratch_file_after_project_program_exists() {
 }
 
 #[test]
-fn hover_over_a_typed_expression_returns_a_marrow_code_block() {
+fn hover_over_a_parameter_use_returns_its_signature_fragment() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
             .stdin(Stdio::piped())
@@ -368,8 +368,8 @@ fn hover_over_a_typed_expression_returns_a_marrow_code_block() {
 
     let hover = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
     assert_eq!(
-        hover["result"]["contents"]["value"], "```marrow\nint\n```",
-        "hovering the int parameter should render its type as a marrow block"
+        hover["result"]["contents"]["value"], "```marrow\nn: int\n```",
+        "hovering the int parameter use should render its parameter signature"
     );
 
     let _ = server.0.kill();

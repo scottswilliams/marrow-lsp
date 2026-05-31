@@ -11,9 +11,9 @@ use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedFunction, DefItem, Resolution, ResolvableKind,
-    SymbolKind, SymbolRef, build_alias_map, build_binding_index, expand_module_alias, resolve,
-    type_at,
+    AnalysisSnapshot, BindingIndex, CheckedFunction, CheckedParam, DefItem, Resolution,
+    ResolvableKind, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
+    expand_module_alias, resolve, type_at,
 };
 use marrow_schema::{Element, EnumSchema, ResourceSchema};
 use marrow_store::backend::Presence;
@@ -49,6 +49,9 @@ pub fn hover_with_index(
         return Some(markdown_hover(default_library_hover_markdown(&value)));
     }
     if let Some(value) = function_hover(snapshot, index, file, offset, reader) {
+        return Some(markdown_hover(value));
+    }
+    if let Some(value) = parameter_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
     if let Some(value) = rich_symbol_hover(snapshot, index, file, offset, reader) {
@@ -299,6 +302,75 @@ fn function_hover(
     }
 
     Some(value)
+}
+
+fn parameter_hover(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<String> {
+    let symbol = index.definition(file, offset)?;
+    if symbol.kind != SymbolKind::Param {
+        return None;
+    }
+
+    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
+    let parsed_function = parsed_function_at(&parsed_file.parsed.file, symbol.span)?;
+    let name = parameter_use_name(snapshot, file, offset, parsed_function)?;
+    let checked_function = checked_function_at(snapshot, &symbol)?;
+    let checked_param = checked_function
+        .params
+        .iter()
+        .rev()
+        .find(|param| param.name == name)?;
+    let parsed_param = parsed_function
+        .params
+        .iter()
+        .rev()
+        .find(|param| param.name == name)?;
+
+    let mut value = marrow_code_block(&parameter_signature(checked_param));
+    if let Some(docs) = join_docs(&parsed_param.docs) {
+        value.push_str("\n\n");
+        value.push_str("**Parameter**\n");
+        value.push_str(&docs);
+    }
+    Some(value)
+}
+
+fn parameter_use_name<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    file: &Path,
+    offset: usize,
+    function: &FunctionDecl,
+) -> Option<&'a str> {
+    if !span_covers(function.body.span, offset) {
+        return None;
+    }
+    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
+    let tokens = lex_source(&analyzed.source).tokens;
+    let (index, token) = tokens.iter().enumerate().find(|(_, token)| {
+        token.kind == TokenKind::Identifier && span_covers(token.span, offset)
+    })?;
+    if previous_significant_kind(&tokens, index).is_some_and(|kind| {
+        matches!(
+            kind,
+            TokenKind::DoubleColon | TokenKind::Dot | TokenKind::QuestionDot
+        )
+    }) || next_significant_kind(&tokens, index).is_some_and(|kind| kind == TokenKind::Colon)
+    {
+        return None;
+    }
+    Some(token.text(&analyzed.source))
+}
+
+fn next_significant_kind(tokens: &[marrow_syntax::Token], index: usize) -> Option<TokenKind> {
+    tokens
+        .get(index + 1..)?
+        .iter()
+        .find(|token| !is_trivia(token.kind))
+        .map(|token| token.kind)
 }
 
 fn default_library_call_hover(
@@ -728,6 +800,15 @@ fn function_signature(function: &CheckedFunction) -> String {
         Some(ty) => format!("fn {}({params}): {}", function.name, render_type(ty)),
         None => format!("fn {}({params})", function.name),
     }
+}
+
+fn parameter_signature(param: &CheckedParam) -> String {
+    let mode = match param.mode {
+        Some(ParamMode::Out) => "out ",
+        Some(ParamMode::InOut) => "inout ",
+        None => "",
+    };
+    format!("{mode}{}: {}", param.name, render_type(&param.ty))
 }
 
 fn parameter_docs(function: &FunctionDecl) -> Option<String> {
@@ -1597,16 +1678,223 @@ mod tests {
     }
 
     #[test]
-    fn hover_renders_a_parameters_type_as_a_marrow_block() {
+    fn hover_over_a_plain_parameter_use_shows_its_signature_fragment() {
         let source = "module a\n\npub fn f(n: int): int\n    return n\n";
         let (snapshot, file) = analyze(source);
         // Hover over the `n` in `return n`.
         let offset = offset_of(source, "return n") + "return ".len();
-        let hover = hover(&snapshot, &file, offset).expect("a type at the use of `n`");
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `n`");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert_eq!(markup.value, "```marrow\nn: int\n```");
+    }
+
+    #[test]
+    fn hover_over_a_second_parameter_use_shows_its_signature_fragment() {
+        let source = "\
+module a
+
+pub fn f(first: int, second: string): string
+    return second
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "return second") + "return ".len();
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `second`");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert_eq!(markup.value, "```marrow\nsecond: string\n```");
+    }
+
+    #[test]
+    fn hover_over_a_moded_parameter_use_shows_its_mode() {
+        let source = "\
+module a
+
+pub fn fill(out value: int)
+    value = 1
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "value = 1") + 1;
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `value`");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert_eq!(markup.value, "```marrow\nout value: int\n```");
+    }
+
+    #[test]
+    fn hover_over_a_parameter_declaration_does_not_show_parameter_use_hover() {
+        let source = "module a\n\npub fn f(n: int): int\n    return n\n";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "n: int");
+
+        let hover = hover(&snapshot, &file, offset);
+        if let Some(hover) = hover {
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markup contents");
+            };
+            assert_ne!(markup.value, "```marrow\nn: int\n```");
+        }
+    }
+
+    #[test]
+    fn hover_over_a_field_named_like_a_parameter_does_not_show_parameter_use_hover() {
+        let source = "\
+module a
+
+resource Book
+    required title: string
+
+pub fn get(
+    ;; The parameter, not the field.
+    title: string,
+): string
+    var book: Book
+    return book.title
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "book.title") + "book.".len();
+
+        let hover = hover_value_at(&snapshot, &index_for(&snapshot), &file, offset);
+        if let Some(value) = hover {
+            assert_ne!(value, "```marrow\ntitle: string\n```");
+            assert!(
+                !value.contains("The parameter, not the field."),
+                "field hover should not inherit parameter docs: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_over_a_named_argument_label_does_not_show_parameter_use_hover() {
+        let source = "\
+module a
+
+resource Book
+    required title: string
+
+pub fn make(
+    ;; The parameter, not the named argument label.
+    title: string,
+): Book
+    return Book(title: title)
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "Book(title: title)") + "Book(".len();
+
+        let hover = hover_value_at(&snapshot, &index_for(&snapshot), &file, offset);
+        if let Some(value) = hover {
+            assert_ne!(value, "```marrow\ntitle: string\n```");
+            assert!(
+                !value.contains("The parameter, not the named argument label."),
+                "named argument label should not inherit parameter docs: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_over_a_duplicate_parameter_name_uses_the_latest_binding() {
+        let source = "\
+module a
+
+pub fn f(
+    ;; First parameter docs.
+    n: int,
+    ;; Second parameter docs.
+    n: string,
+): string
+    return n
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "return n") + "return ".len();
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `n`");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert!(
+            markup.value.starts_with("```marrow\nn: string\n```"),
+            "duplicate parameter hover should match the binding in scope: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("Second parameter docs."),
+            "duplicate parameter hover should use the later parameter docs: {}",
+            markup.value
+        );
+        assert!(
+            !markup.value.contains("First parameter docs."),
+            "duplicate parameter hover should not use the shadowed parameter docs: {}",
+            markup.value
+        );
+    }
+
+    #[test]
+    fn hover_over_a_documented_parameter_use_shows_its_docs() {
+        let source = "\
+module a
+
+pub fn f(
+    ;; The number to return.
+    n: int,
+): int
+    return n
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "return n") + "return ".len();
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `n`");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup contents");
+        };
+        assert!(
+            markup.value.starts_with("```marrow\nn: int\n```"),
+            "parameter signature should lead the hover: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("**Parameter**"),
+            "parameter docs should be in a short section: {}",
+            markup.value
+        );
+        assert!(
+            markup.value.contains("The number to return."),
+            "parameter docs should be shown: {}",
+            markup.value
+        );
+    }
+
+    #[test]
+    fn hover_over_a_shadowing_local_use_does_not_show_parameter_use_docs() {
+        let source = "\
+module a
+
+pub fn f(
+    ;; The outer parameter.
+    n: int,
+): int
+    if true
+        const n: int = 99
+        return n
+    return n
+";
+        let (snapshot, file) = analyze(source);
+        let offset = offset_of(source, "return n") + "return ".len();
+
+        let hover = hover(&snapshot, &file, offset).expect("a hover at the local use of `n`");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup contents");
         };
         assert_eq!(markup.value, "```marrow\nint\n```");
+        assert!(
+            !markup.value.contains("The outer parameter."),
+            "shadowing local should not inherit parameter docs: {}",
+            markup.value
+        );
     }
 
     #[test]
