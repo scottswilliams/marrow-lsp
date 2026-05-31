@@ -397,14 +397,27 @@ fn add_index_overrides(
     source: &str,
     index: &IndexDecl,
 ) {
-    add_first_identifier_override(
+    if let Some(name_index) = add_first_identifier_override(
         overrides,
         lexed,
         source,
         index.span,
         &index.name,
         TYPE_PROPERTY,
-    );
+    ) && !index.args.is_empty()
+        && let Some((open, close)) =
+            matching_parens_after(lexed, index.span, lexed.tokens[name_index].span.end_byte)
+    {
+        add_argument_name_overrides(
+            overrides,
+            lexed,
+            source,
+            open,
+            close,
+            index.args.iter().map(|arg| arg.as_str()),
+            TYPE_PARAMETER,
+        );
+    }
 }
 
 fn add_enum_member_overrides(
@@ -523,6 +536,26 @@ fn add_colon_name_overrides<'a>(
                 .tokens
                 .get(index + 1)
                 .is_some_and(|next| next.kind == TokenKind::Colon)
+        {
+            insert_override(overrides, token, token_type);
+        }
+    }
+}
+
+fn add_argument_name_overrides<'a>(
+    overrides: &mut HashMap<ByteSpan, u32>,
+    lexed: &LexedSource,
+    source: &str,
+    open: usize,
+    close: usize,
+    names: impl IntoIterator<Item = &'a str>,
+    token_type: u32,
+) {
+    let names: Vec<&str> = names.into_iter().collect();
+    for index in open + 1..close {
+        let token = &lexed.tokens[index];
+        if token.kind == TokenKind::Identifier
+            && names.iter().any(|name| *name == token.text(source))
         {
             insert_override(overrides, token, token_type);
         }
@@ -1539,6 +1572,22 @@ pub enum Genre
             &decoded,
             "    tags(pos: int): string",
             "pos",
+            parameter,
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    index byTitle(title, id)",
+            "title",
+            parameter,
+        );
+        assert_token_type(
+            source,
+            &index,
+            &decoded,
+            "    index byTitle(title, id)",
+            "id",
             parameter,
         );
         assert_token_type(
