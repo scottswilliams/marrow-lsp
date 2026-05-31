@@ -134,7 +134,30 @@
           "parameter": [
             "variable.parameter.marrow"
           ],
+          "keyword": [
+            "keyword.control.marrow",
+            "keyword.declaration.marrow",
+            "storage.modifier.marrow"
+          ],
+          "variable": [
+            "variable.other.marrow"
+          ],
+          "string": [
+            "string.quoted.double.marrow",
+            "string.quoted.double.bytes.marrow",
+            "string.quoted.double.interpolated.marrow"
+          ],
+          "number": [
+            "constant.numeric.integer.marrow",
+            "constant.numeric.decimal.marrow"
+          ],
+          "comment": [
+            "comment.block.documentation.marrow",
+            "comment.line.semicolon.marrow"
+          ],
           "type": [
+            "support.type.primitive.marrow",
+            "support.type.error.marrow",
             "entity.name.type.marrow"
           ],
           "type.defaultLibrary": [
@@ -142,7 +165,13 @@
             "entity.name.type.marrow"
           ],
           "operator": [
-            "keyword.operator.marrow"
+            "keyword.operator.marrow",
+            "keyword.operator.logical.marrow",
+            "keyword.operator.optional.marrow",
+            "keyword.operator.range.marrow",
+            "keyword.operator.comparison.marrow",
+            "keyword.operator.assignment.marrow",
+            "keyword.operator.arithmetic.marrow"
           ],
           "savedRoot": [
             "variable.other.saved.marrow",

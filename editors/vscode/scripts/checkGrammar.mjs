@@ -37,9 +37,7 @@ function keywordPattern(scope) {
 
 function assertScopeMapping(scopes, token, expectedScopes) {
   assert.ok(scopes[token], `${token} semantic token has fallback scopes`);
-  for (const scope of expectedScopes) {
-    assert.ok(scopes[token].includes(scope), `${token} maps to ${scope}`);
-  }
+  assert.deepEqual(scopes[token], expectedScopes, `${token} semantic token fallback scopes`);
 }
 
 const declarationKeyword = keywordPattern("keyword.declaration.marrow");
@@ -105,17 +103,55 @@ assertScopeMapping(marrowSemanticScopes, "function.defaultLibrary", [
 assertScopeMapping(marrowSemanticScopes, "struct", [
   "entity.name.type.struct.marrow",
   "entity.name.type.resource.marrow",
+  "entity.name.type.marrow",
 ]);
-assertScopeMapping(marrowSemanticScopes, "enum", ["entity.name.type.enum.marrow"]);
-assertScopeMapping(marrowSemanticScopes, "enumMember", ["variable.other.enummember.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "enum", [
+  "entity.name.type.enum.marrow",
+  "entity.name.type.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "enumMember", [
+  "constant.other.enum.marrow",
+  "variable.other.enummember.marrow",
+]);
 assertScopeMapping(marrowSemanticScopes, "property", ["variable.other.property.marrow"]);
 assertScopeMapping(marrowSemanticScopes, "parameter", ["variable.parameter.marrow"]);
-assertScopeMapping(marrowSemanticScopes, "type", ["entity.name.type.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "keyword", [
+  "keyword.control.marrow",
+  "keyword.declaration.marrow",
+  "storage.modifier.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "variable", ["variable.other.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "string", [
+  "string.quoted.double.marrow",
+  "string.quoted.double.bytes.marrow",
+  "string.quoted.double.interpolated.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "number", [
+  "constant.numeric.integer.marrow",
+  "constant.numeric.decimal.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "comment", [
+  "comment.block.documentation.marrow",
+  "comment.line.semicolon.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "type", [
+  "support.type.primitive.marrow",
+  "support.type.error.marrow",
+  "entity.name.type.marrow",
+]);
 assertScopeMapping(marrowSemanticScopes, "type.defaultLibrary", [
   "support.type.builtin.marrow",
   "entity.name.type.marrow",
 ]);
-assertScopeMapping(marrowSemanticScopes, "operator", ["keyword.operator.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "operator", [
+  "keyword.operator.marrow",
+  "keyword.operator.logical.marrow",
+  "keyword.operator.optional.marrow",
+  "keyword.operator.range.marrow",
+  "keyword.operator.comparison.marrow",
+  "keyword.operator.assignment.marrow",
+  "keyword.operator.arithmetic.marrow",
+]);
 assertScopeMapping(marrowSemanticScopes, "savedRoot", [
   "variable.other.saved.marrow",
   "variable.other.marrow",
