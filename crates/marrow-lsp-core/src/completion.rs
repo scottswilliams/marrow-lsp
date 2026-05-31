@@ -319,12 +319,13 @@ fn namespace_completions(
     file: &Path,
     qualifier: &[String],
 ) -> Vec<CompletionItem> {
-    // `std::<module>::` — enumerate that module's ops.
+    // `std::` exposes modules; `std::<module>::` exposes that module's ops.
     if qualifier.first().map(String::as_str) == Some("std") {
-        if let [_, module] = qualifier {
-            return std_module_completions(module);
-        }
-        return Vec::new();
+        return match qualifier {
+            [_] => std_root_module_completions(),
+            [_, module] => std_module_completions(module),
+            _ => Vec::new(),
+        };
     }
 
     if let [name] = qualifier {
@@ -346,6 +347,16 @@ fn namespace_completions(
         }
     }
     Vec::new()
+}
+
+/// The modules exposed at `std::`, in stdlib table order.
+fn std_root_module_completions() -> Vec<CompletionItem> {
+    dedup(
+        stdlib::all()
+            .iter()
+            .map(|op| item(op.module, CompletionItemKind::MODULE).detail("std module".to_string()))
+            .collect(),
+    )
 }
 
 /// The ops of `std::<module>::`, each with its rendered signature as detail.
@@ -992,6 +1003,33 @@ pub fn run(count: int): int
             !labels.contains(&"length".to_string()),
             "ops from other modules must not leak in, got {labels:?}"
         );
+    }
+
+    #[test]
+    fn std_root_namespace_lists_modules() {
+        let (program, file) = project();
+        let items = complete_items(
+            &program,
+            &file,
+            "module shelf::app\n\npub fn f()\n    const x = std::|\n",
+        );
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "text", "bytes", "math", "clock", "env", "io", "assert", "log"
+            ]
+        );
+        for op in ["now", "length"] {
+            assert!(
+                !labels.contains(&op),
+                "std root should not offer op {op:?}, got {labels:?}"
+            );
+        }
+
+        let clock = item_named(&items, "clock");
+        assert_eq!(clock.kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(clock.detail.as_deref(), Some("std module"));
     }
 
     #[test]
