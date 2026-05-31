@@ -8,10 +8,6 @@ They are three transports over one Rust brain (`marrow-lsp-core`).
 never redefines language semantics; it reuses the canonical marrow crates and surfaces them
 through editors and agents.
 
-Project-wide engineering principles (simplicity, TDD, surgical changes, anti-slop, parallelism,
-verification, review) live in the top-level `AGENTS.md`. This file adds only what is specific to
-marrow-lsp.
-
 ## Three Transports, One Core
 All language intelligence lives in `marrow-lsp-core`. `marrow-lsp` (LSP/stdio), `marrow-mcp`
 (MCP/stdio), and `marrow-dap` (DAP) are thin transports over it. A new capability lands in the
