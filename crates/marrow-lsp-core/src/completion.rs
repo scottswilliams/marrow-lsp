@@ -753,6 +753,7 @@ pub fn run(count: int): int
             functions: Vec::new(),
             resources: vec![book(docs)],
             enums: Vec::new(),
+            enum_public: Default::default(),
         };
         (
             CheckedProgram {

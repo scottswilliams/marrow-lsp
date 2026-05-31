@@ -6,6 +6,11 @@ pub(crate) struct BareBuiltin {
     pub(crate) description: &'static str,
 }
 
+pub(crate) struct OperatorFact {
+    pub(crate) spelling: &'static str,
+    pub(crate) description: &'static str,
+}
+
 const BARE_FUNCTION_BUILTINS: &[BareBuiltin] = &[
     BareBuiltin {
         name: "exists",
@@ -86,6 +91,89 @@ const SCALAR_CONVERSION_NAMES: &[&str] = &[
     "decimal",
 ];
 
+const OPERATOR_FACTS: &[OperatorFact] = &[
+    OperatorFact {
+        spelling: "not",
+        description: "logical negation.",
+    },
+    OperatorFact {
+        spelling: "and",
+        description: "logical conjunction.",
+    },
+    OperatorFact {
+        spelling: "or",
+        description: "logical disjunction.",
+    },
+    OperatorFact {
+        spelling: "is",
+        description: "type test.",
+    },
+    OperatorFact {
+        spelling: "==",
+        description: "equality comparison.",
+    },
+    OperatorFact {
+        spelling: "!=",
+        description: "inequality comparison.",
+    },
+    OperatorFact {
+        spelling: "<",
+        description: "less-than comparison.",
+    },
+    OperatorFact {
+        spelling: "<=",
+        description: "less-than-or-equal comparison.",
+    },
+    OperatorFact {
+        spelling: ">",
+        description: "greater-than comparison.",
+    },
+    OperatorFact {
+        spelling: ">=",
+        description: "greater-than-or-equal comparison.",
+    },
+    OperatorFact {
+        spelling: "+",
+        description: "addition.",
+    },
+    OperatorFact {
+        spelling: "-",
+        description: "subtraction or numeric negation.",
+    },
+    OperatorFact {
+        spelling: "*",
+        description: "multiplication.",
+    },
+    OperatorFact {
+        spelling: "/",
+        description: "division.",
+    },
+    OperatorFact {
+        spelling: "%",
+        description: "remainder.",
+    },
+    OperatorFact {
+        spelling: "_",
+        description: "string concatenation.",
+    },
+    OperatorFact {
+        spelling: "??",
+        description: "fallback value selection.",
+    },
+    OperatorFact {
+        spelling: "?.",
+        description: "optional member access.",
+    },
+    OperatorFact {
+        spelling: "..",
+        description: "exclusive range.",
+    },
+    OperatorFact {
+        spelling: "..=",
+        description: "inclusive range.",
+    },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BareBuiltinKind {
     Function,
@@ -101,6 +189,9 @@ pub(crate) fn scalar_conversion_names() -> &'static [&'static str] {
 }
 
 pub(crate) fn scalar_conversion_detail(name: &str) -> Option<String> {
+    if name == "ErrorCode" {
+        return Some("ErrorCode(value): ErrorCode".to_string());
+    }
     ScalarType::from_scalar_name(name).map(|scalar| format!("{name}(value): {}", scalar.name()))
 }
 
@@ -117,11 +208,28 @@ pub(crate) fn bare_builtin_hover(name: &str) -> Option<String> {
 }
 
 pub(crate) fn scalar_conversion_hover(name: &str) -> Option<String> {
-    if name == "ErrorCode" {
-        return None;
-    }
     scalar_conversion_detail(name)
         .map(|detail| format!("{detail}\n\ndefault library scalar conversion."))
+}
+
+pub(crate) fn std_namespace_hover() -> String {
+    let modules = std_modules().join(", ");
+    format!("std\n\ndefault library namespace.\n\nModules: {modules}")
+}
+
+pub(crate) fn std_module_hover(module: &str) -> Option<String> {
+    let ops = stdlib::all()
+        .iter()
+        .filter(|op| op.module == module)
+        .map(|op| format!("{} ({})", op.op, capability_label(op.capability)))
+        .collect::<Vec<_>>();
+    if ops.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "std::{module}\n\ndefault library module.\n\nOperations: {}",
+        ops.join(", ")
+    ))
 }
 
 pub(crate) fn std_operation_hover(module: &str, op: &str) -> Option<String> {
@@ -133,6 +241,18 @@ pub(crate) fn std_operation_hover(module: &str, op: &str) -> Option<String> {
     ))
 }
 
+pub(crate) fn operator_hover(spelling: &str) -> Option<String> {
+    OPERATOR_FACTS
+        .iter()
+        .find(|fact| fact.spelling == spelling)
+        .map(|fact| {
+            format!(
+                "operator {}\n\nlanguage operator.\n\n{}",
+                fact.spelling, fact.description
+            )
+        })
+}
+
 pub(crate) fn bare_builtin_kind(name: &str) -> Option<BareBuiltinKind> {
     if ScalarType::from_scalar_name(name).is_some() {
         return Some(BareBuiltinKind::ScalarConversion);
@@ -141,6 +261,16 @@ pub(crate) fn bare_builtin_kind(name: &str) -> Option<BareBuiltinKind> {
         .iter()
         .any(|builtin| builtin.name == name)
         .then_some(BareBuiltinKind::Function)
+}
+
+fn std_modules() -> Vec<&'static str> {
+    let mut modules = Vec::new();
+    for op in stdlib::all() {
+        if !modules.contains(&op.module) {
+            modules.push(op.module);
+        }
+    }
+    modules
 }
 
 fn std_signature(op: &stdlib::StdOp) -> String {

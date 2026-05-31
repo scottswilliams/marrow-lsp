@@ -677,6 +677,7 @@ fn value_to_json(value: Value) -> Json {
         Value::Duration(nanos) => json!({ "duration": nanos.to_string() }),
         Value::Bytes(bytes) => json!({ "bytes": bytes.len() }),
         Value::Sequence(items) => json!(items.into_iter().map(value_to_json).collect::<Vec<_>>()),
+        Value::LocalTree(entries) => json!({ "tree": entries.len() }),
         Value::Resource(fields) => Json::Object(
             fields
                 .into_iter()
@@ -898,6 +899,14 @@ pub fn shout()
         );
         assert_eq!(result["value"], 42, "double(21) == 42: {result}");
         assert_eq!(result["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn run_value_json_summarizes_local_trees() {
+        assert_eq!(
+            value_to_json(Value::LocalTree(Vec::new())),
+            json!({ "tree": 0 })
+        );
     }
 
     #[test]

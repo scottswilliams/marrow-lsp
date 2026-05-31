@@ -21,6 +21,8 @@ pub(crate) fn render_type(ty: &MarrowType) -> String {
         MarrowType::Enum { module, name } if module.is_empty() => name.clone(),
         MarrowType::Enum { module, name } => format!("{module}::{name}"),
         MarrowType::Sequence(element) => format!("sequence[{}]", render_type(element)),
+        MarrowType::LocalTree { value, .. } => format!("tree[{}]", render_type(value)),
+        MarrowType::Invalid => "unknown".to_string(),
         MarrowType::Unknown => "unknown".to_string(),
     }
 }
@@ -57,5 +59,20 @@ mod tests {
         };
 
         assert_eq!(render_type(&ty), "Order");
+    }
+
+    #[test]
+    fn local_tree_types_render_as_tree_of_value() {
+        let ty = MarrowType::LocalTree {
+            keys: vec![MarrowType::Primitive(marrow_schema::ScalarType::Str)],
+            value: Box::new(MarrowType::Primitive(marrow_schema::ScalarType::Int)),
+        };
+
+        assert_eq!(render_type(&ty), "tree[int]");
+    }
+
+    #[test]
+    fn invalid_types_render_as_unknown() {
+        assert_eq!(render_type(&MarrowType::Invalid), "unknown");
     }
 }

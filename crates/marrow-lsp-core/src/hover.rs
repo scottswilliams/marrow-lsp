@@ -48,6 +48,9 @@ pub fn hover_with_index(
     if let Some(value) = default_library_call_hover(snapshot, file, offset) {
         return Some(markdown_hover(default_library_hover_markdown(&value)));
     }
+    if let Some(value) = operator_hover(snapshot, file, offset) {
+        return Some(markdown_hover(default_library_hover_markdown(&value)));
+    }
     if let Some(value) = function_hover(snapshot, index, file, offset, reader) {
         return Some(markdown_hover(value));
     }
@@ -385,7 +388,7 @@ fn default_library_call_hover(
             && token.span.start_byte <= offset
             && offset <= token.span.end_byte
     })?;
-    if let Some(value) = std_library_call_hover(&tokens, &analyzed.source, index) {
+    if let Some(value) = std_library_path_hover(&tokens, &analyzed.source, index) {
         return Some(value);
     }
     if is_bare_call_leaf(&tokens, index) {
@@ -400,15 +403,73 @@ fn default_library_call_hover(
     None
 }
 
-fn std_library_call_hover(
+fn std_library_path_hover(
     tokens: &[marrow_syntax::Token],
     source: &str,
     index: usize,
 ) -> Option<String> {
-    if !is_std_library_call(tokens, source, index) {
+    let (module_index, op_index) = std_operation_call_for_segment(tokens, source, index)?;
+    let module = tokens[module_index].text(source);
+    let op = tokens[op_index].text(source);
+    if index == op_index {
+        return language_facts::std_operation_hover(module, op);
+    }
+    language_facts::std_operation_hover(module, op)?;
+    if index + 2 == module_index {
+        return Some(language_facts::std_namespace_hover());
+    }
+    if index == module_index {
+        return language_facts::std_module_hover(module);
+    }
+    None
+}
+
+fn operator_hover(snapshot: &AnalysisSnapshot, file: &Path, offset: usize) -> Option<String> {
+    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
+    let tokens = lex_source(&analyzed.source).tokens;
+    let (index, token) = tokens
+        .iter()
+        .enumerate()
+        .find(|(_, token)| token.span.start_byte <= offset && offset <= token.span.end_byte)?;
+    type_at(&snapshot.program, file, &analyzed.parsed, offset)?;
+    if is_operator_keyword_non_expression(&tokens, index) {
         return None;
     }
-    language_facts::std_operation_hover(tokens[index - 2].text(source), tokens[index].text(source))
+    language_facts::operator_hover(operator_spelling(token.kind, token.text(&analyzed.source))?)
+}
+
+fn is_operator_keyword_non_expression(tokens: &[marrow_syntax::Token], index: usize) -> bool {
+    matches!(
+        tokens[index].kind,
+        TokenKind::Keyword(Keyword::Not | Keyword::And | Keyword::Or | Keyword::Is)
+    ) && (previous_significant_kind(tokens, index)
+        .is_some_and(|kind| kind == TokenKind::DoubleColon)
+        || next_significant_kind(tokens, index).is_some_and(|kind| kind == TokenKind::DoubleColon)
+        || previous_significant_kind(tokens, index)
+            .is_some_and(|kind| matches!(kind, TokenKind::Keyword(Keyword::Module | Keyword::Use))))
+}
+
+fn operator_spelling(kind: TokenKind, text: &str) -> Option<&str> {
+    match kind {
+        TokenKind::Keyword(Keyword::Not | Keyword::And | Keyword::Or | Keyword::Is)
+        | TokenKind::DotDot
+        | TokenKind::DotDotEqual
+        | TokenKind::EqualEqual
+        | TokenKind::BangEqual
+        | TokenKind::QuestionDot
+        | TokenKind::QuestionQuestion
+        | TokenKind::Less
+        | TokenKind::LessEqual
+        | TokenKind::Greater
+        | TokenKind::GreaterEqual
+        | TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent
+        | TokenKind::Underscore => Some(text),
+        _ => None,
+    }
 }
 
 fn default_library_hover_markdown(fact: &str) -> String {
@@ -907,9 +968,8 @@ fn enum_schema_for_type_name<'a>(
     file: &Path,
     segments: &[String],
 ) -> Option<&'a EnumSchema> {
-    let current_module = module_name_for_file(snapshot, file);
     match segments {
-        [name] => current_module.and_then(|module| enum_schema_in_module(snapshot, module, name)),
+        [name] => enum_schema_visible_by_bare_name(snapshot, file, name),
         [.., name] => {
             let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
             let imports = analyzed
@@ -922,10 +982,60 @@ fn enum_schema_for_type_name<'a>(
             let aliases = build_alias_map(&imports);
             let prefix = segments[..segments.len() - 1].join("::");
             let module_name = expand_module_alias(&prefix, &aliases);
-            enum_schema_in_module(snapshot, &module_name, name)
+            enum_schema_in_visible_module(snapshot, file, &module_name, name)
         }
         [] => None,
     }
+}
+
+fn enum_schema_visible_by_bare_name<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    file: &Path,
+    name: &str,
+) -> Option<&'a EnumSchema> {
+    let current_module = module_name_for_file(snapshot, file);
+    if let Some(schema) =
+        current_module.and_then(|module| enum_schema_in_module(snapshot, module, name))
+    {
+        return Some(schema);
+    }
+    snapshot
+        .program
+        .modules
+        .iter()
+        .filter(|module| Some(module.name.as_str()) != current_module && !module.name.is_empty())
+        .find_map(|module| {
+            let schema = module
+                .enums
+                .iter()
+                .find(|enum_schema| enum_schema.name == name)?;
+            enum_is_public(module, name).then_some(schema)
+        })
+}
+
+fn enum_schema_in_visible_module<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    file: &Path,
+    module_name: &str,
+    name: &str,
+) -> Option<&'a EnumSchema> {
+    let current_module = module_name_for_file(snapshot, file);
+    let module = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.name == module_name)?;
+    if Some(module.name.as_str()) != current_module && !enum_is_public(module, name) {
+        return None;
+    }
+    module
+        .enums
+        .iter()
+        .find(|enum_schema| enum_schema.name == name)
+}
+
+fn enum_is_public(module: &marrow_check::CheckedModule, name: &str) -> bool {
+    module.enum_public.get(name).copied().unwrap_or(true)
 }
 
 fn module_name_for_file<'a>(snapshot: &'a AnalysisSnapshot, file: &Path) -> Option<&'a str> {
@@ -1232,15 +1342,58 @@ fn qualified_name_token_bounds(
     Some((start, end, index))
 }
 
-fn is_std_library_call(tokens: &[marrow_syntax::Token], source: &str, index: usize) -> bool {
-    index >= 4
-        && is_call_leaf(tokens, index)
-        && tokens[index - 1].kind == TokenKind::DoubleColon
-        && is_path_segment_token(tokens[index - 2].kind)
-        && tokens[index - 3].kind == TokenKind::DoubleColon
-        && is_path_segment_token(tokens[index - 4].kind)
-        && tokens[index - 4].text(source) == "std"
-        && starts_at_callee_root(tokens, index - 4)
+fn std_operation_call_for_segment(
+    tokens: &[marrow_syntax::Token],
+    source: &str,
+    index: usize,
+) -> Option<(usize, usize)> {
+    let candidates = [
+        index
+            .checked_add(2)
+            .zip(index.checked_add(4))
+            .map(|(module_index, op_index)| (index, module_index, op_index)),
+        index
+            .checked_sub(2)
+            .zip(index.checked_add(2))
+            .map(|(std_index, op_index)| (std_index, index, op_index)),
+        index
+            .checked_sub(4)
+            .zip(index.checked_sub(2))
+            .map(|(std_index, module_index)| (std_index, module_index, index)),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|(std_index, module_index, op_index)| {
+            is_std_operation_call(tokens, source, *std_index, *module_index, *op_index)
+        })
+        .map(|(_, module_index, op_index)| (module_index, op_index))
+}
+
+fn is_std_operation_call(
+    tokens: &[marrow_syntax::Token],
+    source: &str,
+    std_index: usize,
+    module_index: usize,
+    op_index: usize,
+) -> bool {
+    tokens
+        .get(std_index)
+        .is_some_and(|token| is_path_segment_token(token.kind) && token.text(source) == "std")
+        && tokens
+            .get(std_index + 1)
+            .is_some_and(|token| token.kind == TokenKind::DoubleColon)
+        && tokens
+            .get(module_index)
+            .is_some_and(|token| is_path_segment_token(token.kind))
+        && tokens
+            .get(module_index + 1)
+            .is_some_and(|token| token.kind == TokenKind::DoubleColon)
+        && tokens
+            .get(op_index)
+            .is_some_and(|token| is_path_segment_token(token.kind))
+        && starts_at_callee_root(tokens, std_index)
+        && is_call_leaf(tokens, op_index)
 }
 
 fn is_bare_call_leaf(tokens: &[marrow_syntax::Token], index: usize) -> bool {
@@ -2079,6 +2232,338 @@ pub fn f(): int
     }
 
     #[test]
+    fn hover_over_error_code_conversion_shows_default_library_signature() {
+        let source = "\
+module a
+
+pub fn f(): ErrorCode
+    return ErrorCode(\"not_found\")
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let value = hover_value(&snapshot, &index, &file, source, "ErrorCode(\"not");
+
+        assert!(
+            value.starts_with("```marrow\nErrorCode(value): ErrorCode\n```"),
+            "ErrorCode conversion signature should use the language type: {value}"
+        );
+        assert!(
+            value.contains("conversion"),
+            "ErrorCode hover should identify conversion context: {value}"
+        );
+        assert!(
+            value.contains("default library"),
+            "ErrorCode hover should identify default-library context: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_std_namespace_and_module_segments_shows_default_library_context() {
+        let source = "\
+module a
+
+pub fn f(): int
+    return std::text::length(\"abc\")
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+
+        let std_value = hover_value(&snapshot, &index, &file, source, "std::text");
+        assert!(
+            std_value.starts_with("```marrow\nstd\n```"),
+            "std namespace hover should lead with the namespace: {std_value}"
+        );
+        assert!(
+            std_value.contains("default library namespace"),
+            "std namespace hover should identify default-library context: {std_value}"
+        );
+
+        let text_offset = offset_of(source, "std::text") + "std::".len();
+        let text_value = hover_value_at(&snapshot, &index, &file, text_offset)
+            .expect("a hover over the std::text module segment");
+        assert!(
+            text_value.starts_with("```marrow\nstd::text\n```"),
+            "std::text module hover should lead with the module path: {text_value}"
+        );
+        assert!(
+            text_value.contains("default library module"),
+            "std::text hover should identify default-library context: {text_value}"
+        );
+        assert!(
+            text_value.contains("length"),
+            "std::text hover should summarize available operations: {text_value}"
+        );
+
+        let length_value = hover_value(&snapshot, &index, &file, source, "length(\"abc");
+        assert!(
+            length_value.starts_with("```marrow\nstd::text::length(string): int\n```"),
+            "std operation leaf hover should remain the operation signature: {length_value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_std_namespace_and_module_segments_requires_std_operation() {
+        let std_text_source = "\
+module std::text
+
+pub fn custom(): int
+    return 1
+";
+        let std_custom_source = "\
+module std::custom
+
+pub fn ping(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+pub fn run(): int
+    const text_value = std::text::custom()
+    const custom_value = std::custom::ping()
+    return text_value
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("std/text.mw", std_text_source),
+                ("std/custom.mw", std_custom_source),
+                ("app.mw", app_source),
+            ],
+            "app.mw",
+        );
+        let index = index_for(&snapshot);
+
+        for needle in ["std::text::custom", "std::custom::ping"] {
+            let std_value = hover_value_at(&snapshot, &index, &file, offset_of(app_source, needle));
+            assert!(
+                !std_value
+                    .as_deref()
+                    .is_some_and(|value| value.contains("default library")),
+                "project-owned {needle} std segment should not get default-library docs: {std_value:?}"
+            );
+
+            let module_offset = offset_of(app_source, needle) + "std::".len();
+            let module_value = hover_value_at(&snapshot, &index, &file, module_offset);
+            assert!(
+                !module_value
+                    .as_deref()
+                    .is_some_and(|value| value.contains("default library")),
+                "project-owned {needle} module segment should not get default-library docs: {module_value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_over_std_namespace_and_module_segments_keep_builtin_precedence() {
+        let std_text_source = "\
+module std::text
+
+pub fn length(value: string): bool
+    return false
+";
+        let app_source = "\
+module app
+
+pub fn run(): int
+    return std::text::length(\"abc\")
+";
+        let (snapshot, file) = analyze_files(
+            &[("std/text.mw", std_text_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+        let index = index_for(&snapshot);
+
+        let std_value =
+            hover_value_at(&snapshot, &index, &file, offset_of(app_source, "std::text"));
+        assert!(
+            std_value
+                .as_deref()
+                .is_some_and(|value| value.contains("default library namespace")),
+            "std segment should keep default-library docs when a builtin std op wins dispatch: {std_value:?}"
+        );
+
+        let text_offset = offset_of(app_source, "std::text") + "std::".len();
+        let text_value = hover_value_at(&snapshot, &index, &file, text_offset);
+        assert!(
+            text_value
+                .as_deref()
+                .is_some_and(|value| value.contains("default library module")),
+            "std::text segment should keep default-library docs when a builtin std op wins dispatch: {text_value:?}"
+        );
+
+        let length_value = hover_value(&snapshot, &index, &file, app_source, "length(\"abc");
+        assert!(
+            length_value.starts_with("```marrow\nstd::text::length(string): int\n```"),
+            "std::text::length leaf hover should keep builtin precedence over a project function: {length_value}"
+        );
+        assert!(
+            length_value.contains("default library"),
+            "std::text::length leaf hover should identify the builtin dispatch: {length_value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_expression_operators_shows_language_operator_docs() {
+        let source = "\
+module a
+
+pub fn sum(x: int, y: int): int
+    return x + y
+
+pub fn both(left: bool, right: bool): bool
+    return left and right
+
+pub fn joined(left: string, right: string): string
+    return left _ right
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+
+        let plus = hover_value(&snapshot, &index, &file, source, "+");
+        assert!(
+            plus.starts_with("```marrow\noperator +\n```"),
+            "symbolic operator hover should lead with the operator: {plus}"
+        );
+        assert!(
+            plus.contains("language operator"),
+            "symbolic operator hover should identify language-operator context: {plus}"
+        );
+        assert!(
+            plus.contains("addition"),
+            "plus hover should describe addition behavior: {plus}"
+        );
+
+        let and_value = hover_value(&snapshot, &index, &file, source, "and");
+        assert!(
+            and_value.starts_with("```marrow\noperator and\n```"),
+            "keyword operator hover should lead with the operator: {and_value}"
+        );
+        assert!(
+            and_value.contains("language operator"),
+            "keyword operator hover should identify language-operator context: {and_value}"
+        );
+        assert!(
+            and_value.contains("logical"),
+            "and hover should describe logical behavior: {and_value}"
+        );
+
+        let concat = hover_value(&snapshot, &index, &file, source, "_");
+        assert!(
+            concat.starts_with("```marrow\noperator _\n```"),
+            "concat operator hover should lead with the operator: {concat}"
+        );
+        assert!(
+            concat.contains("concatenation"),
+            "underscore hover should describe concatenation behavior: {concat}"
+        );
+    }
+
+    #[test]
+    fn hover_over_operator_keyword_path_segment_does_not_show_operator_docs() {
+        let ops_source = "\
+module and::tools
+
+pub fn length(value: string): int
+    return 0
+";
+        let app_source = "\
+module app
+
+pub fn run(): int
+    return and::tools::length(\"abc\")
+";
+        let (snapshot, file) = analyze_files(
+            &[("and/tools.mw", ops_source), ("app.mw", app_source)],
+            "app.mw",
+        );
+        let index = index_for(&snapshot);
+
+        let module_offset = offset_of(app_source, "and::tools");
+        let value = hover_value_at(&snapshot, &index, &file, module_offset);
+
+        assert!(
+            !value
+                .as_deref()
+                .is_some_and(|value| value.contains("language operator")),
+            "module path segment named like an operator should not get operator docs: {value:?}"
+        );
+    }
+
+    #[test]
+    fn hover_over_operator_keyword_declaration_and_import_does_not_show_operator_docs() {
+        let and_source = "\
+module and
+
+pub fn value(): int
+    return 1
+";
+        let app_source = "\
+module app
+
+use and
+
+pub fn run(): int
+    return and::value()
+";
+        let (module_snapshot, module_file) = analyze_files(&[("and.mw", and_source)], "and.mw");
+        let module_index = index_for(&module_snapshot);
+        let module_value = hover_value_at(
+            &module_snapshot,
+            &module_index,
+            &module_file,
+            offset_of(and_source, "module and") + "module ".len(),
+        );
+        assert!(
+            !module_value
+                .as_deref()
+                .is_some_and(|value| value.contains("language operator")),
+            "module declaration segment named like an operator should not get operator docs: {module_value:?}"
+        );
+
+        let (app_snapshot, app_file) =
+            analyze_files(&[("and.mw", and_source), ("app.mw", app_source)], "app.mw");
+        let app_index = index_for(&app_snapshot);
+        let use_value = hover_value_at(
+            &app_snapshot,
+            &app_index,
+            &app_file,
+            offset_of(app_source, "use and") + "use ".len(),
+        );
+        assert!(
+            !use_value
+                .as_deref()
+                .is_some_and(|value| value.contains("language operator")),
+            "use segment named like an operator should not get operator docs: {use_value:?}"
+        );
+    }
+
+    #[test]
+    fn hover_over_operator_keyword_resource_fields_does_not_show_operator_docs() {
+        let source = "\
+module app
+
+resource Thing at ^things(id: int)
+    required and: int
+    required or: int
+    required is: bool
+    required not: bool
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+
+        for name in ["and", "or", "is", "not"] {
+            let offset = offset_of(source, &format!("required {name}:")) + "required ".len();
+            let value = hover_value_at(&snapshot, &index, &file, offset);
+            assert!(
+                !value
+                    .as_deref()
+                    .is_some_and(|value| value.contains("language operator")),
+                "resource field named `{name}` should not get operator docs: {value:?}"
+            );
+        }
+    }
+
+    #[test]
     fn builtin_call_hover_wins_over_same_named_user_function_but_not_declaration() {
         let source = "\
 module a
@@ -2171,6 +2656,24 @@ pub fn f(): bool
         assert!(
             !length_value.contains("default library"),
             "qualified foo::std::text::length call should not get default-library docs: {length_value}"
+        );
+
+        let std_offset = offset_of(app_source, "std::text::length");
+        let std_value = hover_value_at(&snapshot, &index, &file, std_offset);
+        assert!(
+            !std_value
+                .as_deref()
+                .is_some_and(|value| value.contains("default library")),
+            "qualified foo::std::text std segment should not get default-library docs: {std_value:?}"
+        );
+
+        let text_offset = offset_of(app_source, "std::text::length") + "std::".len();
+        let text_value = hover_value_at(&snapshot, &index, &file, text_offset);
+        assert!(
+            !text_value
+                .as_deref()
+                .is_some_and(|value| value.contains("default library")),
+            "qualified foo::std::text text segment should not get default-library docs: {text_value:?}"
         );
     }
 
@@ -2781,7 +3284,7 @@ pub fn load(id: Settings::Id)
 module a
 
 ;; Lifecycle state.
-enum Status
+pub enum Status
     open
     closed
 ";
@@ -2813,7 +3316,7 @@ enum Status
 module a
 
 ;; Lifecycle state.
-enum Status
+pub enum Status
     open
     closed
 ";
@@ -2906,7 +3409,7 @@ pub fn set(Status: int)
 module shelf::state
 
 ;; Lifecycle state.
-enum Status
+pub enum Status
     open
     closed
 ";
@@ -2949,11 +3452,17 @@ pub fn set(status: state::Status)
 
     #[test]
     fn hover_over_bare_project_enum_type_annotation_shows_enum_hover() {
+        let other_source = "\
+module shelf::other
+
+pub fn noop()
+    return
+";
         let state_source = "\
 module shelf::state
 
 ;; Lifecycle state.
-enum Status
+pub enum Status
     open
     closed
 ";
@@ -2965,6 +3474,7 @@ pub fn set(status: Status)
 ";
         let (snapshot, file) = analyze_files(
             &[
+                ("shelf/other.mw", other_source),
                 ("shelf/state.mw", state_source),
                 ("shelf/app.mw", app_source),
             ],
@@ -2989,6 +3499,43 @@ pub fn set(status: Status)
         assert!(
             value.contains("open"),
             "bare project enum annotation should include member summary: {value}"
+        );
+    }
+
+    #[test]
+    fn hover_over_private_foreign_enum_type_annotation_does_not_show_enum_hover() {
+        let state_source = "\
+module shelf::state
+
+;; Private lifecycle state.
+enum Status
+    open
+    closed
+";
+        let app_source = "\
+module shelf::app
+
+use shelf::state
+
+pub fn set(status: state::Status)
+    return
+";
+        let (snapshot, file) = analyze_files(
+            &[
+                ("shelf/state.mw", state_source),
+                ("shelf/app.mw", app_source),
+            ],
+            "shelf/app.mw",
+        );
+        let index = index_for(&snapshot);
+        let offset = offset_of(app_source, "state::Status") + "state::".len();
+        let value = hover_value_at(&snapshot, &index, &file, offset);
+
+        assert!(
+            !value
+                .as_deref()
+                .is_some_and(|value| value.contains("Private lifecycle state.")),
+            "private foreign enum annotation should not show enum docs: {value:?}"
         );
     }
 
