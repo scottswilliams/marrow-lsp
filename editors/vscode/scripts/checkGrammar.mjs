@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const grammarPath = join(root, "syntaxes", "marrow.tmLanguage.json");
+const packagePath = join(root, "package.json");
 const grammar = JSON.parse(readFileSync(grammarPath, "utf8"));
+const packageManifest = JSON.parse(readFileSync(packagePath, "utf8"));
 const repo = grammar.repository;
 
 function flattenPatterns(patterns, result = []) {
@@ -31,6 +33,13 @@ function captureNames(pattern) {
 
 function keywordPattern(scope) {
   return flattenPatterns(repo.keywords?.patterns).find((pattern) => pattern.name === scope);
+}
+
+function assertScopeMapping(scopes, token, expectedScopes) {
+  assert.ok(scopes[token], `${token} semantic token has fallback scopes`);
+  for (const scope of expectedScopes) {
+    assert.ok(scopes[token].includes(scope), `${token} maps to ${scope}`);
+  }
 }
 
 const declarationKeyword = keywordPattern("keyword.declaration.marrow");
@@ -74,3 +83,40 @@ assert.ok(
   flattenPatterns(usePath.patterns).some((pattern) => pattern.name === "entity.name.namespace.marrow"),
   "use path segments have namespace scope",
 );
+
+const configurationDefaults = packageManifest.contributes?.configurationDefaults;
+assert.equal(
+  configurationDefaults?.["[marrow]"]?.["editor.semanticHighlighting.enabled"],
+  true,
+  "Marrow enables semantic highlighting by default",
+);
+
+const marrowSemanticScopes = packageManifest.contributes?.semanticTokenScopes?.find(
+  (entry) => entry.language === "marrow",
+)?.scopes;
+assert.ok(marrowSemanticScopes, "Marrow contributes semantic token fallback scopes");
+
+assertScopeMapping(marrowSemanticScopes, "namespace", ["entity.name.namespace.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "function", ["entity.name.function.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "function.defaultLibrary", [
+  "support.function.builtin.marrow",
+  "entity.name.function.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "struct", [
+  "entity.name.type.struct.marrow",
+  "entity.name.type.resource.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "enum", ["entity.name.type.enum.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "enumMember", ["variable.other.enummember.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "property", ["variable.other.property.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "parameter", ["variable.parameter.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "type", ["entity.name.type.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "type.defaultLibrary", [
+  "support.type.builtin.marrow",
+  "entity.name.type.marrow",
+]);
+assertScopeMapping(marrowSemanticScopes, "operator", ["keyword.operator.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "savedRoot", [
+  "variable.other.saved.marrow",
+  "variable.other.marrow",
+]);

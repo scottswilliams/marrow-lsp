@@ -89,6 +89,11 @@
         "path": "./syntaxes/marrow.tmLanguage.json"
       }
     ],
+    "configurationDefaults": {
+      "[marrow]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
     "semanticTokenTypes": [
       {
         "id": "savedRoot",
@@ -100,7 +105,47 @@
       {
         "language": "marrow",
         "scopes": {
+          "namespace": [
+            "entity.name.namespace.marrow"
+          ],
+          "function": [
+            "entity.name.function.marrow"
+          ],
+          "function.defaultLibrary": [
+            "support.function.builtin.marrow",
+            "entity.name.function.marrow"
+          ],
+          "struct": [
+            "entity.name.type.struct.marrow",
+            "entity.name.type.resource.marrow",
+            "entity.name.type.marrow"
+          ],
+          "enum": [
+            "entity.name.type.enum.marrow",
+            "entity.name.type.marrow"
+          ],
+          "enumMember": [
+            "constant.other.enum.marrow",
+            "variable.other.enummember.marrow"
+          ],
+          "property": [
+            "variable.other.property.marrow"
+          ],
+          "parameter": [
+            "variable.parameter.marrow"
+          ],
+          "type": [
+            "entity.name.type.marrow"
+          ],
+          "type.defaultLibrary": [
+            "support.type.builtin.marrow",
+            "entity.name.type.marrow"
+          ],
+          "operator": [
+            "keyword.operator.marrow"
+          ],
           "savedRoot": [
+            "variable.other.saved.marrow",
             "variable.other.marrow"
           ]
         }
