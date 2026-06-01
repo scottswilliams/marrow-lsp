@@ -428,6 +428,124 @@ fn hover_over_a_parameter_use_returns_its_signature_fragment() {
 }
 
 #[test]
+fn hover_over_function_call_reports_checked_direct_effects_over_stdio() {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let response = recv(&mut stdout);
+    assert_eq!(
+        response["result"]["capabilities"]["hoverProvider"], true,
+        "the server should advertise hover support"
+    );
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let clean = "\
+module shelf::sample
+
+resource Book at ^books(id: int)
+    required title: string
+    required visits: int
+
+pub fn touch(id: int): string
+    const title: string = ^books(id).title
+    transaction
+        ^books(id).visits = ^books(id).visits + 1
+    print(title)
+    return title
+
+pub fn caller(): string
+    return touch(1)
+";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let diagnostics = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+    assert_eq!(
+        diagnostics["params"]["diagnostics"],
+        json!([]),
+        "the clean direct-effect overlay should check without diagnostics"
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 14, "character": 12 }
+            }
+        }),
+    );
+
+    let hover = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let value = hover["result"]["contents"]["value"]
+        .as_str()
+        .expect("hover should return markdown contents");
+    assert!(
+        value.contains("fn touch(id: int): string"),
+        "function signature should be present in hover markdown: {value}"
+    );
+    assert!(
+        value.contains("**Direct effects**"),
+        "function hover should include a direct-effects section: {value}"
+    );
+    assert!(
+        value.contains("- saved reads: Book.title, Book.visits"),
+        "direct saved reads should survive stdio transport: {value}"
+    );
+    assert!(
+        value.contains("- saved writes: Book.visits"),
+        "direct saved writes should survive stdio transport: {value}"
+    );
+    assert!(
+        value.contains("- transaction"),
+        "direct transaction effect should survive stdio transport: {value}"
+    );
+    assert!(
+        value.contains("- host: output"),
+        "direct host output effect should survive stdio transport: {value}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
 fn goto_definition_jumps_from_a_use_to_its_binding() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
