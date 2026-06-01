@@ -78,7 +78,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_complete",
-            "description": "List context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`.",
+            "description": "Development helper: list current context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Blocked-on-Marrow for any production contract until canonical completion-context facts exist; not a stable production completion API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -91,12 +91,12 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_resource_schema",
-            "description": "Return one resource schema by `name`, or every resource in the project when `name` is omitted: the saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes.",
+            "description": "Development inspection helper over current checked schema facts: return one resource schema by source `name`, or every resource in the project when `name` is omitted, including saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes. Missing catalog-bound resource/store/member identity, presence/default facts, and typed protocol DTOs; not a stable production schema API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "name": string_prop("The resource name to project; omit to list all resources."),
+                    "name": string_prop("Source-level resource name filter for this development inspection helper; omit to list all resources."),
                 },
                 "required": ["file"],
             },
@@ -138,7 +138,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_integrity",
-            "description": "Scan the project's real stored data against the CURRENT schema and report every saved record the schema can no longer account for: an orphan path (a root or member the schema no longer declares) or a value that no longer decodes as its declared type. The capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs. Gated behind data access; returns a refusal envelope and reads nothing when disabled.",
+            "description": "Debug/admin advisory over the current schema and real store: scan the project's real stored data and report capped/current-schema advisory findings such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation. Gated behind data access; returns a refusal envelope and reads nothing when disabled. This is not catalog-epoch/store-generation-bound production validation or repair.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -370,6 +370,106 @@ mod tests {
                 "{name}.path must not claim schema-typed path semantics: {description}"
             );
         }
+    }
+
+    #[test]
+    fn catalog_demotes_mcp_tools_blocked_on_canonical_marrow_facts() {
+        let tools = tools();
+        let tools = tools.as_array().unwrap();
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing MCP tool {name}"))
+        };
+        let description = |name: &str| {
+            tool(name)["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing description for {name}"))
+                .to_ascii_lowercase()
+        };
+
+        let complete = description("mw_complete");
+        assert!(
+            complete.contains("development helper"),
+            "mw_complete must advertise that completion is a development helper: {complete}"
+        );
+        assert!(
+            complete.contains("blocked-on-marrow"),
+            "mw_complete must name the blocked-on-Marrow production contract: {complete}"
+        );
+        assert!(
+            complete.contains("canonical completion-context facts"),
+            "mw_complete must point to the missing Marrow completion-context facts: {complete}"
+        );
+        assert!(
+            complete.contains("not a stable production completion api"),
+            "mw_complete must not present a stable production completion API: {complete}"
+        );
+
+        let schema = description("mw_resource_schema");
+        assert!(
+            schema.contains("development inspection helper"),
+            "mw_resource_schema must advertise inspection-helper status: {schema}"
+        );
+        assert!(
+            schema.contains("current checked schema facts"),
+            "mw_resource_schema must say it renders current checked schema facts: {schema}"
+        );
+        assert!(
+            schema.contains("catalog-bound resource/store/member identity"),
+            "mw_resource_schema must name the missing catalog-bound identities: {schema}"
+        );
+        assert!(
+            schema.contains("presence/default facts"),
+            "mw_resource_schema must name missing presence/default facts: {schema}"
+        );
+        assert!(
+            schema.contains("typed protocol dtos"),
+            "mw_resource_schema must name missing typed protocol DTOs: {schema}"
+        );
+        assert!(
+            schema.contains("not a stable production schema api"),
+            "mw_resource_schema must not present a stable production schema API: {schema}"
+        );
+
+        let schema_name =
+            tool("mw_resource_schema")["inputSchema"]["properties"]["name"]["description"]
+                .as_str()
+                .unwrap();
+        let schema_name = schema_name.to_ascii_lowercase();
+        assert!(
+            schema_name.contains("development inspection helper"),
+            "mw_resource_schema.name must not imply a stable resource identity protocol: {schema_name}"
+        );
+
+        let integrity = description("mw_data_integrity");
+        assert!(
+            integrity.contains("debug/admin advisory"),
+            "mw_data_integrity must advertise advisory debug/admin status: {integrity}"
+        );
+        assert!(
+            !integrity.contains("every saved record"),
+            "mw_data_integrity must not overclaim complete saved-record coverage: {integrity}"
+        );
+        assert!(
+            integrity.contains("current schema") && integrity.contains("real store"),
+            "mw_data_integrity must name its current-schema/real-store basis: {integrity}"
+        );
+        assert!(
+            integrity.contains("capped/current-schema advisory findings"),
+            "mw_data_integrity must describe capped current-schema advisory findings: {integrity}"
+        );
+        assert!(
+            integrity.contains("gated behind data access"),
+            "mw_data_integrity must advertise the data-access gate: {integrity}"
+        );
+        assert!(
+            integrity.contains(
+                "not catalog-epoch/store-generation-bound production validation or repair"
+            ),
+            "mw_data_integrity must not present production validation or repair: {integrity}"
+        );
     }
 
     #[test]
