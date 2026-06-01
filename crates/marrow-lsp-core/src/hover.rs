@@ -11,11 +11,12 @@ use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedFunction, CheckedModule, CheckedParam, DefItem,
-    Resolution, ResolvableKind, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
+    AnalysisSnapshot, BindingIndex, CheckedFacts, CheckedFunction, CheckedModule, CheckedParam,
+    DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution, ResolvableKind,
+    SavedPlaceEffect, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
     expand_module_alias, resolve, type_at,
 };
-use marrow_schema::{Element, EnumSchema, ResourceSchema};
+use marrow_schema::{Element, EnumSchema, ResourceSchema, stdlib};
 use marrow_store::backend::Presence;
 use marrow_syntax::{
     Block, Declaration, EnumDecl, EnumMember, FunctionDecl, KeyParam, Keyword, ParamMode,
@@ -387,6 +388,11 @@ fn function_hover(
         value.push_str(&docs);
     }
 
+    if let Some(effects) = direct_effects_hover(snapshot, &symbol, checked_function) {
+        value.push_str("\n\n");
+        value.push_str(&effects);
+    }
+
     if let Some(reader) = reader
         && let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file)
         && let Some(segments) = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)
@@ -397,6 +403,134 @@ fn function_hover(
     }
 
     Some(value)
+}
+
+fn direct_effects_hover(
+    snapshot: &AnalysisSnapshot,
+    symbol: &SymbolRef,
+    checked_function: &CheckedFunction,
+) -> Option<String> {
+    let fact = function_fact_for_symbol(snapshot, symbol, checked_function)?;
+    direct_effects_markdown(&snapshot.program.facts, &fact.direct_effects)
+}
+
+fn function_fact_for_symbol<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    symbol: &SymbolRef,
+    checked_function: &CheckedFunction,
+) -> Option<&'a FunctionFact> {
+    let module = snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.source_file == symbol.file)?;
+    let module_fact = snapshot
+        .program
+        .facts
+        .modules()
+        .iter()
+        .find(|fact| fact.name == module.name && fact.source_file == module.source_file)?;
+    snapshot.program.facts.functions().iter().find(|fact| {
+        fact.module == module_fact.id
+            && fact.name == checked_function.name
+            && fact.span == checked_function.span
+    })
+}
+
+fn direct_effects_markdown(facts: &CheckedFacts, effects: &DirectEffectFacts) -> Option<String> {
+    let mut lines = Vec::new();
+    if let Some(line) = saved_effects_line(facts, "saved reads", &effects.saved_reads) {
+        lines.push(line);
+    }
+    if let Some(line) = saved_effects_line(facts, "saved writes", &effects.saved_writes) {
+        lines.push(line);
+    }
+    if effects.transactions {
+        lines.push("- transaction".to_string());
+    }
+    if let Some(line) = host_effects_line(&effects.host_calls) {
+        lines.push(line);
+    }
+    if effects.throws {
+        lines.push("- throws".to_string());
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!("**Direct effects**\n{}", lines.join("\n")))
+    }
+}
+
+fn saved_effects_line(
+    facts: &CheckedFacts,
+    label: &str,
+    places: &[SavedPlaceEffect],
+) -> Option<String> {
+    let items = effect_items(
+        places
+            .iter()
+            .filter_map(|place| saved_place_display(facts, place)),
+    );
+    if items.is_empty() {
+        None
+    } else {
+        Some(format!("- {label}: {}", items.join(", ")))
+    }
+}
+
+fn host_effects_line(effects: &[HostEffect]) -> Option<String> {
+    let items = effect_items(effects.iter().map(|effect| match effect {
+        HostEffect::Output => "output".to_string(),
+        HostEffect::Capability(capability) => capability_label(*capability).to_string(),
+    }));
+    if items.is_empty() {
+        None
+    } else {
+        Some(format!("- host: {}", items.join(", ")))
+    }
+}
+
+fn effect_items(items: impl IntoIterator<Item = String>) -> Vec<String> {
+    const MAX_EFFECT_ITEMS: usize = 8;
+
+    let mut items = items.into_iter().collect::<Vec<_>>();
+    items.sort();
+    items.dedup();
+
+    let extra = items.len().saturating_sub(MAX_EFFECT_ITEMS);
+    items.truncate(MAX_EFFECT_ITEMS);
+    if extra > 0 {
+        items.push(format!("+{extra} more"));
+    }
+    items
+}
+
+fn saved_place_display(facts: &CheckedFacts, place: &SavedPlaceEffect) -> Option<String> {
+    let resource = facts
+        .resources()
+        .iter()
+        .find(|resource| resource.id == place.resource)?;
+    let mut path = vec![resource.name.clone()];
+    for member_id in &place.members {
+        let member = facts
+            .resource_members()
+            .iter()
+            .find(|member| member.id == *member_id)?;
+        path.push(member.name.clone());
+    }
+    Some(path.join("."))
+}
+
+fn capability_label(capability: stdlib::Capability) -> &'static str {
+    match capability {
+        stdlib::Capability::Pure => "pure",
+        stdlib::Capability::Clock => "clock",
+        stdlib::Capability::Env => "env",
+        stdlib::Capability::Log => "log",
+        stdlib::Capability::Io => "io",
+        stdlib::Capability::Assert => "assert",
+    }
 }
 
 fn parameter_hover(
@@ -2388,6 +2522,55 @@ pub fn caller(): int
             !markup.value.contains("Parameters"),
             "parameter docs section should be omitted when no parameter has docs: {}",
             markup.value
+        );
+    }
+
+    #[test]
+    fn hover_over_a_function_call_shows_direct_effects_from_checked_facts() {
+        let source = "\
+module a
+
+resource Book at ^books(id: int)
+    required title: string
+    required visits: int
+
+pub fn touch(id: int): string
+    const title: string = ^books(id).title
+    transaction
+        ^books(id).visits = ^books(id).visits + 1
+    print(title)
+    return title
+
+pub fn caller(): string
+    return touch(1)
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let value = hover_value(&snapshot, &index, &file, source, "touch(1)");
+
+        assert!(
+            value.starts_with("```marrow\nfn touch(id: int): string\n```"),
+            "function signature should lead the hover: {value}"
+        );
+        assert!(
+            value.contains("**Direct effects**"),
+            "function hover should include a direct-effects section: {value}"
+        );
+        assert!(
+            value.contains("- saved reads: Book.title, Book.visits"),
+            "direct saved reads should use canonical resource/member facts: {value}"
+        );
+        assert!(
+            value.contains("- saved writes: Book.visits"),
+            "direct saved writes should use canonical resource/member facts: {value}"
+        );
+        assert!(
+            value.contains("- transaction"),
+            "direct transaction effect should be shown: {value}"
+        );
+        assert!(
+            value.contains("- host: output"),
+            "direct host output effect should be shown: {value}"
         );
     }
 
