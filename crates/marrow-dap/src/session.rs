@@ -33,6 +33,7 @@ const FIRST_DYNAMIC_REF: i64 = 1000;
 /// The single thread id the debugger exposes — the run is single-threaded.
 const THREAD_ID: i64 = 1;
 const RAW_DATA_INSPECTION_BLOCKED: &str = "blocked-on-marrow: raw durable-data inspection needs typed durable watch/path facts from Marrow";
+const EXPRESSION_EVALUATE_BLOCKED: &str = "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow";
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread: a
 /// local value is expanded in memory, a durable path is read from the live store.
@@ -575,8 +576,8 @@ impl<W: Write> Session<W> {
         self.resume_run(Resume::Pause);
     }
 
-    /// `evaluate`: a watch/REPL request. Restricted to read-only `^` paths and
-    /// bare local names; anything else is refused with a clear message.
+    /// `evaluate`: a watch/REPL request. Restricted to read-only `^` paths while
+    /// canonical expression evaluation remains blocked on Marrow facts.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
         if arguments.get("context").and_then(Json::as_str) == Some("hover") {
             self.respond(
@@ -594,7 +595,11 @@ impl<W: Write> Session<W> {
             .and_then(Json::as_str)
             .unwrap_or_default()
             .to_string();
-        if !self.allow_raw_data_inspection && expression.trim_start().starts_with('^') {
+        if !expression.trim_start().starts_with('^') {
+            self.respond(request, false, json!(EXPRESSION_EVALUATE_BLOCKED));
+            return;
+        }
+        if !self.allow_raw_data_inspection {
             self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
             return;
         }

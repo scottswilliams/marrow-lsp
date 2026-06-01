@@ -220,6 +220,26 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
         .expect("a `title` local");
     assert_eq!(title["value"], "Dune", "{locals}");
 
+    // Locals remain available through the Locals scope, but watch/REPL
+    // expression evaluation waits for canonical Marrow evaluate facts.
+    for expression in ["title", "_x1", "1 + 1"] {
+        let blocked = client.request(
+            "evaluate",
+            json!({ "expression": expression, "context": "watch" }),
+        );
+        let blocked = client.response_for(blocked);
+        assert_eq!(blocked["success"], false, "{blocked}");
+        let message = blocked["message"].as_str().unwrap();
+        assert!(
+            message.contains("blocked-on-marrow"),
+            "non-^ evaluate rejection should name the Marrow blocker: {blocked}"
+        );
+        assert!(
+            message.contains("canonical expression/evaluate facts"),
+            "non-^ evaluate rejection should name the missing facts: {blocked}"
+        );
+    }
+
     // The durable scope shows the root the run already wrote into this run's
     // store (read-your-writes): ^books exists with the value we wrote.
     let roots = client.request("variables", json!({ "variablesReference": durable_ref }));
@@ -258,7 +278,8 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
     assert_eq!(watch["success"], true, "{watch}");
     assert_eq!(watch["body"]["result"], "\"Dune\"", "{watch}");
 
-    // A non-^ expression that is not a bare local is refused.
+    // A non-^ expression is refused at the session boundary, even when raw
+    // durable-data inspection is enabled.
     let bad = client.request(
         "evaluate",
         json!({ "expression": "1 + 1", "context": "watch" }),
@@ -266,7 +287,10 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
     let bad = client.response_for(bad);
     assert_eq!(bad["success"], false, "{bad}");
     assert!(
-        bad["message"].as_str().unwrap().contains("^ paths"),
+        bad["message"]
+            .as_str()
+            .unwrap()
+            .contains("canonical expression/evaluate facts"),
         "{bad}"
     );
 
@@ -351,8 +375,14 @@ fn raw_durable_data_inspection_is_blocked_by_default() {
         json!({ "expression": "title", "context": "watch" }),
     );
     let local_watch = client.response_for(local_watch);
-    assert_eq!(local_watch["success"], true, "{local_watch}");
-    assert_eq!(local_watch["body"]["result"], "Dune", "{local_watch}");
+    assert_eq!(local_watch["success"], false, "{local_watch}");
+    assert!(
+        local_watch["message"]
+            .as_str()
+            .unwrap()
+            .contains("canonical expression/evaluate facts"),
+        "{local_watch}"
+    );
 
     let durable_watch = client.request(
         "evaluate",

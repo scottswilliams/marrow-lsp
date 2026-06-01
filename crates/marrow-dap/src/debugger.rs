@@ -76,7 +76,7 @@ pub enum Query {
     DurableRoots,
     /// The children of a durable path.
     DurableChildren(Vec<PathSegment>),
-    /// Evaluate a watch/REPL expression (a `^` path or a bare local name).
+    /// Evaluate a raw durable watch/REPL `^` path.
     Evaluate(String),
 }
 
@@ -186,9 +186,9 @@ impl Debugger {
         LocalsSnapshot { entries }
     }
 
-    /// Resolve a watch/REPL expression at the current frame: a `^` path reads the
-    /// live store (schema-typed); a bare local name reads the captured locals;
-    /// anything else is refused. Read-only by construction.
+    /// Resolve a raw durable watch/REPL expression at the current frame. Read-only
+    /// by construction; source expression evaluation is blocked at the session
+    /// boundary until Marrow exposes canonical evaluate facts.
     fn evaluate(&self, frame: &Frame<'_, '_>, expression: &str) -> Result<String, String> {
         let trimmed = expression.trim();
         if trimmed.starts_with('^') {
@@ -199,18 +199,10 @@ impl Debugger {
                 Err(message) => Err(message),
             };
         }
-        // A bare identifier resolves against the locals in scope (last binding
-        // wins, like the run). Any other shape is not evaluable here.
-        if is_bare_name(trimmed) {
-            let mut found: Option<String> = None;
-            for (name, value) in frame.locals() {
-                if name == trimmed {
-                    found = Some(value.display_debug());
-                }
-            }
-            return found.ok_or_else(|| format!("no local named `{trimmed}`"));
-        }
-        Err("only ^ paths are watchable".to_string())
+        Err(
+            "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow"
+                .to_string(),
+        )
     }
 
     /// Answer one query from the live frame, returning owned data.
@@ -300,30 +292,9 @@ fn terminated() -> RuntimeError {
     }
 }
 
-/// Whether `text` is a single bare identifier (a local name), as opposed to a
-/// path or a larger expression — the only non-`^` shape `evaluate` accepts.
-fn is_bare_name(text: &str) -> bool {
-    !text.is_empty()
-        && text.chars().all(|c| c.is_alphanumeric() || c == '_')
-        && text
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphabetic() || c == '_')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bare_name_recognizes_identifiers_only() {
-        assert!(is_bare_name("total"));
-        assert!(is_bare_name("_x1"));
-        assert!(!is_bare_name("^books"));
-        assert!(!is_bare_name("a.b"));
-        assert!(!is_bare_name("1abc"));
-        assert!(!is_bare_name(""));
-    }
 
     #[test]
     fn terminated_fault_carries_the_terminated_code() {
