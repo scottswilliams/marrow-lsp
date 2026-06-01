@@ -462,7 +462,7 @@ impl LanguageServer for Backend {
             // nothing. A saved-data-backed symbol is refused with a clear message so
             // the user learns renaming it would orphan stored records.
             Err(RenameError::NoSymbol) => Ok(None),
-            Err(error @ (RenameError::SavedDataBacked { .. } | RenameError::InvalidName)) => {
+            Err(error @ (RenameError::SavedDataBacked | RenameError::InvalidName)) => {
                 Err(jsonrpc::Error::invalid_params(error.message()))
             }
         }

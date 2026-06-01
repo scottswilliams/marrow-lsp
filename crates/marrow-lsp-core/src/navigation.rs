@@ -39,11 +39,7 @@ pub enum RenameError {
     /// The symbol names data encoded on disk (a saved field, group, layer, index,
     /// or a resource attached to a saved root). Renaming it in source alone would
     /// change the on-disk path and orphan the stored data, so it is refused.
-    SavedDataBacked {
-        /// The element's `@id(...)` stable id, when one is declared — the durable
-        /// handle a migration would use to move the data across the rename.
-        stable_id: Option<String>,
-    },
+    SavedDataBacked,
 }
 
 impl RenameError {
@@ -52,18 +48,9 @@ impl RenameError {
         match self {
             Self::NoSymbol => "no renameable symbol at this position".to_string(),
             Self::InvalidName => "new name must be a valid Marrow identifier".to_string(),
-            Self::SavedDataBacked { stable_id } => {
-                let mut message = "cannot rename: this names saved data, so renaming it in \
-                     source would orphan the stored records on disk"
-                    .to_string();
-                if let Some(id) = stable_id {
-                    message.push_str(&format!(
-                        " (the @id({id}) stable id lets migration tooling move the data; \
-                         rename via a migration, not the editor)"
-                    ));
-                }
-                message
-            }
+            Self::SavedDataBacked => "cannot rename: this names saved data, so renaming it in \
+                 source would orphan the stored records on disk"
+                .to_string(),
         }
     }
 }
@@ -200,8 +187,8 @@ pub fn rename(
     let definition = index
         .definition(file, offset)
         .ok_or(RenameError::NoSymbol)?;
-    if let RenameSafety::SavedDataBacked { stable_id } = index.rename_safety(&definition) {
-        return Err(RenameError::SavedDataBacked { stable_id });
+    if let RenameSafety::SavedDataBacked = index.rename_safety(&definition) {
+        return Err(RenameError::SavedDataBacked);
     }
     let name = symbol_name(&definition, indices).ok_or(RenameError::NoSymbol)?;
 
@@ -1380,7 +1367,7 @@ pub fn f(): string
         let field_offset = offset_of(source, "required title") + "required ".len();
         let result = rename(&index, &indices, &file, field_offset, "name");
         assert!(
-            matches!(result, Err(RenameError::SavedDataBacked { .. })),
+            matches!(result, Err(RenameError::SavedDataBacked)),
             "renaming a saved field must be refused, got {result:?}"
         );
     }

@@ -870,7 +870,6 @@ pub fn run(count: int): int
             members: vec![marrow_schema::EnumMemberSchema {
                 name: member.to_string(),
                 docs: Vec::new(),
-                stable_id: None,
                 parent: None,
                 category: false,
             }],
