@@ -920,6 +920,20 @@ pub fn shout()
     }
 
     #[test]
+    fn run_executes_shelf_fixture_main() {
+        let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/shelf/src/shelf/sample.mw")
+            .canonicalize()
+            .expect("the shelf fixture exists");
+        let result = run(&file, Some("shelf::sample::main"), &[], RunMode::Run);
+        assert_eq!(result["diagnostics"], json!([]), "{result}");
+        assert!(
+            result["output"].as_str().unwrap().contains("Small Gods"),
+            "the shelf fixture should print its seeded fiction book, got {result}"
+        );
+    }
+
+    #[test]
     fn output_truncation_preserves_utf8_boundaries() {
         let output = "€".repeat(OUTPUT_CAP);
         let truncated = truncate(output);
