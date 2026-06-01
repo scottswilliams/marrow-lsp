@@ -1,0 +1,107 @@
+# LSP Fact Consumption Ledger
+
+This ledger is the shared contract for the first LSP v0.1 lane in
+[`v01-parallel-orchestration.md`](v01-parallel-orchestration.md). It maps each
+editor, agent, and debugger surface to the canonical Marrow facts it consumes.
+When a surface needs a semantic fact Marrow does not yet expose, the LSP lane is
+blocked rather than free to infer the fact locally.
+
+The goal is not to remove current prototype usefulness. It is to draw the
+boundary between production-ready source presentation, presentation-only editor
+helpers, and prototype/debug/admin saved-data surfaces that must become
+catalog-bound before v0.1.
+
+## Status Definitions
+
+| Status | Meaning |
+| --- | --- |
+| `ready` | The surface consumes existing canonical Marrow facts or syntax APIs and does not decide language, catalog, storage, or runtime semantics locally. It can be part of the v0.1 editor surface after ordinary review. |
+| `presentation-only` | The surface is useful UI over source text, transport wiring, build output, or debug/admin data, but it is not a stable semantic contract. It must not be used as proof that a Marrow fact exists. |
+| `blocked-on-marrow` | The surface currently needs a fact that belongs in Marrow. LSP work may keep a prototype path for development, but v0.1 production behavior must wait for the named upstream fact/API. |
+
+## Feature-To-Fact Matrix
+
+| Surface | Status | Marrow facts/APIs consumed | Missing or non-canonical facts | No duplicated semantics proof / risk |
+| --- | --- | --- | --- | --- |
+| Workspace and project analysis | `blocked-on-marrow` | `marrow_project::parse_config`, `ProjectConfig`, `marrow_check::ProjectSources`, `analyze_project`, `AnalysisSnapshot`, `CheckedProgram`, `build_binding_index`, `BindingIndex`; core owns `Workspace::recompute`, `Workspace::program`, and binding-index caching | Versioned analysis snapshots with source digest, catalog epoch/digest, and runtime/store generation facts | Current editor recomputation delegates parse/check/index construction to Marrow. v0.1 live analysis still needs canonical snapshot identity before cached analysis or live data can be presented as production-stable. |
+| Diagnostics | `ready` | `AnalysisSnapshot`, `CheckDiagnostic`, `Severity`, `SourceSpan`; core maps with `diagnostic_to_lsp` and `snapshot_to_diagnostics` | None for current source diagnostics | LSP renders Marrow diagnostics and span/severity data. It does not classify checker errors or invent diagnostic meaning. |
+| Hover | `blocked-on-marrow` | `type_at`, `BindingIndex`, `resolve`, `CheckedProgram`, `CheckedFunction`, `CheckedModule`, `ResourceSchema`, `EnumSchema`, standard-library descriptors, optional `StoreReader` presence | Canonical hover facts for type annotations, declaration names, module paths, builtin/operator targets, saved roots, enum member paths, docs, and live data binding | Current hover is useful but contains local token and syntax walking. Each local classifier must be replaced by checked hover facts or treated as UI text without semantic authority. |
+| Navigation, references, and rename | `blocked-on-marrow` | `BindingIndex`, `SymbolRef`, `SymbolKind`, `RenameSafety`, `resolve`, alias helpers, standard-library descriptors, parsed source | Durable identity rename facts; saved-root, module-prefix, and type-annotation definition facts; catalog-backed stable IDs for resources, stores, fields, layers, indexes, enum members, and aliases | Existing navigation reads the binding index where it can. Fallbacks that recover symbols from source shape or saved-root strings are not valid v0.1 identity facts. |
+| Document symbols | `presentation-only` | Parsed source, `CheckedProgram`, current module/function/resource/schema facts where available | Catalog-backed symbol identity, typed store/resource roles, and source-to-catalog rename/evolution facts | The outline is a navigational view over current source facts. It must not become durable identity or catalog authority. |
+| Workspace symbols | `presentation-only` | Workspace analysis results, parsed source, `CheckedProgram`, `BindingIndex` where available | Catalog-backed symbol identity, query-native project symbol facts, and stable cross-snapshot identity | Workspace search can display names from current analysis. Durable identity and cross-snapshot stability belong upstream. |
+| Semantic tokens | `presentation-only` | `marrow_syntax` lex/parse output, optional `BindingIndex`, `SymbolKind`, standard-library descriptors | Canonical role facts for builtins, operators, types, modules, type annotations, saved roots, fields, layers, indexes, enum members, and default-library markers | Lexical coloring is presentation. Resolved role coloring must consume Marrow binding/role facts; local role classifiers duplicate semantics. |
+| Completion | `blocked-on-marrow` | `scope_at`, `resolve`, alias helpers, `CheckedProgram`, checked schemas, syntax lex/parse, standard-library descriptors | Canonical completion-context facts for namespaces, saved paths, type annotations, resource/store paths, aliases, and malformed in-progress source | Candidate facts come from Marrow, but the active completion context is locally inferred from tokens and path shape. That inference must move upstream or become an explicit checked query. |
+| Signature help | `blocked-on-marrow` | `resolve`, `CheckedProgram`, `AnalysisSnapshot`, checked functions, checked schemas, standard-library descriptors, lexed source | Canonical active-call facts, suppression rules, builtin signatures, resource constructor signatures, and argument-position facts | Rendered signatures reuse checked definitions. Call detection and suppression remain local heuristics, so they are not v0.1 semantic proof. |
+| Formatting | `ready` | `ParsedSource::has_errors`, `marrow_syntax::format_source` | None for whole-document formatting | LSP calls the canonical syntax formatter and refuses edits when the parsed source has errors. |
+| Data Explorer | `blocked-on-marrow` | `CheckedProgram`, `resolve_resource_by_root`, `ResourceSchema`, `marrow_run::classify_saved_path`, store path/value facts, `StoreReader` | Catalog-bound store/resource identity, typed saved places, field/layer/index identity, typed children, cursor/page facts, and schema-aware value rendering | Current explorer is valuable for debug/admin inspection, but raw JSON path segments collapse fields, layers, indexes, and keyed values. Schema context is reconstructed locally. |
+| Data integrity | `presentation-only` | `marrow_run::classify_saved_path`, identity decode helpers, store decode/scan facts, `StoreReader` | Catalog/store identity, store generation, catalog epoch/digest, typed repair or drift facts | The current command follows the runtime classifier and decoder rather than inventing byte validity. It remains a debug/admin advisory until catalog-backed identity and drift facts exist. |
+| Store and live saved-path hover | `blocked-on-marrow` | Read-only `StoreReader`, store availability facts, `marrow_run::classify_saved_path`, local `saved_path_at` | Checked `saved_path_at` or saved-place query facts, typed store path identity, read-totality/default facts, snapshot generation | Read-only store access is mechanically available. Mapping a cursor position to a durable saved place is currently local syntax/schema resolution and cannot be v0.1 production semantics. |
+| CodeLens and live data counts | `presentation-only` | Parsed source, optional `StoreReader` record counts, store availability | Checked resource/store summary facts and snapshot generation | CodeLens may display useful counts, but counts are UI hints unless bound to versioned analysis and store snapshots. |
+| LSP stdio transport | `ready` | Core workspace, diagnostics, hover, navigation, completion, signature help, CodeLens, formatting, data explorer, and data integrity APIs | Inherits core feature blockers | The stdio server is thin transport over `marrow-lsp-core`. Smoke tests cover diagnostics, signature help, hover, definition, completion, CodeLens, custom saved data, and data integrity. |
+| MCP stdio transport | `ready` | Core dispatch and JSON-RPC style stdio plumbing over `marrow-lsp-core` | Tool-level semantic gaps are tracked in the MCP rows below | The transport is a thin adapter. Tool contracts carry their own fact boundaries. |
+| MCP `mw_check` / diagnostics | `ready` | Workspace analysis, `AnalysisSnapshot`, `CheckDiagnostic`, `Severity`, `SourceSpan`, `diagnostic_to_lsp` JSON rendering | None for current source diagnostics | The tool reports Marrow diagnostics and does not classify checker failures locally. |
+| MCP `mw_type_at` | `ready` | Workspace analysis, parsed source, `CheckedProgram`, `marrow_check::type_at`, shared type rendering | None for expression type lookup currently exposed | The tool asks Marrow for the type at a source position and renders the returned type. |
+| MCP `mw_complete` | `blocked-on-marrow` | Core completion over `scope_at`, `resolve`, alias helpers, `CheckedProgram`, syntax lex/parse, and standard-library descriptors | Canonical completion-context facts for namespaces, saved paths, type annotations, resource/store paths, aliases, and recovery mode | The transport can expose completions, but context inference remains local to LSP core until Marrow owns the query. |
+| MCP `mw_resource_schema` | `blocked-on-marrow` | `CheckedProgram`, checked schemas, resource lookup helpers | Split resource/store identity, catalog-backed field/layer/index identity, presence/default facts, and typed protocol DTOs | Current schema answers are useful for inspection, but production protocol shape must be catalog-bound. |
+| MCP `mw_saved_roots` / `mw_saved_get` / `mw_saved_children` | `blocked-on-marrow` | `StoreReader`, store availability, store path/value facts, `marrow_run::classify_saved_path` | Catalog-bound saved-place identity, typed children, cursor/page facts, snapshot/store generation, and stable data DTOs | These tools expose debug/admin saved data through raw path-shaped contracts. v0.1 needs typed store facts rather than path-shape inference. |
+| MCP `mw_data_integrity` | `presentation-only` | `marrow_run::classify_saved_path`, identity decode helpers, store decode/scan facts, `StoreReader` | Catalog/store identity, store generation, catalog epoch/digest, typed repair or drift facts | The tool is advisory debug/admin output. It is not production validation until Marrow exposes catalog-bound integrity facts. |
+| MCP `mw_run` | `presentation-only` | Core run plumbing, checked program entry lookup where available, sandboxed `MemStore` execution | Effect facts, durable-scope facts, transaction facts, runtime generation facts, and typed run protocol DTOs for production execution | Current sandboxed execution is a smoke-agent helper. Production run/debug contracts require checked effects, durable scope, transactions, runtime generation, and typed protocol DTOs. |
+| DAP debugger | `blocked-on-marrow` | Core workspace facts, runtime execution hooks, store readers, checked program where available | Canonical stop-point facts, function entry facts, typed argument decoding, runtime value expansion, expression/evaluate facts, durable watch facts, typed path segments | DAP duplicates semantics in breakpoint stop-point syntax walking, `module::fn` entry parsing, limited bool/string/int argument parsing, local value expansion, bare-name evaluation classification, durable path rendering, and raw child-to-field mapping. |
+| VS Code extension launcher and package wiring | `ready` | Bundled Rust binaries, package metadata, grammar contribution, command wiring | None for launcher/package wiring | The launcher is a presentation/build surface and does not decide language or data semantics. Data Explorer child identity is tracked by the UI row below. |
+| VS Code grammar/TextMate syntax | `presentation-only` | TextMate lexical grammar and editor contribution metadata | None, as long as it remains lexical presentation | Grammar coloring is a fallback for editor display. It cannot classify checked symbol roles, durable paths, or language semantics. |
+| VS Code Data Explorer UI | `blocked-on-marrow` | Core data explorer protocol when `appendSegment` is present | Canonical child segment identity; no TypeScript fallback segment inference | `fallbackSegment()` infers path identity from JSON shape in TypeScript. v0.1 must require canonical `appendSegment` from core and remove the fallback. |
+
+## Blocked Marrow Facts Ledger
+
+| Blocker | Required Marrow fact/API | LSP surfaces blocked | Rule for LSP lanes |
+| --- | --- | --- | --- |
+| Versioned analysis snapshots | Snapshot identity with source digest, catalog epoch/digest, project config digest, and runtime/store generation where live data is attached | Workspace, live data, CodeLens, Data Explorer, MCP data tools | Do not present cached analysis or live store data as production-stable without the version/generation facts. |
+| Catalog-backed typed identities | Stable typed IDs for resources, stores, fields, layers, indexes, enum members, aliases, and generated identity constructors | Navigation, rename, hover, semantic tokens, completion, data explorer, DAP, MCP data tools | Do not treat source spelling, `@id` strings, raw paths, source-name physical keys, or enum source-order ordinals as durable identity. |
+| Split resource/store facts | Separate checked facts for resource schema, store binding, store key shape, and store-backed roots | Data Explorer, saved-root hover, completion, navigation, store/live saved path | Do not infer durable store identity from resource names or saved-root strings. |
+| Query-native symbol and hover facts | Checked query APIs for declarations, definitions, type annotations, module paths, docs, standard library, builtin/operator targets, enum/member paths, and saved roots | Hover, navigation, semantic tokens, completion, signature help | Do not recover semantic targets by locally walking tokens or syntax subtrees when a checked fact is missing. |
+| Checked completion context | A checker-owned context query at a source position that names namespace, expected type, active path, alias visibility, and recovery mode | Completion, signature help, MCP completion | Do not infer namespace, saved-path, type, or resource/store context from nearby lexer tokens. |
+| Checked active-call and signature facts | Function/resource/builtin call target, active argument, suppression state, and rendered signature source | Signature help, completion, MCP | Do not implement call-stack recovery or suppression as LSP-local language semantics. |
+| Checked IR and typed saved places | Lowered read/write places, saved-place identity, write plans, assignment/edit/delete effects, and typed runtime values | Data Explorer, DAP durable watches, MCP data tools, run/debug helpers | Do not lower assignments, edits, deletes, or saved paths locally. |
+| Checked effect and durable-scope facts | Query/command/job classification, transaction scope, host effects, projections, index use, scan boundedness, cancellation, and irreversible effects | MCP tools, DAP, future run/debug UI, CodeLens | Do not classify query/command/job behavior, transaction scope, host effects, index use, projections, or scan boundedness locally. |
+| Debugger execution facts | Canonical stop-point facts, function entry facts, typed argument decoding, runtime value expansion, expression/evaluate facts, durable watch facts, and typed path segments | DAP debugger, future run/debug UI | Do not infer breakpoint binding, entry names, launch argument types, watch targets, value expansion, or evaluate expressions from syntax shape or ad hoc runtime JSON. |
+| Presence, read-totality, and default facts | Checked facts for optional fields, required fields, defaulted reads, structural presence, and missing-data errors | Hover, completion, Data Explorer, data integrity, DAP value rendering | Do not decide optional/default/required read behavior from syntax or schema fields alone. |
+| Store-owned index, scan, cursor, and sequence facts | Catalog-owned index identity, bounded scan facts, cursor/page identity, sequence allocation, and generated index maintenance | Data Explorer, MCP data tools, DAP durable watches, live count CodeLens | Do not infer index identity, scan safety, cursor validity, or sequence behavior from resource schemas or raw paths. |
+| Catalog lifecycle, drift, and source-native evolution facts | Source-native rename/retire/create intent, catalog decisions, drift diagnostics, evolution witnesses, and data-impact witnesses | Rename, navigation, data integrity, Data Explorer, MCP admin tools | Do not infer rename, retire, create, or data-impact intent from source diffs. |
+| Runtime/store generation facts | Runtime generation, store snapshot/commit identity, stale-generation diagnostics, and live-data availability state | Workspace live data, DAP, Data Explorer, CodeLens, MCP data tools | Do not combine source analysis and live data without a typed generation boundary. |
+| Typed tooling protocol DTOs | Catalog-epoch-bound LSP/MCP/DAP data DTOs for resources, stores, paths, values, diagnostics, and evolution/admin views | MCP, DAP, Data Explorer, VS Code extension | Do not expose raw saved paths, backend bytes, or debug JSON as stable production protocol. |
+
+## Debug/Admin/Prototype-Only Surfaces
+
+These surfaces may remain useful for development and administrative inspection,
+but they are not v0.1 stable production contracts:
+
+- Raw saved paths and physical/backend bytes.
+- `marrow/dataIntegrity` advisory output.
+- Data Explorer raw segment JSON and TypeScript `fallbackSegment()` inference.
+- DAP durable `^` watches and raw durable path/value rendering.
+- `marrow_run::classify_saved_path` results when used as public identity rather than runtime classification.
+- Source-name physical keys and saved-root strings.
+- Enum source-order ordinals.
+- Lock, merge, `inout`, and runtime syntax execution paths that have not been reintroduced as checked v0.1 facts.
+- Tool descriptions that present debug/admin saved-data paths as stable user APIs.
+
+Production source presentation is different: diagnostics, formatting, thin
+transport wiring, and lexical presentation may ship when they consume canonical
+facts or remain explicitly presentation-only.
+
+## Next LSP Lanes Unlocked
+
+| Lane | What the ledger enables | Guardrail |
+| --- | --- | --- |
+| Transport/core boundary cleanup | Delete transport-local semantic classifiers and centralize shared presentation helpers in `marrow-lsp-core` only when the fact is already canonical | Each deletion must name the Marrow fact it now consumes or record a lane-local blocker. |
+| Fixture harness preparation | Build source-driven fixtures for diagnostics, hover, navigation, semantic tokens, completion, MCP, and DAP without freezing prototype semantics | Fixtures assert existing facts and mark missing facts as blocked rather than encoding LSP-local classifiers as expected behavior. |
+| Presentation-only UX improvements | Improve Markdown, summaries, command wiring, packaging checks, grammar fallback, and transport smoke coverage | UX lanes must not turn raw paths or local heuristics into stable semantic APIs. |
+| Capability-gated adapters | Gate features that need upstream facts and expose precise blocked states | Gates must point to a missing Marrow fact from this ledger and avoid alternate local inference. |
+
+## Marrow Dependency Handoff
+
+Marrow dependency:
+- status: `blocked-on-missing-fact`
+- canonical API consumed: `marrow_project::parse_config`, `ProjectConfig`, `marrow_check::ProjectSources`, `analyze_project`, `AnalysisSnapshot`, `CheckedProgram`, `build_binding_index`, `BindingIndex`, `CheckDiagnostic`, `Severity`, `SourceSpan`, `type_at`, `scope_at`, `resolve`, `RenameSafety`, `SymbolRef`, `SymbolKind`, checked schemas, standard-library descriptors, `marrow_syntax::format_source`, `ParsedSource::has_errors`, `marrow_run::classify_saved_path`, identity decode helpers, store decode/scan facts, and `StoreReader`.
+- missing upstream fact, if any: versioned snapshots with catalog epoch/digest and runtime/store generation; catalog-backed typed identities; split resource/store facts; query-native hover/navigation/completion/signature facts; checked IR and typed saved-place/write-plan facts; checked effect and durable-scope facts; debugger execution facts for canonical stop-points, function entries, typed argument decoding, runtime value expansion, expression/evaluate, durable watches, and typed path segments; presence/read-totality/default facts; store-owned index/scan/cursor/sequence facts; catalog lifecycle/drift/evolution facts; typed tooling protocol DTOs.
+- no duplicated semantics proof: LSP v0.1 production behavior must consume the APIs above or a new Marrow fact. Current local token walking, saved-path reconstruction, TypeScript path-segment fallback, DAP stop-point/entry/argument/expression/value/watch/path classifiers, and raw debug/admin saved-data rendering are not treated as semantic authority.
