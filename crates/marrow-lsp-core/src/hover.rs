@@ -1267,7 +1267,6 @@ fn enum_member_hover(schema: &EnumSchema, ordinal: usize) -> String {
     value.push_str("\n\n");
     value.push_str("**Facts**\n");
     value.push_str(&format!("- enum {}\n", schema.name));
-    value.push_str(&format!("- ordinal {ordinal}\n"));
     value.push_str(&format!("- {status}"));
     value
 }
@@ -1374,10 +1373,7 @@ fn enum_member_summary(schema: &EnumSchema) -> Option<String> {
                 } else {
                     "group"
                 };
-                format!(
-                    "{} ordinal {ordinal} {status}",
-                    schema.member_path(ordinal).join("::")
-                )
+                format!("{} {status}", schema.member_path(ordinal).join("::"))
             })
             .collect(),
     )
@@ -4397,6 +4393,10 @@ pub enum Status
             value.contains("closed"),
             "enum member summary should include closed: {value}"
         );
+        assert!(
+            !value.contains("ordinal"),
+            "enum hover should not include source-order ordinals: {value}"
+        );
     }
 
     #[test]
@@ -4629,7 +4629,7 @@ pub fn set(status: state::Status)
     }
 
     #[test]
-    fn hover_over_an_enum_member_value_shows_path_ordinal_status_and_docs() {
+    fn hover_over_an_enum_member_value_shows_path_status_and_docs() {
         let source = "\
 module a
 
@@ -4660,8 +4660,8 @@ pub fn current(): Status
             "enum member hover should name the enum: {value}"
         );
         assert!(
-            value.contains("ordinal 1"),
-            "enum member hover should include its ordinal: {value}"
+            !value.contains("ordinal"),
+            "enum member hover should not include source-order ordinals: {value}"
         );
         assert!(
             value.contains("selectable"),

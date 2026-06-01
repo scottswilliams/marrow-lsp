@@ -137,8 +137,8 @@ Expected outcomes:
 - Resource hover shows resource name, saved root, identity key names and types, concise member
   summary, docs, and a bounded note when the resource tree is large.
 - Resource root hover works on both `^root` sigil/name and root uses.
-- Enum and enum-member hover shows enum type, full member path, category/selectable status, ordinal
-  where available, and docs.
+- Enum and enum-member hover shows enum type, full member path, category/selectable status, and
+  docs without presenting source-order ordinals as stable identity.
 - Builtin and standard-library hover shows signature and documentation sourced from canonical
   descriptor tables or language docs.
 - Parameter hover distinguishes parameters from locals and shows parameter mode plus type.
