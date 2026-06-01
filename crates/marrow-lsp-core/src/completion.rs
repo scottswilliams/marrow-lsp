@@ -849,12 +849,10 @@ pub fn run(count: int): int
             enum_public: Default::default(),
         };
         (
-            CheckedProgram {
-                modules: vec![
-                    module("shelf::library", library, "Library book docs."),
-                    module("shelf::app", app.clone(), "App book docs."),
-                ],
-            },
+            CheckedProgram::from_modules(vec![
+                module("shelf::library", library, "Library book docs."),
+                module("shelf::app", app.clone(), "App book docs."),
+            ]),
             app,
         )
     }
@@ -888,12 +886,10 @@ pub fn run(count: int): int
             }
         };
         (
-            CheckedProgram {
-                modules: vec![
-                    module("shelf::private", library, "foreignOnly", false),
-                    module("shelf::app", app.clone(), "currentOnly", false),
-                ],
-            },
+            CheckedProgram::from_modules(vec![
+                module("shelf::private", library, "foreignOnly", false),
+                module("shelf::app", app.clone(), "currentOnly", false),
+            ]),
             app,
         )
     }
