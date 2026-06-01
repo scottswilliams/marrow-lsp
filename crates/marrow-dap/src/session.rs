@@ -194,7 +194,7 @@ impl<W: Write> Session<W> {
             json!({
                 "supportsConfigurationDoneRequest": true,
                 "supportsTerminateRequest": true,
-                "supportsEvaluateForHovers": true,
+                "supportsEvaluateForHovers": false,
             }),
         );
         self.event("initialized", json!({}));
@@ -559,6 +559,17 @@ impl<W: Write> Session<W> {
     /// `evaluate`: a watch/REPL request. Restricted to read-only `^` paths and
     /// bare local names; anything else is refused with a clear message.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
+        if arguments.get("context").and_then(Json::as_str) == Some("hover") {
+            self.respond(
+                request,
+                false,
+                json!(
+                    "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow"
+                ),
+            );
+            return;
+        }
+
         let expression = arguments
             .get("expression")
             .and_then(Json::as_str)

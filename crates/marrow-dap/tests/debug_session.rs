@@ -278,6 +278,66 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
 }
 
 #[test]
+fn hover_evaluate_is_blocked_until_canonical_facts_exist_initialize_capability() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    let response = client.response_for(init);
+    assert_eq!(response["success"], true, "{response}");
+    assert_ne!(
+        response["body"]["supportsEvaluateForHovers"], true,
+        "hover evaluation must not be advertised until Marrow exposes canonical evaluate facts: {response}"
+    );
+}
+
+#[test]
+fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": false }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 10 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+
+    let hover = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "hover" }),
+    );
+    let hover = client.response_for(hover);
+    assert_eq!(hover["success"], false, "{hover}");
+    let message = hover["message"].as_str().unwrap();
+    assert!(
+        message.contains("blocked-on-marrow"),
+        "hover evaluate rejection should name the Marrow blocker: {hover}"
+    );
+    assert!(
+        message.contains("canonical evaluate facts"),
+        "hover evaluate rejection should name the missing facts: {hover}"
+    );
+}
+
+#[test]
 fn stepping_advances_one_statement_at_a_time() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
