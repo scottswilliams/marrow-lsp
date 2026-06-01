@@ -224,6 +224,11 @@
                 "type": "boolean",
                 "description": "Break at the first statement of the entry.",
                 "default": false
+              },
+              "allowRawDataInspection": {
+                "type": "boolean",
+                "description": "Expose raw saved-data debugger inspection (^ Durable Data scope and ^ watch expressions). This is a debug/admin prototype blocked on typed durable watch/path facts from Marrow.",
+                "default": false
               }
             }
           }
@@ -235,7 +240,8 @@
             "name": "Debug Marrow entry",
             "project": "${workspaceFolder}",
             "args": [],
-            "stopOnEntry": false
+            "stopOnEntry": false,
+            "allowRawDataInspection": false
           }
         ],
         "configurationSnippets": [
@@ -249,7 +255,8 @@
               "project": "^\"\\${workspaceFolder}\"",
               "entry": "^\"module::function\"",
               "args": [],
-              "stopOnEntry": false
+              "stopOnEntry": false,
+              "allowRawDataInspection": false
             }
           }
         ]

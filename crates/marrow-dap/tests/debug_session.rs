@@ -2,8 +2,9 @@
 //!
 //! Spawns the built binary, drives the DAP handshake over its stdio with
 //! `Content-Length` framing, launches a fixture entry with a breakpoint, and
-//! asserts the run stops, exposes a live local *and* a `^ Durable Data` value at
-//! the stop, then continues to a clean termination. This exercises the whole
+//! asserts the run stops, exposes a live local, and can opt into a raw
+//! `^ Durable Data` value at the stop, then continues to a clean termination.
+//! This exercises the whole
 //! rendezvous — run-thread stepping, parked-frame queries, the durable scope —
 //! through the wire protocol, not internal APIs.
 
@@ -155,7 +156,11 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
     // launch the fixture's default entry.
     let launch = client.request(
         "launch",
-        json!({ "project": dir.path().display().to_string(), "stopOnEntry": false }),
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+            "allowRawDataInspection": true,
+        }),
     );
     assert_eq!(client.response_for(launch)["success"], true);
 
@@ -201,7 +206,7 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
         .expect("a Locals scope");
     let durable_ref = scope_list
         .iter()
-        .find(|scope| scope["name"] == "^ Durable Data")
+        .find(|scope| scope["name"] == "^ Durable Data (debug/admin prototype)")
         .and_then(|scope| scope["variablesReference"].as_i64())
         .expect("a durable scope");
 
@@ -275,6 +280,96 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
         "{output}"
     );
     client.event("terminated");
+}
+
+#[test]
+fn raw_durable_data_inspection_is_blocked_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": false }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 10 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+
+    let threads = client.request("threads", json!({}));
+    let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let stack = client.request("stackTrace", json!({ "threadId": thread_id }));
+    let frames = client.response_for(stack);
+    let frame_id = frames["body"]["stackFrames"][0]["id"].as_i64().unwrap();
+
+    let scopes = client.request("scopes", json!({ "frameId": frame_id }));
+    let scopes = client.response_for(scopes);
+    let scope_list = scopes["body"]["scopes"].as_array().unwrap();
+    assert!(
+        scope_list.iter().all(|scope| !scope["name"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("^ Durable Data")),
+        "raw durable-data scope must be hidden by default: {scopes}"
+    );
+
+    let manual_durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
+    let manual_durable_variables = client.response_for(manual_durable_variables);
+    assert_eq!(
+        manual_durable_variables["success"], false,
+        "raw durable-data variables must reject the fixed reference by default: {manual_durable_variables}"
+    );
+    assert!(
+        manual_durable_variables["message"]
+            .as_str()
+            .unwrap()
+            .contains("blocked-on-marrow"),
+        "raw durable-data variables rejection should name the Marrow blocker: {manual_durable_variables}"
+    );
+
+    let local_watch = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "watch" }),
+    );
+    let local_watch = client.response_for(local_watch);
+    assert_eq!(local_watch["success"], true, "{local_watch}");
+    assert_eq!(local_watch["body"]["result"], "Dune", "{local_watch}");
+
+    let durable_watch = client.request(
+        "evaluate",
+        json!({ "expression": "  ^books(1).title", "context": "watch" }),
+    );
+    let durable_watch = client.response_for(durable_watch);
+    assert_eq!(durable_watch["success"], false, "{durable_watch}");
+    let message = durable_watch["message"].as_str().unwrap();
+    assert!(
+        message.contains("blocked-on-marrow"),
+        "raw durable-data rejection should name the Marrow blocker: {durable_watch}"
+    );
+    assert!(
+        message.contains("typed durable watch/path facts")
+            || message.contains("raw durable-data inspection"),
+        "raw durable-data rejection should name the missing facts: {durable_watch}"
+    );
 }
 
 #[test]

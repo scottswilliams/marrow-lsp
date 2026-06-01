@@ -78,7 +78,8 @@ but they are not v0.1 stable production contracts:
 - Raw saved paths and physical/backend bytes.
 - `marrow/dataIntegrity` advisory output.
 - Data Explorer raw segment JSON and gated children without schema-backed `appendSegment`.
-- DAP durable `^` watches and raw durable path/value rendering.
+- DAP durable `^` watches and raw durable path/value rendering, gated behind
+  the `allowRawDataInspection` debug launch opt-in.
 - `marrow_run::classify_saved_path` results when used as public identity rather than runtime classification.
 - Source-name physical keys and saved-root strings.
 - Enum source-order ordinals.

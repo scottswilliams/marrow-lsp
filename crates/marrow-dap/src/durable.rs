@@ -1,5 +1,6 @@
-//! The standout `^ Durable Data` scope: a synthetic tree of the debuggee's saved
-//! roots, expanded lazily through the run's *live* store handle.
+//! Raw durable-data inspection for the opt-in DAP debug/admin scope and `^`
+//! watches. It renders a synthetic tree of the debuggee's saved roots, expanded
+//! lazily through the run's *live* store handle.
 //!
 //! Unlike the editor's read-only [`StoreReader`](marrow_lsp_core::store::StoreReader)
 //! (which opens the on-disk file between calls), this reads the run-thread's own

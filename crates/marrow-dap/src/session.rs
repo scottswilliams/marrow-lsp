@@ -25,13 +25,14 @@ use crate::step::Resume;
 /// The variable reference for the Locals scope at a stop. Fixed, since there is
 /// one Locals scope per frame.
 const LOCALS_REF: i64 = 1;
-/// The variable reference for the `^ Durable Data` scope. Fixed likewise.
+/// The variable reference for the opt-in raw durable-data scope. Fixed likewise.
 const DURABLE_REF: i64 = 2;
 /// The first dynamically-allocated reference, for expandable locals and durable
 /// subtrees. Kept clear of the two fixed scope references.
 const FIRST_DYNAMIC_REF: i64 = 1000;
 /// The single thread id the debugger exposes — the run is single-threaded.
 const THREAD_ID: i64 = 1;
+const RAW_DATA_INSPECTION_BLOCKED: &str = "blocked-on-marrow: raw durable-data inspection needs typed durable watch/path facts from Marrow";
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread: a
 /// local value is expanded in memory, a durable path is read from the live store.
@@ -72,6 +73,9 @@ pub struct Session<W: Write> {
     /// The dynamic reference registry for the current stop, cleared on resume.
     expandables: HashMap<i64, Expandable>,
     next_ref: i64,
+    /// Launch opt-in for raw durable `^` inspection. Program execution still
+    /// uses the configured store; this gates only debugger inspection surfaces.
+    allow_raw_data_inspection: bool,
     /// Set once the client asked to disconnect/terminate, so the loop exits.
     done: bool,
 }
@@ -82,6 +86,7 @@ struct PendingLaunch {
     entry: Option<String>,
     args: Vec<marrow_run::Value>,
     stop_on_entry: bool,
+    allow_raw_data_inspection: bool,
 }
 
 impl<W: Write> Session<W> {
@@ -96,6 +101,7 @@ impl<W: Write> Session<W> {
             pending: None,
             expandables: HashMap::new(),
             next_ref: FIRST_DYNAMIC_REF,
+            allow_raw_data_inspection: false,
             done: false,
         }
     }
@@ -223,6 +229,10 @@ impl<W: Write> Session<W> {
             .get("stopOnEntry")
             .and_then(Json::as_bool)
             .unwrap_or(false);
+        let allow_raw_data_inspection = arguments
+            .get("allowRawDataInspection")
+            .and_then(Json::as_bool)
+            .unwrap_or(false);
 
         // Prepare the project now so a bad project fails the launch with a clear
         // message, but keep the store/program until configurationDone starts it.
@@ -235,7 +245,9 @@ impl<W: Write> Session<W> {
                     entry,
                     args,
                     stop_on_entry,
+                    allow_raw_data_inspection,
                 });
+                self.allow_raw_data_inspection = allow_raw_data_inspection;
                 self.respond(request, true, json!({}));
             }
             Err(error) => self.respond(request, false, json!(error.to_string())),
@@ -304,6 +316,7 @@ impl<W: Write> Session<W> {
             return;
         };
         let breakpoint_lines = self.entry_breakpoint_lines();
+        let allow_raw_data_inspection = pending.allow_raw_data_inspection;
         match crate::run::spawn(
             pending.project_dir,
             pending.entry,
@@ -312,6 +325,7 @@ impl<W: Write> Session<W> {
             pending.stop_on_entry,
         ) {
             Ok(running) => {
+                self.allow_raw_data_inspection = allow_raw_data_inspection;
                 self.running = Some(Running {
                     handle: running.handle,
                     control: running.control,
@@ -400,27 +414,22 @@ impl<W: Write> Session<W> {
         );
     }
 
-    /// `scopes`: the two scopes a Marrow stop offers — in-memory Locals and the
-    /// synthetic `^ Durable Data` tree.
+    /// `scopes`: Locals are always available. Raw durable data is a debug/admin
+    /// prototype and is exposed only when launch opts in.
     fn on_scopes(&mut self, request: &Json) {
-        self.respond(
-            request,
-            true,
-            json!({
-                "scopes": [
-                    {
-                        "name": "Locals",
-                        "variablesReference": LOCALS_REF,
-                        "expensive": false,
-                    },
-                    {
-                        "name": "^ Durable Data",
-                        "variablesReference": DURABLE_REF,
-                        "expensive": true,
-                    },
-                ]
-            }),
-        );
+        let mut scopes = vec![json!({
+            "name": "Locals",
+            "variablesReference": LOCALS_REF,
+            "expensive": false,
+        })];
+        if self.allow_raw_data_inspection {
+            scopes.push(json!({
+                "name": "^ Durable Data (debug/admin prototype)",
+                "variablesReference": DURABLE_REF,
+                "expensive": true,
+            }));
+        }
+        self.respond(request, true, json!({ "scopes": scopes }));
     }
 
     /// `variables`: list the children of a scope or an expandable value, querying
@@ -430,6 +439,16 @@ impl<W: Write> Session<W> {
             .get("variablesReference")
             .and_then(Json::as_i64)
             .unwrap_or(0);
+        if !self.allow_raw_data_inspection
+            && (reference == DURABLE_REF
+                || matches!(
+                    self.expandables.get(&reference),
+                    Some(Expandable::Durable(_))
+                ))
+        {
+            self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
+            return;
+        }
         let variables = match reference {
             LOCALS_REF => self.locals_variables(),
             DURABLE_REF => self.durable_variables(None),
@@ -575,6 +594,10 @@ impl<W: Write> Session<W> {
             .and_then(Json::as_str)
             .unwrap_or_default()
             .to_string();
+        if !self.allow_raw_data_inspection && expression.trim_start().starts_with('^') {
+            self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
+            return;
+        }
         let Some(QueryResult::Evaluated(result)) = self.query(Query::Evaluate(expression)) else {
             self.respond(request, false, json!("not stopped"));
             return;
