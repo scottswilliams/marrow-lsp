@@ -2,7 +2,7 @@
 //! stop and serves the protocol thread's inspection queries without ever letting
 //! the live [`Frame`] cross a thread boundary.
 //!
-//! ## The rendezvous (no `unsafe`, no cross-thread `Env` borrow)
+//! ## The rendezvous
 //! The interpreter is single-threaded and synchronous, so the run owns its store
 //! and locals for as long as it executes. We run the run on a dedicated
 //! *run-thread* via [`run_entry_with_debugger`]. [`StepHook::before_statement`] is

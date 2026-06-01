@@ -12,8 +12,8 @@
 //! thread boundary. The run executes on a dedicated *run-thread*; this protocol
 //! loop runs on the main thread. They meet in the run's `before_statement` hook:
 //! at a stop, the run-thread parks (still holding the frame) and serves owned
-//! answers to the protocol thread's queries over channels. No `unsafe`, no
-//! `Send` of a frame — see [`debugger`] for the full rendezvous.
+//! answers to the protocol thread's queries over channels. The live frame stays
+//! on the run-thread; see [`debugger`] for the full rendezvous.
 
 mod breakpoints;
 mod debugger;

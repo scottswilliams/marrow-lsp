@@ -5,6 +5,11 @@ make `.mw` editing feel like a mature language extension: precise color, useful 
 navigation, strong completions, and steady cleanup without diverging from the Marrow language
 kernel.
 
+During the Marrow prototype-to-v0.1 rewrite, use
+[`v01-parallel-orchestration.md`](v01-parallel-orchestration.md) as the
+coordination plan between the Marrow project lead and the `marrow-lsp`
+orchestrator.
+
 ## Operating Rules
 
 - Work in short-lived, file-disjoint worktrees outside the tracked repo, with each lane using its
@@ -18,12 +23,11 @@ kernel.
   behavior. When Marrow language agents change semantics, adapt the LSP through canonical Marrow
   crate APIs rather than reimplementing behavior in the LSP repo.
 - Treat the live `/Users/scottwilliams/Dev/marrow` checkout as read-only for LSP lanes. If an
-  editor feature needs new language facts or checker APIs, open a separate Marrow worktree and
-  branch, propose semantics or docs first when language behavior is involved, run Marrow's gates and
-  reviews there, integrate that Marrow change, then rebase the LSP lane onto the integrated API.
-- Prefer upstream Marrow APIs for missing facts. Add small, opt-in APIs in `marrow-check`,
-  `marrow-schema`, or `marrow-syntax` only through that separate Marrow lane when editor features
-  need semantic facts the canonical crates already know internally.
+  editor feature needs new language facts or checker APIs, stop the LSP lane and record a
+  `blocked-on-marrow` handoff for the Marrow project lead.
+- Prefer upstream Marrow APIs for missing facts. The Marrow project lead owns any needed
+  `marrow-check`, `marrow-schema`, or `marrow-syntax` API lane; the LSP orchestrator adapts after
+  that upstream API is integrated.
 - Every behavior lane starts with failing tests, then minimal implementation, then refactor under
   green.
 - Every lane gets at least two read-only reviews before integration: one soundness review that tries
