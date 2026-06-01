@@ -224,10 +224,7 @@ fn callee_root_before(tokens: &[Token], open: usize) -> Option<usize> {
         return None;
     }
     let mut root = i;
-    loop {
-        let Some(double_colon) = i.checked_sub(1) else {
-            break;
-        };
+    while let Some(double_colon) = i.checked_sub(1) {
         if tokens[double_colon].kind != TokenKind::DoubleColon {
             break;
         }

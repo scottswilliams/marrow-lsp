@@ -670,7 +670,7 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
     if bytes.is_empty() {
         return Some(Vec::new());
     }
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let value = |byte: u8| -> Option<u8> {
