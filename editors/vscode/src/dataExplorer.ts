@@ -109,11 +109,14 @@ function keyLabel(key: Key): string {
   return key.bytes;
 }
 
-// Map a server Child plus its parent path to a concrete tree node. Schema-aware
-// servers tell us the exact segment to append; raw/older servers fall back to
-// the original key-or-field behavior.
-function childToNode(parentPath: Segment[], child: Child): StoreNode {
-  const appendSegment = child.appendSegment ?? fallbackSegment(parentPath, child);
+// Map a server Child plus its parent path to a concrete tree node. The server
+// owns saved path semantics, so a child without a canonical append segment is
+// rendered as an inert placeholder instead of guessing a path.
+function childToNode(parentPath: Segment[], child: Child): MarrowDataNode {
+  const appendSegment = child.appendSegment;
+  if (appendSegment === undefined) {
+    return unavailablePathMetadataNode();
+  }
   if (child.kind === "key") {
     return {
       kind: "store",
@@ -132,22 +135,6 @@ function childToNode(parentPath: Segment[], child: Child): StoreNode {
     detail: child.detail,
     type: child.type,
   };
-}
-
-function fallbackSegment(parentPath: Segment[], child: Child): Segment {
-  if (child.kind === "key") {
-    if (pathContainsNamedSegment(parentPath)) {
-      return { index_key: child.key };
-    }
-    return { key: child.key };
-  }
-  return { field: child.name };
-}
-
-function pathContainsNamedSegment(path: Segment[]): boolean {
-  return path.some(
-    (segment) => "field" in segment || "layer" in segment || "index" in segment,
-  );
 }
 
 export class MarrowDataProvider implements vscode.TreeDataProvider<MarrowDataNode> {
@@ -281,6 +268,10 @@ export class MarrowDataProvider implements vscode.TreeDataProvider<MarrowDataNod
 
 function unavailableNode(): PlaceholderNode {
   return { kind: "unavailable", label: "store unavailable" };
+}
+
+function unavailablePathMetadataNode(): PlaceholderNode {
+  return { kind: "unavailable", label: "path metadata unavailable" };
 }
 
 // Build the inline description from a savedGet result: the value, with the type
