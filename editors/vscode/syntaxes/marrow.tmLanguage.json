@@ -6,7 +6,6 @@
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#saved-sigil" },
-    { "include": "#stable-id" },
     { "include": "#module-path" },
     { "include": "#use-path" },
     { "include": "#declaration-names" },
@@ -120,13 +119,6 @@
       "captures": {
         "1": { "name": "keyword.operator.saved.sigil.marrow" },
         "2": { "name": "variable.other.saved.marrow" }
-      }
-    },
-    "stable-id": {
-      "name": "meta.annotation.id.marrow",
-      "match": "(@id)\\b",
-      "captures": {
-        "1": { "name": "storage.modifier.annotation.marrow" }
       }
     },
     "module-path": {

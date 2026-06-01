@@ -44,6 +44,12 @@ const declarationKeyword = keywordPattern("keyword.declaration.marrow");
 assertPatternMatches(declarationKeyword, "enum", "enum declaration keyword");
 
 const topIncludes = grammar.patterns.map((pattern) => pattern.include);
+const sourceIdentityAnnotationRule = "stable-id";
+const sourceIdentityAnnotationHooks = [
+  ...topIncludes.filter((include) => include === `#${sourceIdentityAnnotationRule}`),
+  ...Object.keys(repo).filter((key) => key === sourceIdentityAnnotationRule),
+];
+assert.deepEqual(sourceIdentityAnnotationHooks, [], "source identity annotation grammar hooks are absent");
 assert.ok(
   topIncludes.indexOf("#comments") < topIncludes.indexOf("#declaration-names") &&
     topIncludes.indexOf("#strings") < topIncludes.indexOf("#declaration-names"),
