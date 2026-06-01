@@ -35,9 +35,7 @@ const KEYWORDS: &[&str] = &[
     "continue",
     "return",
     "delete",
-    "merge",
     "transaction",
-    "lock",
     "try",
     "catch",
     "finally",
@@ -1036,6 +1034,28 @@ pub fn run(count: int): int
         assert!(
             labels.contains(&"exists".to_string()),
             "a builtin, got {labels:?}"
+        );
+    }
+
+    #[test]
+    fn bare_identifier_lists_v01_keywords_without_prototype_reserved_words() {
+        let (program, file) = project();
+        let labels = complete(&program, &file, "module shelf::app\n\npub fn f()\n    |\n");
+
+        for keyword in ["return", "transaction", "throw", "try"] {
+            assert!(
+                labels.contains(&keyword.to_string()),
+                "a v0.1 keyword {keyword:?}, got {labels:?}"
+            );
+        }
+
+        let prototype_reserved: Vec<&str> = ["merge", "lock"]
+            .into_iter()
+            .filter(|keyword| labels.contains(&keyword.to_string()))
+            .collect();
+        assert!(
+            prototype_reserved.is_empty(),
+            "prototype-only reserved words should not be bare completions, got {prototype_reserved:?} in {labels:?}"
         );
     }
 
