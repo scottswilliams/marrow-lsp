@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use marrow_lsp_core::mcp::{self, RunMode};
+use marrow_lsp_core::mcp::{self, RunArgsPolicy, RunMode};
 use serde_json::{Value as Json, json};
 
 /// The MCP protocol version this server speaks, echoed in the `initialize` reply.
@@ -149,13 +149,14 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\") with positional scalar `args`. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
+            "description": "Debug/admin prototype for execution/args: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\"). Non-empty `args` are blocked by default until Marrow exposes typed run argument facts; set `allowPrototypeArgs: true` only to use the debug/admin prototype scalar decoder. `args` are not a stable typed production API. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
                     "entry": string_prop("The function to run as `module::fn` (run mode)."),
-                    "args": { "type": "array", "description": "Positional scalar arguments (int, bool, string) for the entry (run mode)." },
+                    "args": { "type": "array", "description": "Debug/admin prototype positional scalar arguments for run mode; non-empty args require `allowPrototypeArgs: true` and are not a stable typed production API." },
+                    "allowPrototypeArgs": { "type": "boolean", "description": "Set true to enable the debug/admin prototype scalar decoder for non-empty `args`; omit for the stable default." },
                     "mode": { "type": "string", "enum": ["run", "test"], "description": "`run` (default) executes `entry`; `test` runs the project's tests." },
                 },
                 "required": ["file"],
@@ -228,7 +229,12 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
                     return Err(format!("unknown run mode `{other}`; use `run` or `test`"));
                 }
             };
-            Ok(mcp::run(&file, entry, &args, mode))
+            let args_policy = if optional_bool(arguments, "allowPrototypeArgs").unwrap_or(false) {
+                RunArgsPolicy::AllowPrototypeScalars
+            } else {
+                RunArgsPolicy::StableTypedFactsOnly
+            };
+            Ok(mcp::run(&file, entry, &args, mode, args_policy))
         }
         other => Err(format!("unknown tool `{other}`")),
     }
@@ -245,6 +251,11 @@ fn required_str<'a>(arguments: &'a Json, key: &str) -> Result<&'a str, String> {
 /// An optional string argument, or `None` when absent or not a string.
 fn optional_str<'a>(arguments: &'a Json, key: &str) -> Option<&'a str> {
     arguments.get(key).and_then(Json::as_str)
+}
+
+/// An optional boolean argument, or `None` when absent or not a boolean.
+fn optional_bool(arguments: &Json, key: &str) -> Option<bool> {
+    arguments.get(key).and_then(Json::as_bool)
 }
 
 /// A required path argument as a `PathBuf`.
@@ -362,6 +373,47 @@ mod tests {
     }
 
     #[test]
+    fn catalog_marks_mw_run_args_as_a_prototype_opt_in() {
+        let tools = tools();
+        let tools = tools.as_array().unwrap();
+        let run_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "mw_run")
+            .expect("mw_run tool");
+
+        let description = run_tool["description"].as_str().unwrap();
+        let lower = description.to_ascii_lowercase();
+        assert!(
+            lower.contains("debug/admin prototype"),
+            "mw_run must advertise its prototype execution contract: {description}"
+        );
+        assert!(
+            lower.contains("allowprototypeargs"),
+            "mw_run must name the explicit prototype arg opt-in: {description}"
+        );
+        assert!(
+            lower.contains("typed run argument facts"),
+            "mw_run must point argument decoding back to Marrow facts: {description}"
+        );
+
+        let properties = &run_tool["inputSchema"]["properties"];
+        assert!(
+            properties.get("allowPrototypeArgs").is_some(),
+            "mw_run schema must expose the explicit prototype arg opt-in: {properties}"
+        );
+        let args_description = properties["args"]["description"].as_str().unwrap();
+        let lower = args_description.to_ascii_lowercase();
+        assert!(
+            lower.contains("debug/admin prototype"),
+            "mw_run.args must not look like a stable argument protocol: {args_description}"
+        );
+        assert!(
+            lower.contains("not a stable typed production api"),
+            "mw_run.args must not claim production typing: {args_description}"
+        );
+    }
+
+    #[test]
     fn an_unknown_tool_is_an_error() {
         let policy = Policy { allow_data: false };
         assert!(call("mw_nope", &json!({}), policy).is_err());
@@ -388,6 +440,51 @@ mod tests {
     fn a_missing_required_argument_is_an_error() {
         let policy = Policy { allow_data: false };
         assert!(call("mw_type_at", &json!({ "file": "/x.mw", "line": 0 }), policy).is_err());
+    }
+
+    #[test]
+    fn mw_run_blocks_non_empty_args_without_prototype_opt_in() {
+        let policy = Policy { allow_data: false };
+        let result = call(
+            "mw_run",
+            &json!({
+                "file": "/nope/project/src/main.mw",
+                "entry": "app::main",
+                "args": [1],
+            }),
+            policy,
+        )
+        .unwrap();
+        let message = result["diagnostics"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("typed run argument facts from Marrow"),
+            "mw_run args must be blocked before project loading without the prototype opt-in: {result}"
+        );
+    }
+
+    #[test]
+    fn mw_run_allows_non_empty_args_with_prototype_opt_in() {
+        let policy = Policy { allow_data: false };
+        let result = call(
+            "mw_run",
+            &json!({
+                "file": "/nope/project/src/main.mw",
+                "entry": "app::main",
+                "args": [1],
+                "allowPrototypeArgs": true,
+            }),
+            policy,
+        )
+        .unwrap();
+        let message = result["diagnostics"][0]["message"].as_str().unwrap();
+        assert!(
+            !message.contains("typed run argument facts from Marrow"),
+            "the explicit prototype opt-in should let core reach normal project loading: {result}"
+        );
+        assert!(
+            message.contains("no marrow.json"),
+            "the nonexistent project should fail after the args gate: {result}"
+        );
     }
 
     #[test]

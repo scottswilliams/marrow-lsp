@@ -429,13 +429,25 @@ pub enum RunMode {
     Test,
 }
 
+/// Whether `mw_run` may decode positional JSON arguments with the debug/admin
+/// scalar prototype.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunArgsPolicy {
+    /// Reject non-empty run args until Marrow exposes typed run argument facts.
+    StableTypedFactsOnly,
+    /// Preserve the temporary scalar decoder behind an explicit opt-in.
+    AllowPrototypeScalars,
+}
+
 /// `mw_run`: execute Marrow to confirm behavior — always sandboxed.
 ///
 /// **Run mode** checks the project (`analyze_project` via the workspace), then
 /// evaluates `entry` (`"module::fn"`) over a *fresh* [`MemStore`] under a
 /// locked-down [`Host`]: a fixed clock and a captured log only — no filesystem, no
-/// environment, no maintenance. `args` are positional scalars. The result carries
-/// the returned `value`, the captured `output`, and any check `diagnostics`.
+/// environment, no maintenance. Non-empty `args` are blocked unless
+/// [`RunArgsPolicy::AllowPrototypeScalars`] is set, because Marrow does not yet
+/// expose stable typed run argument facts. The result carries the returned
+/// `value`, the captured `output`, and any check `diagnostics`.
 ///
 /// **Test mode** runs `check_tests` then, for every public zero-parameter test
 /// function, runs it over its *own* fresh [`MemStore`] under the same locked host,
@@ -443,7 +455,20 @@ pub enum RunMode {
 ///
 /// The project's real store is never opened in either mode, so an agent can run
 /// code with no risk to managed data.
-pub fn run(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
+pub fn run(
+    file: &Path,
+    entry: Option<&str>,
+    args: &[Json],
+    mode: RunMode,
+    args_policy: RunArgsPolicy,
+) -> Json {
+    if matches!(mode, RunMode::Run)
+        && !args.is_empty()
+        && args_policy == RunArgsPolicy::StableTypedFactsOnly
+    {
+        return prototype_args_refusal();
+    }
+
     let (workspace, root, config) = match load_project_for_run(file) {
         Ok(loaded) => loaded,
         Err(error) => return json!({ "diagnostics": [{ "message": error }], "output": "" }),
@@ -475,6 +500,16 @@ pub fn run(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Js
         RunMode::Run => run_entry(&snapshot.program, entry, args),
         RunMode::Test => run_tests(&root, &config, &snapshot.program),
     }
+}
+
+fn prototype_args_refusal() -> Json {
+    json!({
+        "diagnostics": [{
+            "code": "mcp.run.prototype_args",
+            "message": "mw_run args are blocked until typed run argument facts from Marrow are available; pass allowPrototypeArgs: true only for the debug/admin prototype scalar decoder"
+        }],
+        "output": "",
+    })
 }
 
 /// Load `file`'s project for a run: the checked workspace, the project root, and the
@@ -896,9 +931,27 @@ pub fn shout()
             Some("shelf::books::double"),
             &[json!(21)],
             RunMode::Run,
+            RunArgsPolicy::AllowPrototypeScalars,
         );
         assert_eq!(result["value"], 42, "double(21) == 42: {result}");
         assert_eq!(result["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn run_blocks_non_empty_args_without_prototype_policy_before_loading() {
+        let result = run(
+            Path::new("/nope/project/src/main.mw"),
+            Some("app::main"),
+            &[json!(1)],
+            RunMode::Run,
+            RunArgsPolicy::StableTypedFactsOnly,
+        );
+        let message = result["diagnostics"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("typed run argument facts from Marrow"),
+            "non-empty run args should be blocked before project loading: {result}"
+        );
+        assert_eq!(result["output"], "");
     }
 
     #[test]
@@ -912,7 +965,13 @@ pub fn shout()
     #[test]
     fn run_captures_print_output() {
         let (_dir, file) = project();
-        let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
+        let result = run(
+            &file,
+            Some("shelf::books::shout"),
+            &[],
+            RunMode::Run,
+            RunArgsPolicy::StableTypedFactsOnly,
+        );
         assert!(
             result["output"].as_str().unwrap().contains("loud"),
             "print output should be captured, got {result}"
@@ -925,7 +984,13 @@ pub fn shout()
             .join("../../fixtures/shelf/src/shelf/sample.mw")
             .canonicalize()
             .expect("the shelf fixture exists");
-        let result = run(&file, Some("shelf::sample::main"), &[], RunMode::Run);
+        let result = run(
+            &file,
+            Some("shelf::sample::main"),
+            &[],
+            RunMode::Run,
+            RunArgsPolicy::StableTypedFactsOnly,
+        );
         assert_eq!(result["diagnostics"], json!([]), "{result}");
         assert!(
             result["output"].as_str().unwrap().contains("Small Gods"),
@@ -949,6 +1014,7 @@ pub fn shout()
             Some("shelf::books::greet"),
             &[json!("Ada")],
             RunMode::Run,
+            RunArgsPolicy::AllowPrototypeScalars,
         );
         assert_eq!(result["value"], "hi Ada", "{result}");
     }
@@ -963,6 +1029,7 @@ pub fn shout()
             Some("shelf::books::double"),
             &[json!(1)],
             RunMode::Run,
+            RunArgsPolicy::AllowPrototypeScalars,
         );
         let store_file = dir.path().join("data").join("marrow.redb");
         assert!(
@@ -989,7 +1056,13 @@ pub fn fails()
 ",
         )
         .unwrap();
-        let result = run(&file, None, &[], RunMode::Test);
+        let result = run(
+            &file,
+            None,
+            &[],
+            RunMode::Test,
+            RunArgsPolicy::StableTypedFactsOnly,
+        );
         let tests = result["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 2, "two test functions discovered: {result}");
         let doubles = tests
@@ -1004,6 +1077,23 @@ pub fn fails()
         assert_eq!(
             fails["outcome"], "failed",
             "an assertion failure is a failed test: {fails}"
+        );
+    }
+
+    #[test]
+    fn run_test_mode_ignores_args_without_prototype_policy() {
+        let (_dir, file) = project();
+        let result = run(
+            &file,
+            None,
+            &[json!(1)],
+            RunMode::Test,
+            RunArgsPolicy::StableTypedFactsOnly,
+        );
+        assert_eq!(result["diagnostics"], json!([]), "{result}");
+        assert!(
+            result["tests"].as_array().is_some(),
+            "test mode should remain on the test path even when args are present: {result}"
         );
     }
 

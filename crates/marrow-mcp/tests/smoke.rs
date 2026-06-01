@@ -302,7 +302,7 @@ fn mw_run_executes_over_a_sandboxed_store() {
             "method": "tools/call",
             "params": {
                 "name": "mw_run",
-                "arguments": { "file": file.to_string_lossy(), "entry": "shelf::books::double", "args": [21] }
+                "arguments": { "file": file.to_string_lossy(), "entry": "shelf::books::double", "args": [21], "allowPrototypeArgs": true }
             }
         }),
     );
