@@ -133,7 +133,8 @@ or Python tooling: kind, signature/type, docs, and relevant storage context.
 Expected outcomes:
 
 - Function hover shows signature, parameter names and modes, parameter docs when available, return
-  type, effect/storage summary, and `;;` docs.
+  type, direct checked effect summary, storage/runtime context only where canonical facts exist, and
+  `;;` docs.
 - Resource hover shows resource name, saved root, identity key names and types, concise member
   summary, docs, and a bounded note when the resource tree is large.
 - Resource root hover works on both `^root` sigil/name and root uses.
