@@ -253,12 +253,7 @@ pub fn saved_children_with_schema(
                 available: true,
                 children: entries
                     .iter()
-                    .map(|child| {
-                        child_json_with_metadata(
-                            child,
-                            child_metadata_with_path_fallback(&context, &path, child),
-                        )
-                    })
+                    .map(|child| child_json_with_metadata(child, child_metadata(&context, child)))
                     .collect(),
                 more,
             }
@@ -384,10 +379,6 @@ fn schema_context<'a>(program: &'a CheckedProgram, path: &[PathSegment]) -> Sche
         };
     }
     member_context(&resource.members, members)
-}
-
-fn path_contains_named_segment(path: &[PathSegment]) -> bool {
-    path.iter().any(|segment| segment_name(segment).is_some())
 }
 
 fn named_branch(segments: &[PathSegment]) -> Option<(&str, usize)> {
@@ -525,21 +516,6 @@ fn child_metadata(context: &SchemaContext<'_>, child: &ChildSegment) -> ChildMet
             .unwrap_or_default(),
         _ => ChildMetadata::default(),
     }
-}
-
-fn child_metadata_with_path_fallback(
-    context: &SchemaContext<'_>,
-    parent_path: &[PathSegment],
-    child: &ChildSegment,
-) -> ChildMetadata {
-    let mut metadata = child_metadata(context, child);
-    if metadata.append_segment.is_none()
-        && path_contains_named_segment(parent_path)
-        && let ChildSegment::Key(key) = child
-    {
-        metadata.append_segment = Some(SegmentJson::IndexKey(KeyJson::from_key(key)));
-    }
-    metadata
 }
 
 fn key_metadata(role: &str, key: &KeyDef, append_segment: SegmentJson) -> ChildMetadata {
@@ -889,6 +865,16 @@ resource Edition at ^editions(isbn: string, locale: string)
                 b"Mort".to_vec(),
             )
             .unwrap();
+        store
+            .write(
+                &encode_path(&[
+                    PathSegment::Root("orphans".to_string()),
+                    PathSegment::RecordKey(SavedKey::Int(0)),
+                    PathSegment::Field("note".to_string()),
+                ]),
+                b"schema orphan".to_vec(),
+            )
+            .unwrap();
     }
 
     fn assert_child_json(children: &[ChildJson], expected: serde_json::Value) {
@@ -911,7 +897,7 @@ resource Edition at ^editions(isbn: string, locale: string)
         assert_eq!(
             actual,
             serde_json::json!({ "kind": kind, "name": name }),
-            "orphan/foreign children stay plain and navigable by fallback"
+            "orphan/foreign children stay plain when schema metadata is unavailable"
         );
     }
 
@@ -1142,7 +1128,7 @@ resource Edition at ^editions(isbn: string, locale: string)
     }
 
     #[test]
-    fn orphan_keyed_branches_get_index_key_append_segments_from_schema_path_context() {
+    fn keyed_children_without_schema_context_do_not_get_append_segments() {
         let fixture = schema_fixture(schema_children_source());
         seed_schema_children_store(&fixture.store_path);
         let reader = StoreReader::for_project(&fixture.project).unwrap();
@@ -1164,8 +1150,7 @@ resource Edition at ^editions(isbn: string, locale: string)
             &schema.children,
             serde_json::json!({
                 "kind": "key",
-                "key": { "int": 0 },
-                "appendSegment": { "index_key": { "int": 0 } }
+                "key": { "int": 0 }
             }),
         );
 
@@ -1186,8 +1171,7 @@ resource Edition at ^editions(isbn: string, locale: string)
             &schema.children,
             serde_json::json!({
                 "kind": "key",
-                "key": { "int": 0 },
-                "appendSegment": { "index_key": { "int": 0 } }
+                "key": { "int": 0 }
             }),
         );
 
@@ -1208,8 +1192,23 @@ resource Edition at ^editions(isbn: string, locale: string)
             &schema.children,
             serde_json::json!({
                 "kind": "key",
-                "key": { "int": 0 },
-                "appendSegment": { "index_key": { "int": 0 } }
+                "key": { "int": 0 }
+            }),
+        );
+
+        let schema = saved_children_with_schema(
+            SavedChildrenParams {
+                path: vec![SegmentJson::Root("orphans".to_string())],
+            },
+            &fixture.program,
+            Some(&reader),
+        );
+        assert!(schema.available, "{schema:?}");
+        assert_child_json(
+            &schema.children,
+            serde_json::json!({
+                "kind": "key",
+                "key": { "int": 0 }
             }),
         );
 
