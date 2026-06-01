@@ -103,7 +103,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "List the project's durable saved root names from its real store. Requires data access to be enabled at launch; otherwise returns a refusal envelope and reads nothing.",
+            "description": "Debug/admin prototype: list raw saved-data root names from the project's real store. Requires data access to be enabled at launch; otherwise returns a refusal envelope and reads nothing. This is not a stable typed production API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -114,24 +114,24 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_get",
-            "description": "Read the presence and schema-typed value at a saved `path` from the project's real store. Gated behind data access. The path is an array of segments: {root}/{key}/{field}/{layer}/{index}/{index_key}; a key is {int}/{str}/{bool}/{date}/{duration}/{instant}/{bytes}.",
+            "description": "Debug/admin prototype: read raw saved-data presence/value at a saved `path` from the project's real store. Gated behind data access. The path is a raw segment array: {root}/{key}/{field}/{layer}/{index}/{index_key}; a key is {int}/{str}/{bool}/{date}/{duration}/{instant}/{bytes}. This is not a stable typed production API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "path": { "type": "array", "description": "Saved-path segments, root-first." },
+                    "path": { "type": "array", "description": "Debug/admin prototype raw saved-data path segments, root-first; not a stable typed production API." },
                 },
                 "required": ["file", "path"],
             },
         },
         {
             "name": "mw_saved_children",
-            "description": "List the immediate children of a saved `path` from the project's real store, capped. Gated behind data access. Same path encoding as mw_saved_get.",
+            "description": "Debug/admin prototype: list the immediate raw saved-data children of a saved `path` from the project's real store, capped. Gated behind data access. Same raw path encoding as mw_saved_get. This is not a stable typed production API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "path": { "type": "array", "description": "Saved-path segments, root-first; empty array lists the roots' level." },
+                    "path": { "type": "array", "description": "Debug/admin prototype raw saved-data path segments, root-first; empty array lists the roots' level; not a stable typed production API." },
                 },
                 "required": ["file", "path"],
             },
@@ -301,6 +301,62 @@ mod tests {
                 tool["inputSchema"]["type"], "object",
                 "tool {} needs an object schema",
                 tool["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_marks_saved_data_tools_as_debug_admin_prototypes() {
+        let tools = tools();
+        let tools = tools.as_array().unwrap();
+        let saved_tool = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing saved-data tool {name}"))
+        };
+
+        for name in ["mw_saved_roots", "mw_saved_get", "mw_saved_children"] {
+            let description = saved_tool(name)["description"].as_str().unwrap();
+            let lower = description.to_ascii_lowercase();
+            assert!(
+                lower.contains("debug/admin prototype"),
+                "{name} must advertise the debug/admin prototype contract: {description}"
+            );
+            assert!(
+                lower.contains("raw saved-data"),
+                "{name} must advertise raw saved-data access: {description}"
+            );
+            assert!(
+                lower.contains("not a stable typed production api"),
+                "{name} must not present a stable typed production API: {description}"
+            );
+            assert!(
+                !lower.contains("schema-typed"),
+                "{name} must not claim schema-typed saved-data semantics: {description}"
+            );
+        }
+
+        for name in ["mw_saved_get", "mw_saved_children"] {
+            let description = saved_tool(name)["inputSchema"]["properties"]["path"]["description"]
+                .as_str()
+                .unwrap();
+            let lower = description.to_ascii_lowercase();
+            assert!(
+                lower.contains("debug/admin prototype"),
+                "{name}.path must advertise the debug/admin prototype contract: {description}"
+            );
+            assert!(
+                lower.contains("raw saved-data"),
+                "{name}.path must advertise raw saved-data path segments: {description}"
+            );
+            assert!(
+                lower.contains("not a stable typed production api"),
+                "{name}.path must not present a stable typed production API: {description}"
+            );
+            assert!(
+                !lower.contains("schema-typed"),
+                "{name}.path must not claim schema-typed path semantics: {description}"
             );
         }
     }
