@@ -57,18 +57,11 @@ pub fn addTag(id: Book::Id, tag: string): int
 
     return append(^books(id).tags, tag)
 
-pub fn copyTags(from: Book::Id, to: Book::Id): bool
-    if not exists(^books(from)) or not exists(^books(to))
-        return false
-
-    merge ^books(to).tags = ^books(from).tags
-    return true
-
 pub fn remove(id: Book::Id)
     delete ^books(id)
 
 pub fn printShelf(shelf: string)
-    for id in keys(^books.byShelf(shelf))
+    for id in ^books.byShelf(shelf).take(50)
         print($"{id}: {^books(id).title}")
 
 pub fn main()

@@ -130,6 +130,58 @@ fn initialize_then_open_erroring_buffer_publishes_a_diagnostic() {
 }
 
 #[test]
+fn opening_shelf_fixture_publishes_no_diagnostics() {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let text = std::fs::read_to_string(&file).unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": text }
+            }
+        }),
+    );
+
+    let diagnostics = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+    assert_eq!(
+        diagnostics["params"]["diagnostics"],
+        json!([]),
+        "the checked shelf fixture should publish no diagnostics"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
 fn signature_help_returns_null_without_a_checked_program() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("scratch.mw");
