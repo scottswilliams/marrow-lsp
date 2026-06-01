@@ -214,11 +214,26 @@
               },
               "args": {
                 "type": "array",
-                "description": "Arguments passed to the Marrow entry.",
+                "description": "Prototype launch arguments for the Marrow entry. Non-empty values are blocked by default until Marrow exposes typed launch argument facts; set allowPrototypeArgs to use the debug/admin scalar decoder.",
                 "items": {
-                  "type": "string"
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
                 },
                 "default": []
+              },
+              "allowPrototypeArgs": {
+                "type": "boolean",
+                "description": "Allow scalar launch args through the debug/admin prototype decoder. This is blocked on typed launch argument facts from Marrow.",
+                "default": false
               },
               "stopOnEntry": {
                 "type": "boolean",
@@ -240,6 +255,7 @@
             "name": "Debug Marrow entry",
             "project": "${workspaceFolder}",
             "args": [],
+            "allowPrototypeArgs": false,
             "stopOnEntry": false,
             "allowRawDataInspection": false
           }
@@ -255,6 +271,7 @@
               "project": "^\"\\${workspaceFolder}\"",
               "entry": "^\"module::function\"",
               "args": [],
+              "allowPrototypeArgs": false,
               "stopOnEntry": false,
               "allowRawDataInspection": false
             }

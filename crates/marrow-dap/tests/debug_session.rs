@@ -136,6 +136,117 @@ fn write_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
+/// Write a fixture whose entry consumes one scalar launch argument, so the
+/// prototype decoder path has to thread the value into the real run.
+fn write_arg_fixture(dir: &Path) {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  pub fn main(title: string)\n\
+                  \x20   print(title)\n";
+    std::fs::write(src.join("shelf.mw"), source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn launch_blocks_non_empty_args_by_default_until_typed_facts_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    write_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "args": ["Dune"],
+        }),
+    );
+    let blocked = client.response_for(launch);
+    assert_eq!(blocked["success"], false, "{blocked}");
+    let message = blocked["message"].as_str().unwrap();
+    assert!(
+        message.contains("blocked-on-marrow"),
+        "non-empty args rejection should name the Marrow blocker: {blocked}"
+    );
+    assert!(
+        message.contains("typed launch argument decoding facts"),
+        "non-empty args rejection should name the missing facts: {blocked}"
+    );
+}
+
+#[test]
+fn launch_rejects_non_array_args_as_protocol_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "args": "Dune",
+        }),
+    );
+    let rejected = client.response_for(launch);
+    assert_eq!(rejected["success"], false, "{rejected}");
+    let message = rejected["message"].as_str().unwrap();
+    assert!(
+        message.contains("`args` must be an array"),
+        "non-array args should fail protocol validation: {rejected}"
+    );
+    assert!(
+        !message.contains("blocked-on-marrow"),
+        "non-array args should not be reported as a semantic blocker: {rejected}"
+    );
+}
+
+#[test]
+fn launch_allows_prototype_args_only_with_explicit_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    write_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "args": ["Dune"],
+            "allowPrototypeArgs": true,
+        }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+
+    let output = client.event("output");
+    assert!(
+        output["body"]["output"].as_str().unwrap().contains("Dune"),
+        "{output}"
+    );
+    client.event("terminated");
+}
+
 #[test]
 fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
     let dir = tempfile::tempdir().unwrap();

@@ -34,6 +34,8 @@ const FIRST_DYNAMIC_REF: i64 = 1000;
 const THREAD_ID: i64 = 1;
 const RAW_DATA_INSPECTION_BLOCKED: &str = "blocked-on-marrow: raw durable-data inspection needs typed durable watch/path facts from Marrow";
 const EXPRESSION_EVALUATE_BLOCKED: &str = "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow";
+const PROTOTYPE_ARGS_BLOCKED: &str =
+    "blocked-on-marrow: DAP launch args need typed launch argument decoding facts from Marrow";
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread: a
 /// local value is expanded in memory, a durable path is read from the live store.
@@ -219,7 +221,11 @@ impl<W: Write> Session<W> {
             .get("entry")
             .and_then(Json::as_str)
             .map(str::to_string);
-        let args = match parse_args(arguments.get("args")) {
+        let allow_prototype_args = arguments
+            .get("allowPrototypeArgs")
+            .and_then(Json::as_bool)
+            .unwrap_or(false);
+        let args = match parse_args(arguments.get("args"), allow_prototype_args) {
             Ok(args) => args,
             Err(message) => {
                 self.respond(request, false, json!(message));
@@ -761,16 +767,21 @@ fn variable_json(name: &str, value: &str, reference: i64) -> Json {
     })
 }
 
-/// Parse the optional launch `args` array into scalar runtime values. Only
-/// scalars are accepted (the entry's parameters are scalars); a non-scalar is a
-/// launch error.
-fn parse_args(args: Option<&Json>) -> Result<Vec<marrow_run::Value>, String> {
+/// Parse the optional launch `args` array into scalar runtime values when the
+/// debug/admin prototype path is explicitly enabled.
+fn parse_args(
+    args: Option<&Json>,
+    allow_prototype_args: bool,
+) -> Result<Vec<marrow_run::Value>, String> {
     let Some(array) = args else {
         return Ok(Vec::new());
     };
     let Some(items) = array.as_array() else {
         return Err("`args` must be an array of scalars".to_string());
     };
+    if !items.is_empty() && !allow_prototype_args {
+        return Err(PROTOTYPE_ARGS_BLOCKED.to_string());
+    }
     items.iter().map(scalar_arg).collect()
 }
 
