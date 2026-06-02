@@ -3,9 +3,9 @@
 //! Most navigation reads the checker's [`BindingIndex`](marrow_check::BindingIndex)
 //! — the one resolution layer that maps every identifier use to the definition it
 //! names, respecting lexical scope, `use` aliases, and the saved-data schema.
-//! Go-to-definition also has small syntax-backed fallbacks for saved roots and
-//! module path prefixes, since those name durable data or namespaces rather than
-//! checker symbols. References and rename stay binding-index driven, and rename
+//! Go-to-definition also has a small syntax-backed fallback for module path
+//! prefixes, since those name namespaces rather than checker symbols. References
+//! and rename stay binding-index driven, and rename
 //! applies the index's safety classification so a rename that would orphan stored
 //! data is refused rather than performed.
 //!
@@ -116,13 +116,16 @@ pub fn definition(
     file: &Path,
     offset: usize,
 ) -> Option<Location> {
-    if let Some(location) = saved_root_definition(snapshot, indices, file, offset) {
-        return Some(location);
-    }
     match module_path_definition(snapshot, index, indices, file, offset) {
         Some(ModulePathDefinition::Location(location)) => return Some(location),
         Some(ModulePathDefinition::NoDefinition) => return None,
         None => {}
+    }
+    // The current binding index can associate `^root` syntax with a resource
+    // identity. Go-to-definition for saved roots needs its own checked fact, so
+    // this path stays quiet until Marrow exposes one.
+    if saved_root_syntax_at(snapshot, file, offset) {
+        return None;
     }
     let symbol = index.definition(file, offset)?;
     symbol_location(&symbol, indices)
@@ -248,64 +251,24 @@ fn symbol_location(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<Locat
     Some(Location { uri: url, range })
 }
 
-fn saved_root_definition(
+fn saved_root_syntax_at(
     snapshot: &marrow_check::AnalysisSnapshot,
-    indices: &impl FileIndex,
     file: &Path,
     offset: usize,
-) -> Option<Location> {
-    let analyzed = snapshot
-        .files
-        .iter()
-        .find(|analyzed| analyzed.path == file)?;
-    let root = saved_root_at(&analyzed.source, offset)?;
-    let (declaration_file, start, end) = saved_root_declaration(snapshot, &root)?;
-    let line_index = indices.index_for(declaration_file)?;
-    let url = Url::from_file_path(declaration_file).ok()?;
-    Some(Location {
-        uri: url,
-        range: line_index.range(start, end),
-    })
-}
-
-fn saved_root_at(source: &str, offset: usize) -> Option<String> {
-    let tokens = lex_source(source).tokens;
-    tokens.windows(2).find_map(|pair| {
+) -> bool {
+    let Some(analyzed) = snapshot.files.iter().find(|analyzed| analyzed.path == file) else {
+        return false;
+    };
+    let tokens = lex_source(&analyzed.source).tokens;
+    tokens.windows(2).any(|pair| {
         let [previous, token] = pair else {
-            return None;
+            return false;
         };
-        if previous.kind == TokenKind::Caret
+        previous.kind == TokenKind::Caret
             && token.kind == TokenKind::Identifier
             && previous.span.start_byte <= offset
             && offset <= token.span.end_byte
-        {
-            Some(token.text(source).to_string())
-        } else {
-            None
-        }
     })
-}
-
-fn saved_root_declaration<'a>(
-    snapshot: &'a marrow_check::AnalysisSnapshot,
-    root: &str,
-) -> Option<(&'a Path, usize, usize)> {
-    for analyzed in &snapshot.files {
-        for declaration in &analyzed.parsed.file.declarations {
-            let Declaration::Resource(resource) = declaration else {
-                continue;
-            };
-            let Some(store) = &resource.store else {
-                continue;
-            };
-            if store.root == root {
-                let (start, end) =
-                    saved_root_identifier_span(&analyzed.source, resource.span, root)?;
-                return Some((analyzed.path.as_path(), start, end));
-            }
-        }
-    }
-    None
 }
 
 fn saved_root_identifier_span(
@@ -1166,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn definition_from_saved_root_use_jumps_to_saved_root_declaration() {
+    fn definition_from_saved_root_use_is_blocked_without_canonical_fact() {
         let source = "\
 module a
 
@@ -1180,19 +1143,11 @@ pub fn f(): string
         let index = build_binding_index(&snapshot);
 
         let use_offset = offset_of(source, "return ^books") + "return ^".len();
-        let location = definition(&snapshot, &index, &indices, &file, use_offset)
-            .expect("a saved-root use resolves to its declaration");
-        let line_index = indices.0.get(&file).unwrap();
-
-        assert_eq!(range_text(source, line_index, location.range), "books");
-        let declaration = offset_of(source, "resource Book at ^books") + "resource Book at ^".len();
-        let (line, character) = line_col(source, declaration);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
+        assert!(definition(&snapshot, &index, &indices, &file, use_offset).is_none());
     }
 
     #[test]
-    fn definition_from_saved_root_use_works_on_the_caret() {
+    fn definition_from_saved_root_use_caret_is_blocked_without_canonical_fact() {
         let source = "\
 module a
 
@@ -1206,19 +1161,11 @@ pub fn f(): string
         let index = build_binding_index(&snapshot);
 
         let use_offset = offset_of(source, "return ^books") + "return ".len();
-        let location = definition(&snapshot, &index, &indices, &file, use_offset)
-            .expect("a saved-root caret resolves to its declaration");
-        let line_index = indices.0.get(&file).unwrap();
-
-        assert_eq!(range_text(source, line_index, location.range), "books");
-        let declaration = offset_of(source, "resource Book at ^books") + "resource Book at ^".len();
-        let (line, character) = line_col(source, declaration);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
+        assert!(definition(&snapshot, &index, &indices, &file, use_offset).is_none());
     }
 
     #[test]
-    fn definition_from_saved_root_declaration_selects_root_identifier_not_resource_name() {
+    fn definition_from_saved_root_declaration_is_blocked_without_canonical_fact() {
         let source = "\
 module a
 
@@ -1232,18 +1179,11 @@ pub fn f(): string
         let index = build_binding_index(&snapshot);
 
         let declaration = offset_of(source, "resource Book at ^books") + "resource Book at ^".len();
-        let location = definition(&snapshot, &index, &indices, &file, declaration + 1)
-            .expect("a saved-root declaration resolves to itself");
-        let line_index = indices.0.get(&file).unwrap();
-
-        assert_eq!(range_text(source, line_index, location.range), "books");
-        let (line, character) = line_col(source, declaration);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
+        assert!(definition(&snapshot, &index, &indices, &file, declaration + 1).is_none());
     }
 
     #[test]
-    fn definition_from_saved_root_declaration_works_on_the_caret() {
+    fn definition_from_saved_root_declaration_caret_is_blocked_without_canonical_fact() {
         let source = "\
 module a
 
@@ -1258,15 +1198,7 @@ pub fn f(): string
 
         let declaration_caret =
             offset_of(source, "resource Book at ^books") + "resource Book at ".len();
-        let location = definition(&snapshot, &index, &indices, &file, declaration_caret)
-            .expect("a saved-root declaration caret resolves to itself");
-        let line_index = indices.0.get(&file).unwrap();
-
-        assert_eq!(range_text(source, line_index, location.range), "books");
-        let declaration = declaration_caret + "^".len();
-        let (line, character) = line_col(source, declaration);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
+        assert!(definition(&snapshot, &index, &indices, &file, declaration_caret).is_none());
     }
 
     #[test]
