@@ -23,7 +23,8 @@ Initial release.
 - Presentation-only record-count CodeLens when opt-in live data is enabled.
 - The Marrow Data Explorer view for opt-in debug/admin inspection of the native dev store while
   typed/catalog-bound store facts are pending.
-- F5 debugging via the `marrow-dap` adapter, with statement stepping, breakpoints, and a live
-  `^` durable-data scope.
+- F5 debugging via the `marrow-dap` adapter, with statement stepping and breakpoints. The
+  `module::function` entry string is a useful debug/admin prototype while canonical
+  function-entry facts are pending, not a stable production entry API.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
   debug adapter (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`).

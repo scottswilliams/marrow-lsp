@@ -65,6 +65,7 @@ const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "typed repair or drift facts",
 ];
 const RUN_MISSING_FACTS: &[&str] = &[
+    "canonical function-entry facts",
     "transitive effect facts",
     "durable-scope facts",
     "transaction facts",
@@ -1088,6 +1089,7 @@ pub fn shout()
             "presentation-only",
             "debug/admin prototype",
             &[
+                "canonical function-entry facts",
                 "transitive effect facts",
                 "durable-scope facts",
                 "transaction facts",
@@ -1117,6 +1119,7 @@ pub fn shout()
             "presentation-only",
             "debug/admin prototype",
             &[
+                "canonical function-entry facts",
                 "transitive effect facts",
                 "durable-scope facts",
                 "transaction facts",
@@ -1135,7 +1138,7 @@ pub fn shout()
     }
 
     #[test]
-    fn run_captures_print_output() {
+    fn run_contract_marks_entry_string_as_prototype_without_gating_run() {
         let (_dir, file) = project();
         let result = run(
             &file,
@@ -1144,9 +1147,23 @@ pub fn shout()
             RunMode::Run,
             RunArgsPolicy::StableTypedFactsOnly,
         );
+        assert_eq!(result["diagnostics"], json!([]), "{result}");
         assert!(
             result["output"].as_str().unwrap().contains("loud"),
-            "print output should be captured, got {result}"
+            "a zero-argument explicit entry should still run, got {result}"
+        );
+        assert_contract(
+            &result,
+            "presentation-only",
+            "debug/admin prototype",
+            &[
+                "canonical function-entry facts",
+                "transitive effect facts",
+                "durable-scope facts",
+                "transaction facts",
+                "runtime generation facts",
+                "typed run protocol DTOs",
+            ],
         );
     }
 
@@ -1255,6 +1272,7 @@ pub fn fails()
             "presentation-only",
             "debug/admin prototype",
             &[
+                "canonical function-entry facts",
                 "transitive effect facts",
                 "durable-scope facts",
                 "transaction facts",

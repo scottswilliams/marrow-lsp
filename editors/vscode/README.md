@@ -25,9 +25,11 @@ Rust binaries. No parsing or position math runs in TypeScript.
   dev store when `marrow.liveData` is enabled. It is not a production catalog view yet; rows use
   the current raw saved-data protocol while Marrow's typed store DTOs are still pending.
   Refreshes automatically when `marrow.json` is saved, and on demand from the view title.
-- **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch an
-  entry function, step, set breakpoints, inspect variables, and read a live `^` durable-data
-  scope that surfaces the project's persisted values alongside ordinary locals.
+- **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
+  debug/admin prototype entry string such as `module::function` while Marrow's canonical
+  function-entry facts are pending. F5 remains useful for stepping, breakpoints, and variables;
+  the entry string is not a stable production entry API. The raw `^` durable-data scope is a
+  separate debug/admin data-inspection prototype.
 
 ## Requirements
 

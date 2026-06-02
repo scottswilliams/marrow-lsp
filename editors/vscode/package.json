@@ -210,7 +210,7 @@
               },
               "entry": {
                 "type": "string",
-                "description": "Entry function to debug, such as `module::function`. When omitted, the adapter uses `defaultEntry` from marrow.json."
+                "description": "Debug/admin prototype entry string, such as `module::function`. F5 remains usable for launch and stepping, but this string is not a stable production entry API until Marrow exposes canonical function-entry facts. When omitted, the adapter uses `defaultEntry` from marrow.json."
               },
               "args": {
                 "type": "array",
@@ -263,7 +263,7 @@
         "configurationSnippets": [
           {
             "label": "Marrow: Debug entry",
-            "description": "Debug a Marrow entry function.",
+            "description": "Debug a Marrow entry with the debug/admin prototype entry string while canonical function-entry facts are pending.",
             "body": {
               "type": "marrow",
               "request": "launch",

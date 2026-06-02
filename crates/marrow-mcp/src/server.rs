@@ -149,12 +149,12 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Debug/admin prototype for execution/args: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\"). Non-empty `args` are blocked by default until Marrow exposes typed run argument facts; set `allowPrototypeArgs: true` only to use the debug/admin prototype scalar decoder. `args` are not a stable typed production API. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
+            "description": "Debug/admin prototype for execution, entry strings, and args: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\") as a presentation contract until Marrow exposes canonical function-entry facts; the entry string is not a stable production entry API. Non-empty `args` are blocked by default until Marrow exposes typed run argument facts; set `allowPrototypeArgs: true` only to use the debug/admin prototype scalar decoder. `args` are not a stable typed production API. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "entry": string_prop("The function to run as `module::fn` (run mode)."),
+                    "entry": string_prop("Debug/admin prototype entry string such as `module::fn` (run mode); useful until Marrow exposes canonical function-entry facts, but not a stable production entry API."),
                     "args": { "type": "array", "description": "Debug/admin prototype positional scalar arguments for run mode; non-empty args require `allowPrototypeArgs: true` and are not a stable typed production API." },
                     "allowPrototypeArgs": { "type": "boolean", "description": "Set true to enable the debug/admin prototype scalar decoder for non-empty `args`; omit for the stable default." },
                     "mode": { "type": "string", "enum": ["run", "test"], "description": "`run` (default) executes `entry`; `test` runs the project's tests." },
@@ -510,6 +510,48 @@ mod tests {
         assert!(
             lower.contains("not a stable typed production api"),
             "mw_run.args must not claim production typing: {args_description}"
+        );
+    }
+
+    #[test]
+    fn catalog_marks_mw_run_entry_as_a_debug_admin_prototype() {
+        let tools = tools();
+        let tools = tools.as_array().unwrap();
+        let run_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "mw_run")
+            .expect("mw_run tool");
+
+        let description = run_tool["description"].as_str().unwrap();
+        let lower = description.to_ascii_lowercase();
+        assert!(
+            lower.contains("debug/admin prototype"),
+            "mw_run must advertise debug/admin prototype status: {description}"
+        );
+        assert!(
+            lower.contains("canonical function-entry facts"),
+            "mw_run must point entry strings back to Marrow function-entry facts: {description}"
+        );
+        assert!(
+            lower.contains("not a stable production entry api"),
+            "mw_run must not present entry strings as a stable production API: {description}"
+        );
+
+        let entry_description = run_tool["inputSchema"]["properties"]["entry"]["description"]
+            .as_str()
+            .unwrap();
+        let lower = entry_description.to_ascii_lowercase();
+        assert!(
+            lower.contains("debug/admin prototype"),
+            "mw_run.entry must advertise debug/admin prototype status: {entry_description}"
+        );
+        assert!(
+            lower.contains("canonical function-entry facts"),
+            "mw_run.entry must point entry strings back to Marrow function-entry facts: {entry_description}"
+        );
+        assert!(
+            lower.contains("not a stable production entry api"),
+            "mw_run.entry must not present entry strings as a stable production API: {entry_description}"
         );
     }
 
