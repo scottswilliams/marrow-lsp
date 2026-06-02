@@ -11,8 +11,8 @@ use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedFacts, CheckedFunction, CheckedModule, CheckedParam,
-    DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution, ResolvableKind,
+    AnalysisSnapshot, BindingIndex, CheckedConst, CheckedFacts, CheckedFunction, CheckedModule,
+    CheckedParam, DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution, ResolvableKind,
     SavedPlaceEffect, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
     expand_module_alias, resolve, type_at,
 };
@@ -57,6 +57,9 @@ pub fn hover_with_index(
         return Some(markdown_hover(value));
     }
     if let Some(value) = parameter_hover(snapshot, index, file, offset) {
+        return Some(markdown_hover(value));
+    }
+    if let Some(value) = module_const_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
     if let Some(value) = project_module_hover(snapshot, index, file, offset) {
@@ -604,6 +607,30 @@ fn parameter_use_name<'a>(
     Some(token.text(&analyzed.source))
 }
 
+fn module_const_hover(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<String> {
+    let symbol = index.definition(file, offset)?;
+    if symbol.kind != SymbolKind::ModuleConst || symbol.file != file {
+        return None;
+    }
+
+    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
+    let parsed_const = parsed_const_at(&parsed_file.parsed.file, symbol.span)?;
+    if !offset_is_on_declaration_name(&parsed_file.source, symbol.span, &parsed_const.name, offset)
+    {
+        return None;
+    }
+    let checked_const = checked_const_at(snapshot, &symbol)?;
+
+    let mut value = marrow_code_block(&module_const_signature(checked_const));
+    append_docs(&mut value, join_docs(&parsed_const.docs));
+    Some(value)
+}
+
 fn next_significant_kind(tokens: &[marrow_syntax::Token], index: usize) -> Option<TokenKind> {
     tokens
         .get(index + 1..)?
@@ -1007,6 +1034,33 @@ fn checked_function_at<'a>(
         .find(|function| function.span == symbol.span)
 }
 
+fn parsed_const_at(
+    source: &marrow_syntax::SourceFile,
+    span: SourceSpan,
+) -> Option<&marrow_syntax::ConstDecl> {
+    source
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Const(constant) if constant.span == span => Some(constant),
+            _ => None,
+        })
+}
+
+fn checked_const_at<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    symbol: &SymbolRef,
+) -> Option<&'a CheckedConst> {
+    snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.source_file == symbol.file)?
+        .constants
+        .iter()
+        .find(|constant| constant.span == symbol.span)
+}
+
 fn name_span(name: &str, span: SourceSpan, source: &str) -> Option<(usize, usize)> {
     let lexed = lex_source(source);
     let mut after_fn = false;
@@ -1087,6 +1141,13 @@ fn parameter_signature(param: &CheckedParam) -> String {
         None => "",
     };
     format!("{mode}{}: {}", param.name, render_type(&param.ty))
+}
+
+fn module_const_signature(constant: &CheckedConst) -> String {
+    match &constant.ty {
+        Some(ty) => format!("const {}: {}", constant.name, render_type(ty)),
+        None => format!("const {}", constant.name),
+    }
 }
 
 fn parameter_docs(function: &FunctionDecl) -> Option<String> {
@@ -4932,6 +4993,33 @@ pub fn caller(): int
             markup.value.contains("Adds two numbers."),
             "the description should be shown: {}",
             markup.value
+        );
+    }
+
+    #[test]
+    fn hover_over_a_documented_module_const_declaration_shows_type_and_description() {
+        let source = "\
+module a
+
+;; Maximum count.
+const LIMIT: int = 10
+
+pub fn caller(): int
+    return LIMIT
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+        let offset = offset_of(source, "LIMIT: int") + 1;
+        let value = hover_value_at(&snapshot, &index, &file, offset)
+            .expect("module const declaration hover");
+
+        assert!(
+            value.starts_with("```marrow\nconst LIMIT: int\n```"),
+            "the module const signature should lead the hover: {value}"
+        );
+        assert!(
+            value.contains("Maximum count."),
+            "the description should be shown: {value}"
         );
     }
 
