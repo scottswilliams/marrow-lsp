@@ -17,7 +17,7 @@ pub(crate) fn render_type(ty: &MarrowType) -> String {
         MarrowType::Error => "Error".to_string(),
         MarrowType::Resource(name) => name.clone(),
         MarrowType::GroupEntry { resource, .. } => resource.clone(),
-        MarrowType::Identity(resource) => format!("{resource}::Id"),
+        MarrowType::Identity(root) => format!("Id(^{root})"),
         MarrowType::Enum { module, name } if module.is_empty() => name.clone(),
         MarrowType::Enum { module, name } => format!("{module}::{name}"),
         MarrowType::Sequence(element) => format!("sequence[{}]", render_type(element)),
@@ -59,6 +59,14 @@ mod tests {
         };
 
         assert_eq!(render_type(&ty), "Order");
+    }
+
+    #[test]
+    fn identity_types_render_as_store_root_id() {
+        assert_eq!(
+            render_type(&MarrowType::Identity("books".to_string())),
+            "Id(^books)"
+        );
     }
 
     #[test]

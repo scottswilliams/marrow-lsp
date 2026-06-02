@@ -11,7 +11,7 @@ use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
 use marrow_check::CheckedProgram;
 use marrow_syntax::{
     Declaration, EnumDecl, EnumMember, FieldDecl, FunctionDecl, GroupDecl, IndexDecl, ResourceDecl,
-    ResourceMember, SourceFile, SourceSpan,
+    ResourceMember, SourceFile, SourceSpan, StoreDecl,
 };
 
 use crate::positions::LineIndex;
@@ -48,6 +48,7 @@ fn declaration_symbol(declaration: &Declaration, index: &LineIndex) -> DocumentS
         ),
         Declaration::Enum(enum_decl) => enum_symbol(enum_decl, index),
         Declaration::Resource(resource) => resource_symbol(resource, index),
+        Declaration::Store(store) => store_symbol(store, index),
     }
 }
 
@@ -98,8 +99,23 @@ fn member_symbol(member: &ResourceMember, index: &LineIndex) -> DocumentSymbol {
     match member {
         ResourceMember::Field(field) => field_symbol(field, index),
         ResourceMember::Group(group) => group_symbol(group, index),
-        ResourceMember::Index(idx) => index_symbol(idx, index),
     }
+}
+
+fn store_symbol(store: &StoreDecl, index: &LineIndex) -> DocumentSymbol {
+    let children = store
+        .indexes
+        .iter()
+        .map(|idx| index_symbol(idx, index))
+        .collect();
+    symbol(
+        &format!("^{}", store.root.root),
+        Some(store.resource.clone()),
+        SymbolKind::OBJECT,
+        store.span,
+        index,
+        Some(children),
+    )
 }
 
 fn field_symbol(field: &FieldDecl, index: &LineIndex) -> DocumentSymbol {
@@ -293,35 +309,34 @@ mod tests {
     }
 
     #[test]
-    fn document_symbols_list_a_resource_with_nested_members() {
+    fn document_symbols_list_a_resource_and_store_with_nested_members() {
         let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     tags(pos: int): string
     notes(noteId: string)
         text: string
+
+store ^books(id: int): Book
     index byShelf(shelf, id)
 ";
         let index = LineIndex::new(source);
         let symbols = document_symbols(&parse(source), &index);
 
-        // One top-level symbol: the resource.
-        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols.len(), 2);
         let book = &symbols[0];
         assert_eq!(book.name, "Book");
         assert_eq!(book.kind, SymbolKind::STRUCT);
 
         let children = book.children.as_ref().expect("resource has members");
         let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["title", "tags", "notes", "byShelf"]);
+        assert_eq!(names, ["title", "tags", "notes"]);
 
-        // The field, group, index kinds are distinct.
         assert_eq!(children[0].kind, SymbolKind::FIELD); // title
         assert_eq!(children[1].kind, SymbolKind::FIELD); // tags (keyed leaf)
         assert_eq!(children[2].kind, SymbolKind::OBJECT); // notes (group)
-        assert_eq!(children[3].kind, SymbolKind::KEY); // byShelf (index)
 
         // The group recurses to its own field.
         let notes = &children[2];
@@ -329,6 +344,15 @@ resource Book at ^books(id: int)
         assert_eq!(group_children.len(), 1);
         assert_eq!(group_children[0].name, "text");
         assert_eq!(group_children[0].kind, SymbolKind::FIELD);
+
+        let store = &symbols[1];
+        assert_eq!(store.name, "^books");
+        assert_eq!(store.detail.as_deref(), Some("Book"));
+        assert_eq!(store.kind, SymbolKind::OBJECT);
+        let indexes = store.children.as_ref().expect("store has indexes");
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "byShelf");
+        assert_eq!(indexes[0].kind, SymbolKind::KEY);
     }
 
     #[test]
@@ -417,10 +441,12 @@ enum Status
     active
     archived
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
-pub fn add(title: string): Book::Id
+store ^books(id: int): Book
+
+pub fn add(title: string): Id(^books)
     var book: Book
     book.title = title
     return nextId(^books)

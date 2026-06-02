@@ -395,11 +395,6 @@ fn signature_for(
     if let Some(signature) = builtin_signature(segments) {
         return Some(signature);
     }
-    match identity_signature(program, from_module, segments) {
-        IdentitySignature::Found(signature) => return Some(signature),
-        IdentitySignature::Suppress => return None,
-        IdentitySignature::NotIdentity => {}
-    }
     if let Some(signature) = resource_signature(program, from_module, segments) {
         return Some(signature);
     }
@@ -425,59 +420,6 @@ fn builtin_signature(segments: &[String]) -> Option<Signature> {
         return Some(signature);
     }
     language_facts::scalar_conversion_detail(name).map(|detail| signature_from_label(&detail))
-}
-
-enum IdentitySignature {
-    NotIdentity,
-    Suppress,
-    Found(Signature),
-}
-
-fn identity_signature(
-    program: &CheckedProgram,
-    from_module: &str,
-    segments: &[String],
-) -> IdentitySignature {
-    let [_, id] = segments else {
-        return IdentitySignature::NotIdentity;
-    };
-    if id.as_str() != "Id" {
-        return IdentitySignature::NotIdentity;
-    }
-    match resolve(
-        program,
-        from_module,
-        segments,
-        ResolvableKind::ResourceIdentity,
-    ) {
-        Resolution::Found(Def {
-            item: DefItem::Resource(resource),
-            ..
-        }) => {
-            let Some(saved) = resource.saved_root.as_ref() else {
-                return IdentitySignature::Suppress;
-            };
-            if saved.identity_keys.is_empty() {
-                return IdentitySignature::Suppress;
-            }
-            let params = saved
-                .identity_keys
-                .iter()
-                .map(|key| named_param(&key.name, &key.ty.to_string()))
-                .collect::<Vec<_>>();
-            IdentitySignature::Found(Signature {
-                label: format!(
-                    "{}::Id({}): {}::Id",
-                    resource.name,
-                    joined_param_labels(&params),
-                    resource.name
-                ),
-                documentation: None,
-                params,
-            })
-        }
-        _ => IdentitySignature::NotIdentity,
-    }
 }
 
 fn resource_signature(
@@ -628,10 +570,6 @@ fn signature_from_label(label: &str) -> Signature {
         documentation: None,
         params,
     }
-}
-
-fn named_param(name: &str, ty: &str) -> Parameter {
-    named_param_with_docs(name, ty, None)
 }
 
 fn named_param_with_docs(name: &str, ty: &str, documentation: Option<String>) -> Parameter {
@@ -809,15 +747,19 @@ mod tests {
 module shelf::books
 
 ;; Books stored in the public shelf.
-resource Book at ^books(id: int, edition: string)
+resource Book
     ;; Title shown to readers.
     required title: string
     ;; Page count from the catalog.
     pages: int
     tags(pos: int): string
 
-resource Settings at ^settings
+store ^books(id: int, edition: string): Book
+
+resource Settings
     enabled: bool
+
+store ^settings: Settings
 
 resource Id
     required value: int
@@ -825,7 +767,7 @@ resource Id
 ;; Resolves the display title for a book.
 pub fn titleOf(
     ;; Book identity to resolve.
-    id: Book::Id,
+    id: Id(^books),
     ;; Title to use when the book is missing.
     fallback: string,
 ): string
@@ -978,7 +920,7 @@ pub fn run(): int
 
         assert_eq!(
             signature_label(&help),
-            "titleOf(id: Book::Id, fallback: string): string"
+            "titleOf(id: Id(^books), fallback: string): string"
         );
         assert_eq!(
             signature_documentation(&help),
@@ -1080,7 +1022,7 @@ pub fn run(): int
 
         assert_eq!(
             signature_label(&help),
-            "titleOf(id: Book::Id, fallback: string): string"
+            "titleOf(id: Id(^books), fallback: string): string"
         );
         assert_eq!(help.active_parameter, Some(0));
     }
@@ -1159,27 +1101,6 @@ pub fn run(): int
         assert_eq!(signature_label(&help), "Id(value: int): Id");
         assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
         assert_eq!(help.active_parameter, Some(0));
-    }
-
-    #[test]
-    fn identity_constructor_uses_saved_identity_keys() {
-        let (program, file) = project();
-        let help = help_at(
-            &program,
-            &file,
-            "module shelf::app\n\npub fn run(): Book::Id\n    return Book::Id(1, |\n",
-        )
-        .expect("signature help");
-
-        assert_eq!(
-            signature_label(&help),
-            "Book::Id(id: int, edition: string): Book::Id"
-        );
-        assert_eq!(
-            parameter_labels(&help),
-            vec!["id: int".to_string(), "edition: string".to_string()]
-        );
-        assert_eq!(help.active_parameter, Some(1));
     }
 
     #[test]
@@ -1421,15 +1342,15 @@ pub fn run(): int
             ),
             (
                 "function parameter identity type",
-                "module shelf::app\n\nfn typed(value: Book::Id(|\n",
+                "module shelf::app\n\nfn typed(value: Id(^books)(|\n",
             ),
             (
                 "saved root key scalar type",
-                "module shelf::app\n\nresource Counter at ^counters(id: int(|\n",
+                "module shelf::app\n\nresource Counter\n\nstore ^counters(id: int(|): Counter\n",
             ),
             (
                 "required resource member scalar type",
-                "module shelf::app\n\nresource Counter at ^counters\n    required amount: int(|\n",
+                "module shelf::app\n\nresource Counter\n    required amount: int(|\n\nstore ^counters: Counter\n",
             ),
             (
                 "local variable scalar type",
@@ -1464,7 +1385,7 @@ pub fn run(): int
         let help = help_at(
             &program,
             &file,
-            "module shelf::app\n\nresource Book at ^books(|\n",
+            "module shelf::app\n\nresource Book\n\nstore ^books(|): Book\n",
         );
 
         assert!(help.is_none());
@@ -1483,19 +1404,7 @@ pub fn run(): int
     }
 
     #[test]
-    fn keyless_singleton_identity_constructor_returns_no_signature_help() {
-        let (program, file) = project();
-        let help = help_at(
-            &program,
-            &file,
-            "module shelf::app\n\npub fn run(): Settings::Id\n    return Settings::Id(|\n",
-        );
-
-        assert!(help.is_none());
-    }
-
-    #[test]
-    fn keyless_identity_constructor_suppresses_resource_constructor_collision() {
+    fn keyless_store_does_not_suppress_module_resource_constructor() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
@@ -1507,8 +1416,10 @@ pub fn run(): int
             "\
 module app
 
-resource Settings at ^settings
+resource Settings
     enabled: bool
+
+store ^settings: Settings
 ",
         )
         .unwrap();
@@ -1529,8 +1440,11 @@ resource Id
             &snapshot.program,
             &app,
             "module app\n\npub fn run(): Settings::Id\n    return Settings::Id(|\n",
-        );
+        )
+        .expect("module resource constructor signature help");
 
-        assert!(help.is_none());
+        assert_eq!(signature_label(&help), "Id(value: int): Id");
+        assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
+        assert_eq!(help.active_parameter, Some(0));
     }
 }

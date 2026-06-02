@@ -1,37 +1,34 @@
-//! Record-count CodeLens for saved resources.
+//! Record-count CodeLens for saved stores.
 //!
-//! A resource attached to a saved root gets a lens over its declaration showing
-//! how many records live under that root. The count is a live store read, so it
-//! is computed lazily on `codeLens/resolve` rather than during the initial
-//! `textDocument/codeLens` pass — the editor asks for the count only for the
-//! lenses actually on screen, and an offscreen resource costs nothing. A store
-//! that cannot be read right now yields no resolved command, so the lens quietly
-//! disappears rather than showing an error.
+//! A store root gets a lens over its declaration showing how many records live
+//! under that root. The count is a live store read, so it is computed lazily on
+//! `codeLens/resolve` rather than during the initial `textDocument/codeLens` pass
+//! — the editor asks for the count only for the lenses actually on screen. A
+//! store that cannot be read right now yields no resolved command, so the lens
+//! quietly disappears rather than showing an error.
 
 use lsp_types::{CodeLens, Command, Range};
 
 use crate::positions::LineIndex;
 use crate::store::{Availability, StoreReader};
 
-/// The unresolved record-count lenses for one file: one per resource declaration
-/// that is attached to a saved root. Each lens carries its root name in `data` so
-/// the resolve step knows which root to count without re-parsing.
+/// The unresolved record-count lenses for one file: one per store declaration.
+/// Each lens carries its root name in `data` so the resolve step knows which root
+/// to count without re-parsing.
 ///
 /// The lenses are unresolved — their `command` is `None` — because the count is a
-/// live read. `index` maps the resource declaration's span to a one-line range
-/// the editor anchors the lens to.
+/// live read. `index` maps the store declaration's span to a one-line range the
+/// editor anchors the lens to.
 pub fn code_lenses(file: &marrow_syntax::SourceFile, index: &LineIndex) -> Vec<CodeLens> {
     file.declarations
         .iter()
         .filter_map(|declaration| match declaration {
-            marrow_syntax::Declaration::Resource(resource) => {
-                resource.store.as_ref().map(|store| {
-                    let range = lens_range(resource.span, index);
-                    CodeLens {
-                        range,
-                        command: None,
-                        data: Some(serde_json::json!({ "root": store.root })),
-                    }
+            marrow_syntax::Declaration::Store(store) => {
+                let range = lens_range(store.span, index);
+                Some(CodeLens {
+                    range,
+                    command: None,
+                    data: Some(serde_json::json!({ "root": store.root.root })),
                 })
             }
             _ => None,
@@ -71,9 +68,8 @@ pub fn resolve(lens: CodeLens, reader: Option<&StoreReader>) -> CodeLens {
     }
 }
 
-/// The one-line range a resource's lens anchors to: the first line of its
-/// declaration span. A lens should span a single line, so only the start line is
-/// used.
+/// The one-line range a store lens anchors to: the first line of its declaration
+/// span. A lens should span a single line, so only the start line is used.
 fn lens_range(span: marrow_syntax::SourceSpan, index: &LineIndex) -> Range {
     let start = index.range(span.start_byte, span.start_byte).start;
     Range { start, end: start }
@@ -89,30 +85,32 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_resource_gets_one_lens_carrying_its_root() {
+    fn a_store_gets_one_lens_carrying_its_root() {
         let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+store ^books(id: int): Book
 
 resource Local
     required note: string
 ";
         let index = LineIndex::new(source);
         let lenses = code_lenses(&file(source), &index);
-        // Only the saved resource gets a lens; the unsaved `Local` does not.
+        // Only the store gets a lens; the unsaved `Local` does not.
         assert_eq!(lenses.len(), 1);
         let lens = &lenses[0];
         assert_eq!(lens.command, None, "the lens is unresolved");
         assert_eq!(lens.data.as_ref().unwrap()["root"], "books");
-        // The lens anchors to the `resource Book` line (zero-based line 2).
-        assert_eq!(lens.range.start.line, 2);
+        // The lens anchors to the `store ^books` line (zero-based line 5).
+        assert_eq!(lens.range.start.line, 5);
     }
 
     #[test]
     fn resolve_without_a_reader_leaves_the_lens_quiet() {
-        let source = "module a\n\nresource Book at ^books(id: int)\n    required title: string\n";
+        let source = "module a\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n";
         let index = LineIndex::new(source);
         let lens = code_lenses(&file(source), &index).remove(0);
         let resolved = resolve(lens, None);

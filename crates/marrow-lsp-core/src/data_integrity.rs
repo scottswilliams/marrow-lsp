@@ -194,8 +194,8 @@ fn finding_for(program: &CheckedProgram, key: &[u8], value: &[u8]) -> Option<Fin
                 })
             }
         }
-        SavedPathClass::Identity { resource, arity } => {
-            let ty = format!("{resource}::Id");
+        SavedPathClass::Identity { store_root, arity } => {
+            let ty = format!("Id(^{store_root})");
             match decode_identity_arity(value, arity) {
                 None => Some(Finding {
                     path: display_path(key),
@@ -203,7 +203,7 @@ fn finding_for(program: &CheckedProgram, key: &[u8], value: &[u8]) -> Option<Fin
                     message: format!("stored value no longer decodes as {ty}"),
                     r#type: Some(ty),
                 }),
-                Some(keys) => identity_leaf_key_mismatch(program, &resource, &keys).map(
+                Some(keys) => identity_leaf_key_mismatch(program, &store_root, &keys).map(
                     |(expected, found)| Finding {
                         path: display_path(key),
                         kind: FindingKind::KeyTypeMismatch,
@@ -252,14 +252,16 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// A project pinning a native store under `data/`, with one `Book` resource
-    /// saved at `^books(id: int)` carrying a required `title: string`. Returns the
-    /// project, its checked program, and the path the store file lives at.
+    /// stored at `^books(id: int)` carrying a required `title: string`. Returns
+    /// the project, its checked program, and the path the store file lives at.
     fn project_with_books() -> (Project, CheckedProgram, PathBuf) {
         let source = "\
 module shelf
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+store ^books(id: int): Book
 ";
         build_project(source)
     }
@@ -378,8 +380,10 @@ resource Book at ^books(id: int)
         let source = "\
 module shelf
 
-resource Book at ^books(id: int)
+resource Book
     required count: int
+
+store ^books(id: int): Book
 ";
         let (project, program, path) = build_project(source);
         let count_path = encode_path(&[
@@ -403,11 +407,15 @@ resource Book at ^books(id: int)
         let source = "\
 module shelf
 
-resource Author at ^authors(id: int)
+resource Author
     required name: string
 
-resource Book at ^books(id: int)
-    authorId: Author::Id
+store ^authors(id: int): Author
+
+resource Book
+    authorId: Id(^authors)
+
+store ^books(id: int): Book
 ";
         let (project, program, path) = build_project(source);
         let author_id_path = encode_path(&[
@@ -424,7 +432,7 @@ resource Book at ^books(id: int)
 
         assert!(
             result.findings.is_empty(),
-            "a canonical Author::Id leaf is valid saved data: {result:?}"
+            "a canonical Id(^authors) leaf is valid saved data: {result:?}"
         );
     }
 
@@ -433,11 +441,15 @@ resource Book at ^books(id: int)
         let source = "\
 module shelf
 
-resource Author at ^authors(id: int)
+resource Author
     required name: string
 
-resource Book at ^books(id: int)
-    authorId: Author::Id
+store ^authors(id: int): Author
+
+resource Book
+    authorId: Id(^authors)
+
+store ^books(id: int): Book
 ";
         let (project, program, path) = build_project(source);
         let author_id_path = encode_path(&[
@@ -453,8 +465,8 @@ resource Book at ^books(id: int)
         let finding = &result.findings[0];
         assert_eq!(finding.kind, FindingKind::Undecodable);
         assert_eq!(finding.path, "^books(1).authorId");
-        assert_eq!(finding.r#type.as_deref(), Some("Author::Id"));
-        assert!(finding.message.contains("Author::Id"));
+        assert_eq!(finding.r#type.as_deref(), Some("Id(^authors)"));
+        assert!(finding.message.contains("Id(^authors)"));
     }
 
     #[test]
@@ -462,11 +474,15 @@ resource Book at ^books(id: int)
         let source = "\
 module shelf
 
-resource Author at ^authors(slug: string)
+resource Author
     required name: string
 
-resource Book at ^books(id: int)
-    authorId: Author::Id
+store ^authors(slug: string): Author
+
+resource Book
+    authorId: Id(^authors)
+
+store ^books(id: int): Book
 ";
         let (project, program, path) = build_project(source);
         let author_id_path = encode_path(&[
@@ -485,7 +501,7 @@ resource Book at ^books(id: int)
         let finding = &result.findings[0];
         assert_eq!(finding.kind, FindingKind::KeyTypeMismatch);
         assert_eq!(finding.path, "^books(1).authorId");
-        assert!(finding.message.contains("Author::Id"));
+        assert!(finding.message.contains("Id(^authors)"));
         assert!(finding.message.contains("int"));
         assert!(finding.message.contains("string"));
     }

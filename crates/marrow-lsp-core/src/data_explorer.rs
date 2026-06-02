@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use marrow_check::CheckedProgram;
-use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, Type};
+use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::backend::Presence;
 use marrow_store::path::{ChildSegment, PathSegment, SavedKey};
 
@@ -184,7 +184,7 @@ pub struct SavedGetResult {
     pub presence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    /// The declared type name of the leaf (`int`, `string`, `Resource::Id`, …),
+    /// The declared type name of the leaf (`int`, `string`, `Id(^root)`, ...),
     /// when the path is a typed leaf; absent for a record node, an index marker,
     /// or an orphan.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,7 +294,7 @@ pub fn saved_get(
 enum SchemaContext<'a> {
     Unknown,
     Root {
-        resource: &'a ResourceSchema,
+        store: &'a StoreSchema,
         next_key: usize,
         include_indexes: bool,
     },
@@ -306,6 +306,7 @@ enum SchemaContext<'a> {
         next_key: usize,
     },
     IndexKeys {
+        store: &'a StoreSchema,
         resource: &'a ResourceSchema,
         index: &'a IndexSchema,
         next_key: usize,
@@ -317,13 +318,11 @@ fn schema_context<'a>(program: &'a CheckedProgram, path: &[PathSegment]) -> Sche
     let Some((PathSegment::Root(root), rest)) = path.split_first() else {
         return SchemaContext::Unknown;
     };
-    let Some(resource) = marrow_check::resolve::resolve_resource_by_root(program, root) else {
+    let Some((store, resource)) = marrow_check::resolve::resolve_store_by_root(program, root)
+    else {
         return SchemaContext::Unknown;
     };
-    let Some(saved_root) = resource.saved_root.as_ref() else {
-        return SchemaContext::Unknown;
-    };
-    let identity_arity = saved_root.identity_keys.len();
+    let identity_arity = store.identity_keys.len();
 
     if rest.is_empty() {
         return if identity_arity == 0 {
@@ -332,7 +331,7 @@ fn schema_context<'a>(program: &'a CheckedProgram, path: &[PathSegment]) -> Sche
             }
         } else {
             SchemaContext::Root {
-                resource,
+                store,
                 next_key: 0,
                 include_indexes: true,
             }
@@ -340,12 +339,13 @@ fn schema_context<'a>(program: &'a CheckedProgram, path: &[PathSegment]) -> Sche
     }
 
     if let Some((name, index_keys)) = named_branch(rest)
-        && let Some(index) = resource.indexes.iter().find(|index| index.name == name)
+        && let Some(index) = store.indexes.iter().find(|index| index.name == name)
     {
         return if index_keys < rest.len() - 1 || index_keys >= index.args.len() {
             SchemaContext::Leaf
         } else {
             SchemaContext::IndexKeys {
+                store,
                 resource,
                 index,
                 next_key: index_keys,
@@ -360,7 +360,7 @@ fn schema_context<'a>(program: &'a CheckedProgram, path: &[PathSegment]) -> Sche
     if identity_keys < identity_arity {
         return if identity_keys == rest.len() {
             SchemaContext::Root {
-                resource,
+                store,
                 next_key: identity_keys,
                 include_indexes: false,
             }
@@ -449,13 +449,12 @@ fn child_metadata(context: &SchemaContext<'_>, child: &ChildSegment) -> ChildMet
     match (context, child) {
         (
             SchemaContext::Root {
-                resource, next_key, ..
+                store, next_key, ..
             },
             ChildSegment::Key(key),
-        ) => resource
-            .saved_root
-            .as_ref()
-            .and_then(|root| root.identity_keys.get(*next_key))
+        ) => store
+            .identity_keys
+            .get(*next_key)
             .map(|key_def| {
                 key_metadata(
                     "record_key",
@@ -466,12 +465,12 @@ fn child_metadata(context: &SchemaContext<'_>, child: &ChildSegment) -> ChildMet
             .unwrap_or_default(),
         (
             SchemaContext::Root {
-                resource,
+                store,
                 include_indexes: true,
                 ..
             },
             ChildSegment::Name(name),
-        ) => resource
+        ) => store
             .indexes
             .iter()
             .find(|index| index.name == *name)
@@ -495,6 +494,7 @@ fn child_metadata(context: &SchemaContext<'_>, child: &ChildSegment) -> ChildMet
             .unwrap_or_default(),
         (
             SchemaContext::IndexKeys {
+                store,
                 resource,
                 index,
                 next_key,
@@ -503,7 +503,7 @@ fn child_metadata(context: &SchemaContext<'_>, child: &ChildSegment) -> ChildMet
         ) => index
             .args
             .get(*next_key)
-            .and_then(|arg| index_arg_type(resource, arg).map(|ty| (arg, ty)))
+            .and_then(|arg| index_arg_type(store, resource, arg).map(|ty| (arg, ty)))
             .map(|(arg, ty)| {
                 let ty = type_name(ty);
                 ChildMetadata {
@@ -564,11 +564,15 @@ fn node_metadata(node: &Node) -> ChildMetadata {
     }
 }
 
-fn index_arg_type<'a>(resource: &'a ResourceSchema, arg: &str) -> Option<&'a Type> {
-    resource
-        .saved_root
-        .as_ref()
-        .and_then(|root| root.identity_keys.iter().find(|key| key.name == arg))
+fn index_arg_type<'a>(
+    store: &'a StoreSchema,
+    resource: &'a ResourceSchema,
+    arg: &str,
+) -> Option<&'a Type> {
+    store
+        .identity_keys
+        .iter()
+        .find(|key| key.name == arg)
         .map(|key| &key.ty)
         .or_else(|| resource.field_type(&[arg]))
 }
@@ -594,7 +598,9 @@ fn type_name(ty: &Type) -> String {
 fn leaf_type_name(program: &CheckedProgram, path: &[PathSegment]) -> Option<String> {
     match marrow_run::classify_saved_path(program, path) {
         marrow_run::SavedPathClass::Scalar(ty) => Some(ty.name().to_string()),
-        marrow_run::SavedPathClass::Identity { resource, .. } => Some(format!("{resource}::Id")),
+        marrow_run::SavedPathClass::Identity { store_root, .. } => {
+            Some(format!("Id(^{store_root})"))
+        }
         _ => None,
     }
 }
@@ -760,14 +766,17 @@ mod tests {
         "\
 module shelf
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     tags(pos: int): string
 
+store ^books(id: int): Book
     index byTitle(title) unique
 
-resource Edition at ^editions(isbn: string, locale: string)
+resource Edition
     required title: string
+
+store ^editions(isbn: string, locale: string): Edition
 "
     }
 
@@ -1238,7 +1247,7 @@ resource Edition at ^editions(isbn: string, locale: string)
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(
             src.join("a.mw"),
-            "module a\n\nresource Book at ^books(id: int)\n    required title: string\n",
+            "module a\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n",
         )
         .unwrap();
         let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
@@ -1276,11 +1285,15 @@ resource Edition at ^editions(isbn: string, locale: string)
             "\
 module a
 
-resource Author at ^authors(id: int)
+resource Author
     required name: string
 
-resource Book at ^books(id: int)
-    authorId: Author::Id
+store ^authors(id: int): Author
+
+resource Book
+    authorId: Id(^authors)
+
+store ^books(id: int): Book
 ",
         )
         .unwrap();
@@ -1321,7 +1334,7 @@ resource Book at ^books(id: int)
         );
 
         assert!(result.available, "{result:?}");
-        assert_eq!(result.value.as_deref(), Some("Author::Id(7)"));
-        assert_eq!(result.r#type.as_deref(), Some("Author::Id"));
+        assert_eq!(result.value.as_deref(), Some("Id(^authors)(7)"));
+        assert_eq!(result.r#type.as_deref(), Some("Id(^authors)"));
     }
 }

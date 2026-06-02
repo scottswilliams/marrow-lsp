@@ -36,9 +36,9 @@ pub enum RenameError {
     NoSymbol,
     /// The requested replacement is not a single valid Marrow identifier.
     InvalidName,
-    /// The symbol names data encoded on disk (a saved field, group, layer, index,
-    /// or a resource attached to a saved root). Renaming it in source alone would
-    /// change the on-disk path and orphan the stored data, so it is refused.
+    /// The symbol names data encoded on disk (a store root, store-backed resource,
+    /// saved field, group, layer, or index). Renaming it in source alone would change
+    /// the on-disk path and orphan the stored data, so it is refused.
     SavedDataBacked,
 }
 
@@ -121,8 +121,7 @@ pub fn definition(
         Some(ModulePathDefinition::NoDefinition) => return None,
         None => {}
     }
-    // The current binding index can associate `^root` syntax with a resource
-    // identity. Go-to-definition for saved roots needs its own checked fact, so
+    // Go-to-definition for saved roots needs its own checked store-root fact, so
     // this path stays quiet until Marrow exposes one.
     if saved_root_syntax_at(snapshot, file, offset) {
         return None;
@@ -271,29 +270,6 @@ fn saved_root_syntax_at(
     })
 }
 
-fn saved_root_identifier_span(
-    source: &str,
-    span: SourceSpan,
-    root: &str,
-) -> Option<(usize, usize)> {
-    let tokens = lex_source(source).tokens;
-    tokens.windows(2).find_map(|pair| {
-        let [previous, token] = pair else {
-            return None;
-        };
-        if previous.kind == TokenKind::Caret
-            && token.kind == TokenKind::Identifier
-            && span_covers(span, previous.span.start_byte)
-            && span_covers(span, token.span.end_byte)
-            && token.text(source) == root
-        {
-            Some((token.span.start_byte, token.span.end_byte))
-        } else {
-            None
-        }
-    })
-}
-
 fn span_covers(span: SourceSpan, offset: usize) -> bool {
     span.start_byte <= offset && offset <= span.end_byte
 }
@@ -321,12 +297,6 @@ fn module_path_definition(
         && path.binding_index_should_win(symbol.kind)
     {
         return None;
-    }
-    if path.declaration.is_none()
-        && in_type_annotation
-        && let Some(location) = resource_identity_path_definition(snapshot, indices, file, &path)
-    {
-        return Some(ModulePathDefinition::Location(location));
     }
     let module_name = match path.declaration {
         Some(ModulePathDeclaration::Module | ModulePathDeclaration::Use) => {
@@ -403,10 +373,7 @@ struct QualifiedPath {
 
 impl QualifiedPath {
     fn binding_index_should_win(&self, kind: SymbolKind) -> bool {
-        matches!(
-            kind,
-            SymbolKind::Enum | SymbolKind::EnumMember | SymbolKind::ResourceIdentity
-        )
+        matches!(kind, SymbolKind::Enum | SymbolKind::EnumMember)
     }
 }
 
@@ -538,18 +505,15 @@ fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> b
             .ty
             .as_ref()
             .is_some_and(|ty| type_ref_covers(ty, offset)),
-        Declaration::Resource(resource) => {
-            resource
-                .members
-                .iter()
-                .any(|member| resource_member_type_annotation_at(member, offset))
-                || resource.store.as_ref().is_some_and(|store| {
-                    store
-                        .keys
-                        .iter()
-                        .any(|key| type_ref_covers(&key.ty, offset))
-                })
-        }
+        Declaration::Resource(resource) => resource
+            .members
+            .iter()
+            .any(|member| resource_member_type_annotation_at(member, offset)),
+        Declaration::Store(store) => store
+            .root
+            .keys
+            .iter()
+            .any(|key| type_ref_covers(&key.ty, offset)),
         Declaration::Function(function) => {
             function
                 .params
@@ -584,7 +548,6 @@ fn resource_member_type_annotation_at(member: &ResourceMember, offset: usize) ->
                     .iter()
                     .any(|member| resource_member_type_annotation_at(member, offset))
         }
-        ResourceMember::Index(_) => false,
     }
 }
 
@@ -680,56 +643,6 @@ fn module_declaration_location(
     Some(Location { uri: url, range })
 }
 
-fn resource_identity_path_definition(
-    snapshot: &marrow_check::AnalysisSnapshot,
-    indices: &impl FileIndex,
-    file: &Path,
-    path: &QualifiedPath,
-) -> Option<Location> {
-    let (id, prefix) = path.segments.split_last()?;
-    if id != "Id" || path.cursor_segment + 2 < path.segments.len() {
-        return None;
-    }
-    let current = snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == file)?;
-    let (resource_name, module_segments) = prefix.split_last()?;
-    if module_segments.is_empty() {
-        let Resolution::Found(definition) = resolve(
-            &snapshot.program,
-            &current.name,
-            &path.segments,
-            ResolvableKind::ResourceIdentity,
-        ) else {
-            return None;
-        };
-        let DefItem::Resource(resource) = definition.item else {
-            return None;
-        };
-        return resource_identity_location(
-            snapshot,
-            indices,
-            &definition.module.source_file,
-            &resource.name,
-        );
-    }
-
-    let aliases = build_alias_map(&current.imports);
-    let module_name = expand_module_alias(&module_segments.join("::"), &aliases);
-    let module = snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.name == module_name)?;
-    let resource = module
-        .resources
-        .iter()
-        .find(|resource| resource.name.as_str() == resource_name.as_str())?;
-    resource_identity_location(snapshot, indices, &module.source_file, &resource.name)
-}
-
 fn function_location(
     snapshot: &marrow_check::AnalysisSnapshot,
     indices: &impl FileIndex,
@@ -763,51 +676,6 @@ fn function_location(
     None
 }
 
-fn resource_identity_location(
-    snapshot: &marrow_check::AnalysisSnapshot,
-    indices: &impl FileIndex,
-    file: &Path,
-    resource_name: &str,
-) -> Option<Location> {
-    let analyzed = snapshot
-        .files
-        .iter()
-        .find(|analyzed| analyzed.path == file)?;
-    for declaration in &analyzed.parsed.file.declarations {
-        let Declaration::Resource(resource) = declaration else {
-            continue;
-        };
-        if resource.name != resource_name {
-            continue;
-        }
-        let (start, end) = resource_identity_span(&analyzed.source, resource)?;
-        let line_index = indices.index_for(file)?;
-        let url = Url::from_file_path(file).ok()?;
-        return Some(Location {
-            uri: url,
-            range: line_index.range(start, end),
-        });
-    }
-    None
-}
-
-fn resource_identity_span(
-    source: &str,
-    resource: &marrow_syntax::ResourceDecl,
-) -> Option<(usize, usize)> {
-    if let Some(store) = &resource.store
-        && let Some(span) = saved_root_identifier_span(source, resource.span, &store.root)
-    {
-        return Some(span);
-    }
-    name_in_span(
-        source,
-        resource.span.start_byte,
-        resource.span.end_byte,
-        &resource.name,
-    )
-}
-
 fn last_name_in_span(text: &str, start: usize, end: usize, name: &str) -> Option<(usize, usize)> {
     let end = end.min(text.len());
     if start > end {
@@ -837,11 +705,49 @@ fn last_name_in_span(text: &str, start: usize, end: usize, name: &str) -> Option
 /// the span, so scanning for it skips the leading keyword and any module qualifier.
 fn symbol_name(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<String> {
     let line_index = indices.index_for(&symbol.file)?;
+    if symbol.kind == SymbolKind::Resource {
+        return first_identifier_in(
+            line_index.text(),
+            symbol.span.start_byte,
+            symbol.span.end_byte,
+        );
+    }
     last_identifier_in(
         line_index.text(),
         symbol.span.start_byte,
         symbol.span.end_byte,
     )
+}
+
+fn first_identifier_in(text: &str, start: usize, end: usize) -> Option<String> {
+    let end = end.min(text.len());
+    if start >= end {
+        return None;
+    }
+    let slice = &text[start..end];
+    let bytes = slice.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = slice[i..].chars().next().unwrap();
+        if is_ident_start(ch) {
+            let run_start = i;
+            while i < bytes.len() {
+                let c = slice[i..].chars().next().unwrap();
+                if is_ident_continue(c) {
+                    i += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let word = &slice[run_start..i];
+            if !is_keyword(word) {
+                return Some(word.to_string());
+            }
+        } else {
+            i += ch.len_utf8();
+        }
+    }
+    None
 }
 
 /// The last keyword-free identifier within `[start, end)` of `text`, or `None` when
@@ -1472,7 +1378,7 @@ pub fn run(): string
     }
 
     #[test]
-    fn definition_from_qualified_resource_constructor_leaf_jumps_to_foreign_resource_root() {
+    fn definition_from_qualified_resource_constructor_leaf_jumps_to_foreign_resource() {
         let state_source = "\
 module shelf::state
 
@@ -1506,50 +1412,8 @@ pub fn make()
         assert_eq!(location.uri, Url::from_file_path(state_file).unwrap());
         assert_eq!(
             range_text(state_source, state_index, location.range),
-            "state_books"
+            "Book"
         );
-    }
-
-    #[test]
-    fn definition_from_qualified_resource_identity_constructor_jumps_to_foreign_identity_root() {
-        let state_source = "\
-module shelf::state
-
-resource Book at ^state_books(id: int)
-    required title: string
-";
-        let app_source = "\
-module shelf::app
-
-use shelf::state
-
-resource Book at ^app_books(code: string)
-    required label: string
-
-pub fn make_id()
-    const id = state::Book::Id(1)
-";
-        let (snapshot, paths, indices) = analyze_files(&[
-            ("shelf/state.mw", state_source),
-            ("shelf/app.mw", app_source),
-        ]);
-        let state_file = &paths[0];
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-        let state_index = indices.0.get(state_file).unwrap();
-
-        for offset in [
-            offset_of(app_source, "state::Book::Id(1)") + "state::".len(),
-            offset_of(app_source, "state::Book::Id(1)") + "state::Book::".len(),
-        ] {
-            let location = definition(&snapshot, &index, &indices, app_file, offset + 1)
-                .expect("qualified resource identity constructor resolves to foreign identity");
-            assert_eq!(location.uri, Url::from_file_path(state_file).unwrap());
-            assert_eq!(
-                range_text(state_source, state_index, location.range),
-                "state_books"
-            );
-        }
     }
 
     #[test]
@@ -1594,7 +1458,7 @@ pub fn make_local()
         );
         assert_eq!(
             range_text(state_source, state_index, qualified_location.range),
-            "state_books"
+            "Book"
         );
 
         let bare_book = offset_of(app_source, "Book(label: \"local\")");
@@ -1603,67 +1467,8 @@ pub fn make_local()
         assert_eq!(bare_location.uri, Url::from_file_path(app_file).unwrap());
         assert_eq!(
             range_text(app_source, app_index, bare_location.range),
-            "app_books"
+            "Book"
         );
-    }
-
-    #[test]
-    fn definition_from_same_named_local_and_foreign_identity_uses_the_qualified_target() {
-        let state_source = "\
-module shelf::state
-
-resource Book at ^state_books(id: int)
-    required title: string
-";
-        let app_source = "\
-module shelf::app
-
-use shelf::state
-
-resource Book at ^app_books(code: string)
-    required label: string
-
-pub fn foreign_id()
-    const id = state::Book::Id(1)
-
-pub fn local_id()
-    const id = Book::Id(\"local\")
-";
-        let (snapshot, paths, indices) = analyze_files(&[
-            ("shelf/state.mw", state_source),
-            ("shelf/app.mw", app_source),
-        ]);
-        let state_file = &paths[0];
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-        let state_index = indices.0.get(state_file).unwrap();
-        let app_index = indices.0.get(app_file).unwrap();
-
-        for offset in [
-            offset_of(app_source, "state::Book::Id(1)") + "state::".len(),
-            offset_of(app_source, "state::Book::Id(1)") + "state::Book::".len(),
-        ] {
-            let location = definition(&snapshot, &index, &indices, app_file, offset + 1)
-                .expect("qualified identity resolves to the imported resource");
-            assert_eq!(location.uri, Url::from_file_path(state_file).unwrap());
-            assert_eq!(
-                range_text(state_source, state_index, location.range),
-                "state_books"
-            );
-        }
-
-        for offset in [
-            offset_of(app_source, "Book::Id(\"local\")"),
-            offset_of(app_source, "Book::Id(\"local\")") + "Book::".len(),
-        ] {
-            let location = definition(&snapshot, &index, &indices, app_file, offset + 1)
-                .expect("bare identity resolves to the local resource");
-            assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
-            assert_eq!(
-                range_text(app_source, app_index, location.range),
-                "app_books"
-            );
-        }
     }
 
     #[test]
@@ -1906,80 +1711,7 @@ pub fn run(): cat
     }
 
     #[test]
-    fn module_path_prefix_definition_does_not_steal_resource_identity_head() {
-        let book_module_source = "\
-module book
-
-pub fn helper(): int
-    return 1
-";
-        let app_source = "\
-module app
-
-resource book at ^books(id: int)
-    required title: string
-
-pub fn run(): book::Id
-    return book::Id(1)
-";
-        let (snapshot, paths, indices) =
-            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-
-        let identity_head = offset_of(app_source, "return book::Id") + "return ".len();
-        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
-            .expect("resource identity head resolves through the binding index");
-        let line_index = indices.0.get(app_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
-        assert_eq!(range_text(app_source, line_index, location.range), "books");
-        let saved_root =
-            offset_of(app_source, "resource book at ^books") + "resource book at ^".len();
-        let (line, character) = line_col(app_source, saved_root);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
-    }
-
-    #[test]
-    fn module_path_prefix_definition_does_not_steal_resource_identity_annotation_head() {
-        let book_module_source = "\
-module book
-
-pub fn helper(): int
-    return 1
-";
-        let app_source = "\
-module app
-
-resource book at ^books(id: int)
-    required title: string
-
-pub fn run(): book::Id
-    return book::Id(1)
-";
-        let (snapshot, paths, indices) =
-            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-
-        let identity_head =
-            offset_of(app_source, "pub fn run(): book::Id") + "pub fn run(): ".len();
-        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
-            .expect("identity annotation should resolve as the resource identity");
-        let line_index = indices.0.get(app_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
-        assert_eq!(range_text(app_source, line_index, location.range), "books");
-        let saved_root =
-            offset_of(app_source, "resource book at ^books") + "resource book at ^".len();
-        let (line, character) = line_col(app_source, saved_root);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
-    }
-
-    #[test]
-    fn module_path_prefix_definition_does_not_steal_imported_module_named_like_identity() {
+    fn module_path_prefix_definition_does_not_steal_imported_module_named_like_local_resource() {
         let book_source = "\
 module shelf::book
 
@@ -2006,7 +1738,7 @@ pub fn run(): int
 
         let prefix = offset_of(app_source, "return book::Id") + "return ".len();
         let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("aliased module prefix resolves before local resource identity lookup");
+            .expect("aliased module prefix resolves before local resource lookup");
         assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
             range_text(book_source, book_index, prefix_location.range),
@@ -2112,205 +1844,6 @@ pub fn run(): int
         assert_eq!(
             range_text(book_source, book_index, leaf_location.range),
             "Id"
-        );
-    }
-
-    #[test]
-    fn module_path_prefix_definition_resource_identity_inside_sequence_annotation() {
-        let book_module_source = "\
-module book
-
-pub fn helper(): int
-    return 1
-";
-        let app_source = "\
-module app
-
-resource book at ^books(id: int)
-    required title: string
-
-pub fn run(ids: sequence[book::Id])
-    return
-";
-        let (snapshot, paths, indices) =
-            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-
-        let identity_head = offset_of(app_source, "sequence[book::Id]") + "sequence[".len();
-        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
-            .expect("identity inside sequence annotation resolves as the resource identity");
-        let line_index = indices.0.get(app_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
-        assert_eq!(range_text(app_source, line_index, location.range), "books");
-        let saved_root =
-            offset_of(app_source, "resource book at ^books") + "resource book at ^".len();
-        let (line, character) = line_col(app_source, saved_root);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
-    }
-
-    #[test]
-    fn module_path_prefix_definition_resource_identity_inside_var_key_annotation() {
-        let book_module_source = "\
-module book
-
-pub fn helper(): int
-    return 1
-";
-        let app_source = "\
-module app
-
-resource book at ^books(id: int)
-    required title: string
-
-pub fn run()
-    var selected(book: book::Id)
-";
-        let (snapshot, paths, indices) =
-            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-
-        let identity_head = offset_of(app_source, "book: book::Id") + "book: ".len();
-        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
-            .expect("identity in var key annotation resolves as the resource identity");
-        let line_index = indices.0.get(app_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
-        assert_eq!(range_text(app_source, line_index, location.range), "books");
-    }
-
-    #[test]
-    fn module_path_prefix_definition_resource_identity_inside_match_arm_block_annotation() {
-        let book_module_source = "\
-module book
-
-pub fn helper(): int
-    return 1
-";
-        let app_source = "\
-module app
-
-resource book at ^books(id: int)
-    required title: string
-
-enum status
-    active
-
-pub fn run(status: status)
-    match status
-        active
-            var id: book::Id
-";
-        let (snapshot, paths, indices) =
-            analyze_files(&[("book.mw", book_module_source), ("app.mw", app_source)]);
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-
-        let identity_head = offset_of(app_source, "var id: book::Id") + "var id: ".len();
-        let location = definition(&snapshot, &index, &indices, app_file, identity_head + 1)
-            .expect("identity in match arm block annotation resolves as the resource identity");
-        let line_index = indices.0.get(app_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
-        assert_eq!(range_text(app_source, line_index, location.range), "books");
-    }
-
-    #[test]
-    fn module_path_prefix_definition_qualified_resource_identity_annotation() {
-        let book_source = "\
-module shelf::lib
-
-resource Book at ^books(id: int)
-    required title: string
-";
-        let app_source = "\
-module app
-
-use shelf::lib
-
-pub fn read_full(id: shelf::lib::Book::Id): string
-    return ^books(id).title
-
-pub fn read_alias(id: lib::Book::Id): string
-    return ^books(id).title
-";
-        let (snapshot, paths, indices) =
-            analyze_files(&[("shelf/lib.mw", book_source), ("app.mw", app_source)]);
-        let book_file = &paths[0];
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-        let line_index = indices.0.get(book_file).unwrap();
-
-        for needle in ["shelf::lib::Book::Id", "lib::Book::Id"] {
-            let book = offset_of(app_source, needle) + needle.rfind("Book").unwrap();
-            let book_location = definition(&snapshot, &index, &indices, app_file, book + 1)
-                .expect("qualified identity resource name resolves as the resource identity");
-            assert_eq!(book_location.uri, Url::from_file_path(book_file).unwrap());
-            assert_eq!(
-                range_text(book_source, line_index, book_location.range),
-                "books"
-            );
-
-            let id = offset_of(app_source, needle) + needle.rfind("Id").unwrap();
-            let id_location = definition(&snapshot, &index, &indices, app_file, id + 1)
-                .expect("qualified identity leaf resolves as the resource identity");
-            assert_eq!(id_location.uri, Url::from_file_path(book_file).unwrap());
-            assert_eq!(
-                range_text(book_source, line_index, id_location.range),
-                "books"
-            );
-        }
-    }
-
-    #[test]
-    fn module_path_prefix_definition_resource_identity_annotation_with_keyword_module_segment() {
-        let book_source = "\
-module unknown::lib
-
-resource Book at ^books(id: int)
-    required title: string
-";
-        let app_source = "\
-module app
-
-pub fn read(id: unknown::lib::Book::Id): string
-    return ^books(id).title
-";
-        let (snapshot, paths, indices) =
-            analyze_files(&[("unknown/lib.mw", book_source), ("app.mw", app_source)]);
-        let book_file = &paths[0];
-        let app_file = &paths[1];
-        let index = build_binding_index(&snapshot);
-        let line_index = indices.0.get(book_file).unwrap();
-
-        let module_leaf = offset_of(app_source, "unknown::lib::Book::Id") + "unknown::".len();
-        let module_location = definition(&snapshot, &index, &indices, app_file, module_leaf + 1)
-            .expect("keyword-like module segment in a type annotation resolves to the module");
-        assert_eq!(module_location.uri, Url::from_file_path(book_file).unwrap());
-        assert_eq!(
-            range_text(book_source, line_index, module_location.range),
-            "lib"
-        );
-
-        let book = offset_of(app_source, "unknown::lib::Book::Id") + "unknown::lib::".len();
-        let book_location = definition(&snapshot, &index, &indices, app_file, book + 1)
-            .expect("resource name after a keyword-like module segment resolves as identity");
-        assert_eq!(book_location.uri, Url::from_file_path(book_file).unwrap());
-        assert_eq!(
-            range_text(book_source, line_index, book_location.range),
-            "books"
-        );
-
-        let id = offset_of(app_source, "unknown::lib::Book::Id") + "unknown::lib::Book::".len();
-        let id_location = definition(&snapshot, &index, &indices, app_file, id + 1)
-            .expect("identity leaf after a keyword-like module segment resolves as identity");
-        assert_eq!(id_location.uri, Url::from_file_path(book_file).unwrap());
-        assert_eq!(
-            range_text(book_source, line_index, id_location.range),
-            "books"
         );
     }
 

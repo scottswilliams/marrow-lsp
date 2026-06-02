@@ -288,20 +288,23 @@ fn declaration_overrides(
                     &resource.name,
                     TYPE_STRUCT,
                 );
-                if let Some(store) = &resource.store
-                    && !store.keys.is_empty()
-                {
+                for member in &resource.members {
+                    add_resource_member_overrides(&mut overrides, lexed, source, member);
+                }
+            }
+            Declaration::Store(store) => {
+                if !store.root.keys.is_empty() {
                     add_saved_root_key_overrides(
                         &mut overrides,
                         lexed,
                         source,
-                        resource.span,
-                        &store.root,
-                        store.keys.iter().map(|key| key.name.as_str()),
+                        store.span,
+                        &store.root.root,
+                        store.root.keys.iter().map(|key| key.name.as_str()),
                     );
                 }
-                for member in &resource.members {
-                    add_resource_member_overrides(&mut overrides, lexed, source, member);
+                for index in &store.indexes {
+                    add_index_overrides(&mut overrides, lexed, source, index);
                 }
             }
             Declaration::Enum(enum_decl) => {
@@ -332,7 +335,6 @@ fn add_resource_member_overrides(
     match member {
         ResourceMember::Field(field) => add_field_overrides(overrides, lexed, source, field),
         ResourceMember::Group(group) => add_group_overrides(overrides, lexed, source, group),
-        ResourceMember::Index(index) => add_index_overrides(overrides, lexed, source, index),
     }
 }
 
@@ -730,7 +732,6 @@ fn reference_matches_token(
         reference.kind,
         SymbolKind::Function
             | SymbolKind::Resource
-            | SymbolKind::ResourceIdentity
             | SymbolKind::Field
             | SymbolKind::Layer
             | SymbolKind::Index
@@ -778,25 +779,19 @@ fn span_width(span: SourceSpan) -> usize {
 fn symbol_kind_can_have_namespace_prefix(kind: SymbolKind) -> bool {
     matches!(
         kind,
-        SymbolKind::Function
-            | SymbolKind::Resource
-            | SymbolKind::ResourceIdentity
-            | SymbolKind::Enum
+        SymbolKind::Function | SymbolKind::Resource | SymbolKind::Enum
     )
 }
 
 fn resolved_tail_allows_namespace_prefix(kind: SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Resource | SymbolKind::ResourceIdentity | SymbolKind::Enum
-    )
+    matches!(kind, SymbolKind::Resource | SymbolKind::Enum)
 }
 
 fn style_for_symbol_kind(kind: SymbolKind) -> Option<TokenStyle> {
     let token_type = match kind {
         SymbolKind::Param => TYPE_PARAMETER,
         SymbolKind::Function => TYPE_FUNCTION,
-        SymbolKind::Resource | SymbolKind::ResourceIdentity => TYPE_STRUCT,
+        SymbolKind::Resource => TYPE_STRUCT,
         SymbolKind::Enum => TYPE_ENUM,
         SymbolKind::EnumMember => TYPE_ENUM_MEMBER,
         SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index => TYPE_PROPERTY,
@@ -811,42 +806,22 @@ fn type_annotation_overrides(
     file: &SourceFile,
     source: &str,
 ) -> HashMap<ByteSpan, TokenStyle> {
-    let resources: Vec<&str> = file
-        .declarations
-        .iter()
-        .filter_map(|declaration| match declaration {
-            Declaration::Resource(resource) => Some(resource.name.as_str()),
-            _ => None,
-        })
-        .collect();
     let mut overrides = HashMap::new();
     for declaration in &file.declarations {
         match declaration {
             Declaration::Const(const_decl) => {
                 if let Some(ty) = &const_decl.ty {
-                    add_type_annotation_overrides(&mut overrides, lexed, source, ty, &resources);
+                    add_type_annotation_overrides(&mut overrides, lexed, source, ty);
                 }
             }
             Declaration::Function(function) => {
                 for param in &function.params {
-                    add_type_annotation_overrides(
-                        &mut overrides,
-                        lexed,
-                        source,
-                        &param.ty,
-                        &resources,
-                    );
+                    add_type_annotation_overrides(&mut overrides, lexed, source, &param.ty);
                 }
                 if let Some(ty) = &function.return_type {
-                    add_type_annotation_overrides(&mut overrides, lexed, source, ty, &resources);
+                    add_type_annotation_overrides(&mut overrides, lexed, source, ty);
                 }
-                add_block_type_annotation_overrides(
-                    &mut overrides,
-                    lexed,
-                    source,
-                    &function.body,
-                    &resources,
-                );
+                add_block_type_annotation_overrides(&mut overrides, lexed, source, &function.body);
             }
             Declaration::Resource(resource) => {
                 for member in &resource.members {
@@ -855,8 +830,12 @@ fn type_annotation_overrides(
                         lexed,
                         source,
                         member,
-                        &resources,
                     );
+                }
+            }
+            Declaration::Store(store) => {
+                for key in &store.root.keys {
+                    add_type_annotation_overrides(&mut overrides, lexed, source, &key.ty);
                 }
             }
             Declaration::Enum(_) => {}
@@ -870,21 +849,20 @@ fn add_block_type_annotation_overrides(
     lexed: &LexedSource,
     source: &str,
     block: &Block,
-    resources: &[&str],
 ) {
     for statement in &block.statements {
         match statement {
             Statement::Const { ty, .. } => {
                 if let Some(ty) = ty {
-                    add_type_annotation_overrides(overrides, lexed, source, ty, resources);
+                    add_type_annotation_overrides(overrides, lexed, source, ty);
                 }
             }
             Statement::Var { keys, ty, .. } => {
                 for key in keys {
-                    add_type_annotation_overrides(overrides, lexed, source, &key.ty, resources);
+                    add_type_annotation_overrides(overrides, lexed, source, &key.ty);
                 }
                 if let Some(ty) = ty {
-                    add_type_annotation_overrides(overrides, lexed, source, ty, resources);
+                    add_type_annotation_overrides(overrides, lexed, source, ty);
                 }
             }
             Statement::If {
@@ -893,29 +871,19 @@ fn add_block_type_annotation_overrides(
                 else_block,
                 ..
             } => {
-                add_block_type_annotation_overrides(
-                    overrides, lexed, source, then_block, resources,
-                );
+                add_block_type_annotation_overrides(overrides, lexed, source, then_block);
                 for else_if in else_ifs {
-                    add_block_type_annotation_overrides(
-                        overrides,
-                        lexed,
-                        source,
-                        &else_if.block,
-                        resources,
-                    );
+                    add_block_type_annotation_overrides(overrides, lexed, source, &else_if.block);
                 }
                 if let Some(else_block) = else_block {
-                    add_block_type_annotation_overrides(
-                        overrides, lexed, source, else_block, resources,
-                    );
+                    add_block_type_annotation_overrides(overrides, lexed, source, else_block);
                 }
             }
             Statement::While { body, .. }
             | Statement::For { body, .. }
             | Statement::Transaction { body, .. }
             | Statement::Lock { body, .. } => {
-                add_block_type_annotation_overrides(overrides, lexed, source, body, resources);
+                add_block_type_annotation_overrides(overrides, lexed, source, body);
             }
             Statement::Try {
                 body,
@@ -923,30 +891,20 @@ fn add_block_type_annotation_overrides(
                 finally,
                 ..
             } => {
-                add_block_type_annotation_overrides(overrides, lexed, source, body, resources);
+                add_block_type_annotation_overrides(overrides, lexed, source, body);
                 if let Some(catch) = catch {
                     if let Some(ty) = &catch.ty {
-                        add_type_annotation_overrides(overrides, lexed, source, ty, resources);
+                        add_type_annotation_overrides(overrides, lexed, source, ty);
                     }
-                    add_block_type_annotation_overrides(
-                        overrides,
-                        lexed,
-                        source,
-                        &catch.block,
-                        resources,
-                    );
+                    add_block_type_annotation_overrides(overrides, lexed, source, &catch.block);
                 }
                 if let Some(finally) = finally {
-                    add_block_type_annotation_overrides(
-                        overrides, lexed, source, finally, resources,
-                    );
+                    add_block_type_annotation_overrides(overrides, lexed, source, finally);
                 }
             }
             Statement::Match { arms, .. } => {
                 for arm in arms {
-                    add_block_type_annotation_overrides(
-                        overrides, lexed, source, &arm.block, resources,
-                    );
+                    add_block_type_annotation_overrides(overrides, lexed, source, &arm.block);
                 }
             }
             Statement::Assign { .. }
@@ -966,26 +924,22 @@ fn add_resource_member_type_annotation_overrides(
     lexed: &LexedSource,
     source: &str,
     member: &ResourceMember,
-    resources: &[&str],
 ) {
     match member {
         ResourceMember::Field(field) => {
             for key in &field.keys {
-                add_type_annotation_overrides(overrides, lexed, source, &key.ty, resources);
+                add_type_annotation_overrides(overrides, lexed, source, &key.ty);
             }
-            add_type_annotation_overrides(overrides, lexed, source, &field.ty, resources);
+            add_type_annotation_overrides(overrides, lexed, source, &field.ty);
         }
         ResourceMember::Group(group) => {
             for key in &group.keys {
-                add_type_annotation_overrides(overrides, lexed, source, &key.ty, resources);
+                add_type_annotation_overrides(overrides, lexed, source, &key.ty);
             }
             for member in &group.members {
-                add_resource_member_type_annotation_overrides(
-                    overrides, lexed, source, member, resources,
-                );
+                add_resource_member_type_annotation_overrides(overrides, lexed, source, member);
             }
         }
-        ResourceMember::Index(_) => {}
     }
 }
 
@@ -994,7 +948,6 @@ fn add_type_annotation_overrides(
     lexed: &LexedSource,
     source: &str,
     ty: &TypeRef,
-    resources: &[&str],
 ) {
     let significant_tokens = lexed
         .tokens
@@ -1002,34 +955,27 @@ fn add_type_annotation_overrides(
         .filter(|token| token_in_span(token, ty.span) && !is_trivia(token.kind))
         .collect::<Vec<_>>();
 
-    for (index, tokens) in significant_tokens.windows(3).enumerate() {
-        let [resource_token, separator, id_token] = tokens else {
+    for (index, tokens) in significant_tokens.windows(5).enumerate() {
+        let [id_token, open, caret, root_token, close] = tokens else {
             continue;
         };
-        if !is_path_segment_token(resource_token.kind)
-            || separator.kind != TokenKind::DoubleColon
-            || !is_path_segment_token(id_token.kind)
+        if !is_path_segment_token(id_token.kind)
             || id_token.text(source) != "Id"
+            || open.kind != TokenKind::LeftParen
+            || caret.kind != TokenKind::Caret
+            || !is_path_segment_token(root_token.kind)
+            || close.kind != TokenKind::RightParen
             || index
                 .checked_sub(1)
                 .and_then(|previous| significant_tokens.get(previous))
                 .is_some_and(|token| token.kind == TokenKind::DoubleColon)
             || significant_tokens
-                .get(index + 3)
+                .get(index + 5)
                 .is_some_and(|token| token.kind == TokenKind::DoubleColon)
         {
             continue;
         }
 
-        let resource = resource_token.text(source);
-        if !resources.contains(&resource) {
-            continue;
-        }
-
-        overrides.insert(
-            (resource_token.span.start_byte, resource_token.span.end_byte),
-            TokenStyle::plain(TYPE_NAMESPACE),
-        );
         overrides.insert(
             (id_token.span.start_byte, id_token.span.end_byte),
             TokenStyle::plain(TYPE_STRUCT),
@@ -2366,71 +2312,19 @@ pub fn make()
     }
 
     #[test]
-    fn checked_qualified_resource_identity_constructor_colors_prefixes_and_leaf() {
-        let state_source = "\
-module shelf::state
-
-resource Book at ^state_books(id: int)
-    required title: string
-";
-        let app_source = "\
-module shelf::app
-
-use shelf::state
-
-resource Book at ^app_books(code: string)
-    required label: string
-
-pub fn make_id()
-    const id = state::Book::Id(1)
-";
-        let (index, decoded) = decoded_for_checked_file(
-            &[
-                ("shelf/state.mw", state_source),
-                ("shelf/app.mw", app_source),
-            ],
-            "shelf/app.mw",
-        );
-
-        assert_token(
-            app_source,
-            &index,
-            &decoded,
-            "    const id = state::Book::Id(1)",
-            "state",
-            legend_index(&SemanticTokenType::NAMESPACE),
-            0,
-        );
-        assert_token(
-            app_source,
-            &index,
-            &decoded,
-            "    const id = state::Book::Id(1)",
-            "Book",
-            legend_index(&SemanticTokenType::NAMESPACE),
-            0,
-        );
-        assert_token(
-            app_source,
-            &index,
-            &decoded,
-            "    const id = state::Book::Id(1)",
-            "Id",
-            legend_index(&SemanticTokenType::STRUCT),
-            0,
-        );
-    }
-
-    #[test]
-    fn checked_resource_identity_constructor_prefix_is_namespace_while_leaf_stays_struct() {
+    fn checked_canonical_identity_type_annotation_colors_id_as_struct() {
         let source = "\
 module m
 
-resource Author at ^authors(id: int)
+resource Author
     name: string
 
-pub fn f(): Author::Id
-    return Author::Id(7)
+store ^authors(id: int): Author
+
+pub fn f(
+    id: Id(^authors),
+): Id(^authors)
+    return id
 ";
         let (index, decoded) = decoded_for_checked(source);
 
@@ -2438,16 +2332,7 @@ pub fn f(): Author::Id
             source,
             &index,
             &decoded,
-            "pub fn f(): Author::Id",
-            "Author",
-            legend_index(&SemanticTokenType::NAMESPACE),
-            0,
-        );
-        assert_token(
-            source,
-            &index,
-            &decoded,
-            "pub fn f(): Author::Id",
+            "    id: Id(^authors),",
             "Id",
             legend_index(&SemanticTokenType::STRUCT),
             0,
@@ -2456,16 +2341,7 @@ pub fn f(): Author::Id
             source,
             &index,
             &decoded,
-            "    return Author::Id(7)",
-            "Author",
-            legend_index(&SemanticTokenType::NAMESPACE),
-            0,
-        );
-        assert_token(
-            source,
-            &index,
-            &decoded,
-            "    return Author::Id(7)",
+            "): Id(^authors)",
             "Id",
             legend_index(&SemanticTokenType::STRUCT),
             0,
@@ -2473,36 +2349,28 @@ pub fn f(): Author::Id
     }
 
     #[test]
-    fn checked_nested_resource_identity_type_prefix_is_namespace_while_leaf_stays_struct() {
+    fn checked_nested_canonical_identity_type_annotations_color_id_as_struct() {
         let source = "\
 module m
 
-resource Author at ^authors(id: int)
+resource Author
     name: string
 
+store ^authors(id: int): Author
+
 pub fn f(
-    ids: sequence[Author::Id],
-): sequence[Author::Id]
+    ids: sequence[Id(^authors)],
+): sequence[Id(^authors)]
     return ids
 ";
         let (index, decoded) = decoded_for_checked(source);
-        let namespace = legend_index(&SemanticTokenType::NAMESPACE);
         let strukt = legend_index(&SemanticTokenType::STRUCT);
 
         assert_token(
             source,
             &index,
             &decoded,
-            "    ids: sequence[Author::Id],",
-            "Author",
-            namespace,
-            0,
-        );
-        assert_token(
-            source,
-            &index,
-            &decoded,
-            "    ids: sequence[Author::Id],",
+            "    ids: sequence[Id(^authors)],",
             "Id",
             strukt,
             0,
@@ -2511,16 +2379,7 @@ pub fn f(
             source,
             &index,
             &decoded,
-            "): sequence[Author::Id]",
-            "Author",
-            namespace,
-            0,
-        );
-        assert_token(
-            source,
-            &index,
-            &decoded,
-            "): sequence[Author::Id]",
+            "): sequence[Id(^authors)]",
             "Id",
             strukt,
             0,
@@ -2528,59 +2387,52 @@ pub fn f(
     }
 
     #[test]
-    fn local_resource_identity_type_annotations_color_resource_and_id() {
+    fn local_canonical_identity_type_annotations_color_id_as_struct() {
         let source = "\
 module m
 
-resource Author at ^authors(id: int)
+resource Author
     name: string
 
-fn f(): Author::Id
-    const direct: Author::Id = nextId(^authors)
-    var later: Author::Id = direct
+store ^authors(id: int): Author
+
+fn f(): Id(^authors)
+    const direct: Id(^authors) = nextId(^authors)
+    var later: Id(^authors) = direct
     return direct
 ";
         let (index, decoded) = decoded_for_checked(source);
-        let namespace = legend_index(&SemanticTokenType::NAMESPACE);
         let strukt = legend_index(&SemanticTokenType::STRUCT);
 
         for line in [
-            "    const direct: Author::Id = nextId(^authors)",
-            "    var later: Author::Id = direct",
+            "    const direct: Id(^authors) = nextId(^authors)",
+            "    var later: Id(^authors) = direct",
         ] {
-            assert_token(source, &index, &decoded, line, "Author", namespace, 0);
             assert_token(source, &index, &decoded, line, "Id", strukt, 0);
         }
     }
 
     #[test]
-    fn longer_resource_identity_type_paths_are_not_colored_as_resource_id() {
+    fn longer_canonical_identity_type_paths_are_not_colored_as_store_identity() {
         let source = "\
 module m
 
-resource Author at ^authors(id: int)
+resource Author
     name: string
 
-fn bad_extra(x: Author::Id::Extra)
+store ^authors(id: int): Author
+
+fn bad_extra(x: Id(^authors)::Extra)
     return
 ";
-        let (index, decoded) = decoded_for_checked(source);
+        let (index, decoded) = decoded_for(source);
         let variable = legend_index(&SemanticTokenType::VARIABLE);
 
         assert_token(
             source,
             &index,
             &decoded,
-            "fn bad_extra(x: Author::Id::Extra)",
-            "Author",
-            variable,
-            0,
-        );
-        assert_token(
-            source,
-            &index,
-            &decoded,
-            "fn bad_extra(x: Author::Id::Extra)",
+            "fn bad_extra(x: Id(^authors)::Extra)",
             "Id",
             variable,
             0,

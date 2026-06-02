@@ -240,7 +240,7 @@ impl RecordCount {
 
 /// Render stored bytes to a human string using the path's schema classification.
 /// A declared scalar leaf decodes to a canonical form of its type, and a typed
-/// reference leaf decodes to `Resource::Id(...)`; an index marker or a value that
+/// reference leaf decodes to `Id(^root)(...)`; an index marker or a value that
 /// does not decode renders as raw hex so corrupt or untyped data stays visible
 /// rather than vanishing.
 fn render_value(bytes: &[u8], class: SavedPathClass) -> String {
@@ -249,8 +249,9 @@ fn render_value(bytes: &[u8], class: SavedPathClass) -> String {
             Some(scalar) => render_scalar(&scalar),
             None => hex(bytes),
         },
-        SavedPathClass::Identity { resource, arity } => match decode_identity_arity(bytes, arity) {
-            Some(keys) => render_identity(&resource, &keys),
+        SavedPathClass::Identity { store_root, arity } => match decode_identity_arity(bytes, arity)
+        {
+            Some(keys) => render_identity(&store_root, &keys),
             None => hex(bytes),
         },
         // An index marker holds a presence marker or a raw identity, not a typed
@@ -262,15 +263,15 @@ fn render_value(bytes: &[u8], class: SavedPathClass) -> String {
     }
 }
 
-/// A typed-reference leaf stores the referenced resource identity's key encoding.
+/// A typed-reference leaf stores the referenced store identity's key encoding.
 /// Render the decoded identity in the source-level constructor shape users know.
-fn render_identity(resource: &str, keys: &[SavedKey]) -> String {
+fn render_identity(store_root: &str, keys: &[SavedKey]) -> String {
     let args = keys
         .iter()
         .map(saved_key_literal)
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{resource}::Id({args})")
+    format!("Id(^{store_root})({args})")
 }
 
 /// A saved key as the Marrow literal text users see in a path or identity
@@ -592,9 +593,8 @@ fn call_key_types(
     use marrow_syntax::Expression;
     match callee {
         Expression::SavedRoot { name, .. } => {
-            let resource = resource_by_root(program, name)?;
-            let saved = resource.saved_root.as_ref()?;
-            saved
+            let (store, _resource) = marrow_check::resolve::resolve_store_by_root(program, name)?;
+            store
                 .identity_keys
                 .iter()
                 .map(|key| key.ty.scalar())
@@ -604,7 +604,7 @@ fn call_key_types(
         // named by the field chain and read its key params.
         Expression::Field { base, name, .. } | Expression::OptionalField { base, name, .. } => {
             let root = saved_root_name(base)?;
-            let resource = resource_by_root(program, root)?;
+            let (_store, resource) = marrow_check::resolve::resolve_store_by_root(program, root)?;
             let layers = field_chain(base)?;
             let mut chain: Vec<&str> = layers.iter().map(String::as_str).collect();
             chain.push(name);
@@ -667,23 +667,6 @@ fn literal_key(
         },
         _ => None,
     }
-}
-
-/// The resource whose saved root is `root`, if the program declares one.
-fn resource_by_root<'a>(
-    program: &'a CheckedProgram,
-    root: &str,
-) -> Option<&'a marrow_schema::ResourceSchema> {
-    program
-        .modules
-        .iter()
-        .flat_map(|module| &module.resources)
-        .find(|resource| {
-            resource
-                .saved_root
-                .as_ref()
-                .is_some_and(|saved| saved.root == root)
-        })
 }
 
 #[cfg(test)]
@@ -803,14 +786,14 @@ resource Book at ^books(id: int)
         let rendered = render_value(
             &bytes,
             SavedPathClass::Identity {
-                resource: "Author".to_string(),
+                store_root: "authors".to_string(),
                 arity: 3,
             },
         );
 
         assert_eq!(
             rendered,
-            "Author::Id(\"Ada\\nLovelace\", 0x0aff, 1970-01-01)"
+            "Id(^authors)(\"Ada\\nLovelace\", 0x0aff, 1970-01-01)"
         );
     }
 

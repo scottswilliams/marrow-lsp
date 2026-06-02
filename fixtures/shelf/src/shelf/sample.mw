@@ -1,6 +1,6 @@
 module shelf::sample
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     required author: string
     required shelf: string
@@ -16,16 +16,17 @@ resource Book at ^books(id: int)
         required shelf: string
         required changedAt: instant
 
+store ^books(id: int): Book
     index byShelf(shelf, id)
 
-pub fn add(title: string, author: string, shelf: string, changedAt: instant): Book::Id
+pub fn add(title: string, author: string, shelf: string, changedAt: instant): Id(^books)
     var book: Book
     book.title = title
     book.author = author
     book.shelf = shelf
     book.currentVersion = 1
 
-    const id: Book::Id = nextId(^books)
+    const id: Id(^books) = nextId(^books)
 
     transaction
         ^books(id) = book
@@ -35,7 +36,7 @@ pub fn add(title: string, author: string, shelf: string, changedAt: instant): Bo
 
     return id
 
-pub fn moveToShelf(id: Book::Id, shelf: string, changedAt: instant)
+pub fn moveToShelf(id: Id(^books), shelf: string, changedAt: instant)
     transaction
         const version: int = ^books(id).currentVersion + 1
         ^books(id).shelf = shelf
@@ -44,20 +45,20 @@ pub fn moveToShelf(id: Book::Id, shelf: string, changedAt: instant)
         ^books(id).versions(version).shelf = shelf
         ^books(id).versions(version).changedAt = changedAt
 
-pub fn addNote(id: Book::Id, noteId: string, text: string): bool
+pub fn addNote(id: Id(^books), noteId: string, text: string): bool
     if not exists(^books(id))
         return false
 
     ^books(id).notes(noteId).text = text
     return true
 
-pub fn addTag(id: Book::Id, tag: string): int
+pub fn addTag(id: Id(^books), tag: string): int
     if not exists(^books(id))
         return 0
 
     return append(^books(id).tags, tag)
 
-pub fn remove(id: Book::Id)
+pub fn remove(id: Id(^books))
     delete ^books(id)
 
 pub fn printShelf(shelf: string)

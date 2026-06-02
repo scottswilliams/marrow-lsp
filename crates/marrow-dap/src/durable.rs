@@ -94,7 +94,7 @@ fn node_at(
 /// The rendered value stored exactly at `path`, or `None` when nothing is stored
 /// there (a pure container node). The path is classified against the schema so a
 /// declared scalar decodes to its typed form and a typed-reference leaf renders
-/// as `Resource::Id(...)`; corrupt or untyped data renders raw so it stays
+/// as `Id(^root)(...)`; corrupt or untyped data renders raw so it stays
 /// inspectable rather than vanishing.
 pub fn read_leaf(
     store: &dyn Backend,
@@ -115,8 +115,9 @@ fn render(bytes: &[u8], class: SavedPathClass) -> String {
             Some(scalar) => render_scalar(&scalar),
             None => hex(bytes),
         },
-        SavedPathClass::Identity { resource, arity } => match decode_identity_arity(bytes, arity) {
-            Some(keys) => render_identity(&resource, &keys),
+        SavedPathClass::Identity { store_root, arity } => match decode_identity_arity(bytes, arity)
+        {
+            Some(keys) => render_identity(&store_root, &keys),
             None => hex(bytes),
         },
         SavedPathClass::IndexMarker
@@ -125,15 +126,15 @@ fn render(bytes: &[u8], class: SavedPathClass) -> String {
     }
 }
 
-/// A typed-reference leaf stores another resource's identity key encoding. Show
-/// the source-level identity constructor shape in the debugger variables view.
-fn render_identity(resource: &str, keys: &[SavedKey]) -> String {
+/// A typed-reference leaf stores another store's identity key encoding. Show the
+/// source-level identity constructor shape in the debugger variables view.
+fn render_identity(store_root: &str, keys: &[SavedKey]) -> String {
     let args = keys
         .iter()
         .map(marrow_lsp_core::store::saved_key_literal)
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{resource}::Id({args})")
+    format!("Id(^{store_root})({args})")
 }
 
 /// A decoded scalar as display text. Strings are quoted so an empty or
@@ -336,14 +337,14 @@ mod tests {
         let rendered = render(
             &bytes,
             SavedPathClass::Identity {
-                resource: "Author".to_string(),
+                store_root: "authors".to_string(),
                 arity: 3,
             },
         );
 
         assert_eq!(
             rendered,
-            "Author::Id(\"Ada\\nLovelace\", 0x0aff, 1970-01-01)"
+            "Id(^authors)(\"Ada\\nLovelace\", 0x0aff, 1970-01-01)"
         );
     }
 

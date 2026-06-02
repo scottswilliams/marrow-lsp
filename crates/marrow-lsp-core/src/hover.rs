@@ -16,11 +16,12 @@ use marrow_check::{
     SavedPlaceEffect, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
     expand_module_alias, resolve, type_at,
 };
-use marrow_schema::{EnumSchema, NodeKind, ResourceSchema, stdlib};
+use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema, stdlib};
 use marrow_store::backend::Presence;
 use marrow_syntax::{
-    Block, Declaration, EnumDecl, EnumMember, FunctionDecl, KeyParam, Keyword, ParamMode,
-    ResourceDecl, ResourceMember, SourceSpan, Statement, TokenKind, TypeRef, lex_source,
+    Block, Declaration, EnumDecl, EnumMember, FunctionDecl, IndexDecl, KeyParam, Keyword,
+    ParamMode, ResourceDecl, ResourceMember, SourceSpan, Statement, StoreDecl, TokenKind, TypeRef,
+    lex_source,
 };
 
 use crate::language_facts;
@@ -61,6 +62,12 @@ pub fn hover_with_index(
     if let Some(value) = project_module_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
+    if let Some(value) = saved_root_hover(snapshot, file, offset, reader) {
+        return Some(markdown_hover(value));
+    }
+    if let Some(value) = store_root_declaration_hover(snapshot, file, offset, reader) {
+        return Some(markdown_hover(value));
+    }
     if let Some(value) = rich_symbol_hover(snapshot, index, file, offset, reader) {
         return Some(markdown_hover(value));
     }
@@ -73,10 +80,6 @@ pub fn hover_with_index(
     if let Some(value) = type_name_hover(snapshot, file, offset, reader) {
         return Some(markdown_hover(value));
     }
-    if let Some(value) = saved_root_hover(snapshot, file, offset, reader) {
-        return Some(markdown_hover(value));
-    }
-
     let docs = symbol_docs_at_hover_target(snapshot, index, file, offset);
     hover_with_live(snapshot, file, offset, docs.as_deref(), reader)
 }
@@ -132,10 +135,7 @@ fn binding_index_should_win_project_module_hover(
     let Some(symbol) = index.definition(file, offset) else {
         return false;
     };
-    matches!(
-        symbol.kind,
-        SymbolKind::Enum | SymbolKind::EnumMember | SymbolKind::ResourceIdentity
-    )
+    matches!(symbol.kind, SymbolKind::Enum | SymbolKind::EnumMember)
 }
 
 fn project_module_hover_markdown(module: &CheckedModule) -> String {
@@ -177,10 +177,6 @@ fn rich_symbol_hover(
             let schema = resource_schema_for_symbol(snapshot, &symbol)?;
             Some(resource_hover(schema, reader))
         }
-        SymbolKind::ResourceIdentity => {
-            let schema = resource_schema_for_symbol(snapshot, &symbol)?;
-            resource_identity_hover(schema, reader)
-        }
         SymbolKind::Enum => {
             let schema = enum_schema_for_symbol(snapshot, &symbol)?;
             Some(enum_hover(schema))
@@ -207,13 +203,6 @@ fn type_name_hover(
         return None;
     }
     let (segments, segment_index) = qualified_name_at_with_position(&analyzed.source, offset)?;
-    if segments.len() >= 2
-        && segments.last().is_some_and(|segment| segment == "Id")
-        && segment_index + 2 >= segments.len()
-    {
-        let schema = resource_schema_for_identity_type_name(snapshot, file, &segments)?;
-        return resource_identity_hover(schema, reader);
-    }
     if segment_index + 1 == segments.len() {
         if let Some(schema) = resource_schema_for_type_name(snapshot, file, &segments) {
             return Some(resource_hover(schema, reader));
@@ -239,8 +228,21 @@ fn saved_root_hover(
     if !offset_is_on_saved_root(&analyzed.source, offset, root) {
         return None;
     }
-    let schema = marrow_check::resolve::resolve_resource_by_root(&snapshot.program, root)?;
-    Some(resource_hover(schema, reader))
+    let (store, resource) = marrow_check::resolve::resolve_store_by_root(&snapshot.program, root)?;
+    Some(store_hover(store, resource, reader))
+}
+
+fn store_root_declaration_hover(
+    snapshot: &AnalysisSnapshot,
+    file: &Path,
+    offset: usize,
+    reader: Option<&StoreReader>,
+) -> Option<String> {
+    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
+    let store = store_root_at(&analyzed.parsed.file, &analyzed.source, offset)?;
+    let (store_schema, resource) =
+        marrow_check::resolve::resolve_store_by_root(&snapshot.program, &store.root.root)?;
+    Some(store_hover(store_schema, resource, reader))
 }
 
 fn resource_member_hover(
@@ -260,9 +262,17 @@ fn resource_member_hover(
     }
 
     let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let member = resource_member_at(&parsed_file.parsed.file, symbol.span)?;
-    let mut value = marrow_code_block(&resource_member_signature(member));
-    append_docs(&mut value, join_docs(resource_member_docs(member)));
+    let mut value = if symbol.kind == SymbolKind::Index {
+        let index = store_index_at(&parsed_file.parsed.file, symbol.span)?;
+        let mut value = marrow_code_block(&index_signature(index));
+        append_docs(&mut value, join_docs(&index.docs));
+        value
+    } else {
+        let member = resource_member_at(&parsed_file.parsed.file, symbol.span)?;
+        let mut value = marrow_code_block(&resource_member_signature(member));
+        append_docs(&mut value, join_docs(resource_member_docs(member)));
+        value
+    };
 
     if let Some(reader) = reader
         && let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file)
@@ -719,10 +729,6 @@ fn is_rich_symbol_hover_target(
         SymbolKind::Resource => {
             is_named_symbol_reference(snapshot, index, file, offset, symbol)
                 || is_resource_declaration_name(snapshot, file, offset, symbol)
-                || is_resource_saved_root_declaration(snapshot, file, offset, symbol)
-        }
-        SymbolKind::ResourceIdentity => {
-            is_named_symbol_reference(snapshot, index, file, offset, symbol)
         }
         SymbolKind::Enum => {
             is_named_symbol_reference(snapshot, index, file, offset, symbol)
@@ -768,30 +774,6 @@ fn is_resource_declaration_name(
         return false;
     };
     offset_is_on_declaration_name(&analyzed.source, symbol.span, &resource.name, offset)
-}
-
-fn is_resource_saved_root_declaration(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    if symbol.file != file {
-        return false;
-    }
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == symbol.file) else {
-        return false;
-    };
-    let Some(resource) = resource_at(&analyzed.parsed.file, symbol.span) else {
-        return false;
-    };
-    let Some(store) = &resource.store else {
-        return false;
-    };
-    let Some((start, end)) = saved_root_span(&analyzed.source, symbol.span, &store.root) else {
-        return false;
-    };
-    start <= offset && offset <= end
 }
 
 fn is_enum_declaration_name(
@@ -1139,26 +1121,6 @@ fn resource_schema_for_symbol<'a>(
         .find(|schema| schema.name == resource.name)
 }
 
-fn resource_schema_for_identity_type_name<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    segments: &[String],
-) -> Option<&'a ResourceSchema> {
-    let from_module = module_name_for_file(snapshot, file)?;
-    match resolve(
-        &snapshot.program,
-        from_module,
-        segments,
-        ResolvableKind::ResourceIdentity,
-    ) {
-        Resolution::Found(def) => match def.item {
-            DefItem::Resource(schema) if has_identity_keys(schema) => Some(schema),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn resource_schema_for_type_name<'a>(
     snapshot: &'a AnalysisSnapshot,
     file: &Path,
@@ -1343,39 +1305,32 @@ fn enum_member_path_in(members: &[EnumMember], span: SourceSpan, path: &mut Vec<
     false
 }
 
-fn resource_hover(schema: &ResourceSchema, reader: Option<&StoreReader>) -> String {
+fn resource_hover(schema: &ResourceSchema, _reader: Option<&StoreReader>) -> String {
     let mut value = marrow_code_block(&resource_signature(schema));
     append_docs(&mut value, join_docs(&schema.docs));
-    append_section(&mut value, identity_summary(schema));
-    append_section(&mut value, resource_member_summary(schema));
+    append_section(&mut value, resource_member_summary(schema, &[]));
+    value
+}
+
+fn store_hover(
+    store: &StoreSchema,
+    resource: &ResourceSchema,
+    reader: Option<&StoreReader>,
+) -> String {
+    let mut value = marrow_code_block(&store_signature(store));
+    append_docs(&mut value, join_docs(&store.docs));
+    append_section(&mut value, identity_summary(store));
+    append_section(
+        &mut value,
+        resource_member_summary(resource, &store.indexes),
+    );
     if let Some(reader) = reader
-        && let Some(root) = schema.saved_root.as_ref().map(|saved| saved.root.as_str())
-        && let Availability::Available(count) = reader.record_count(root)
+        && let Availability::Available(count) = reader.record_count(&store.root)
     {
         value.push_str("\n\n");
         value.push_str(&live_advisory_line(count.display()));
     }
     value
-}
-
-fn resource_identity_hover(
-    schema: &ResourceSchema,
-    _reader: Option<&StoreReader>,
-) -> Option<String> {
-    if !has_identity_keys(schema) {
-        return None;
-    }
-    let mut value = marrow_code_block(&format!("{}::Id", schema.name));
-    append_docs(&mut value, join_docs(&schema.docs));
-    append_section(&mut value, identity_summary(schema));
-    Some(value)
-}
-
-fn has_identity_keys(schema: &ResourceSchema) -> bool {
-    schema
-        .saved_root
-        .as_ref()
-        .is_some_and(|saved| !saved.identity_keys.is_empty())
 }
 
 fn enum_hover(schema: &EnumSchema) -> String {
@@ -1406,34 +1361,35 @@ fn enum_member_hover(schema: &EnumSchema, ordinal: usize) -> String {
 }
 
 fn resource_signature(schema: &ResourceSchema) -> String {
-    let mut signature = format!("resource {}", schema.name);
-    if let Some(saved) = &schema.saved_root {
-        signature.push_str(" at ^");
-        signature.push_str(&saved.root);
-        if !saved.identity_keys.is_empty() {
-            signature.push('(');
-            signature.push_str(
-                &saved
-                    .identity_keys
-                    .iter()
-                    .map(|key| format!("{}: {}", key.name, key.ty))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-            signature.push(')');
-        }
+    format!("resource {}", schema.name)
+}
+
+fn store_signature(store: &StoreSchema) -> String {
+    let mut signature = format!("store ^{}", store.root);
+    if !store.identity_keys.is_empty() {
+        signature.push('(');
+        signature.push_str(
+            &store
+                .identity_keys
+                .iter()
+                .map(|key| format!("{}: {}", key.name, key.ty))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        signature.push(')');
     }
+    signature.push_str(": ");
+    signature.push_str(&store.resource);
     signature
 }
 
-fn identity_summary(schema: &ResourceSchema) -> Option<String> {
-    let saved = schema.saved_root.as_ref()?;
-    if saved.identity_keys.is_empty() {
+fn identity_summary(store: &StoreSchema) -> Option<String> {
+    if store.identity_keys.is_empty() {
         return Some("**Identity**\n- keyless singleton; no generated identity type".to_string());
     }
-    let mut lines = vec![format!("- generated identity type: `{}::Id`", schema.name)];
+    let mut lines = vec![format!("- generated identity type: `Id(^{})`", store.root)];
     lines.extend(
-        saved
+        store
             .identity_keys
             .iter()
             .map(|key| format!("- `{}: {}`", key.name, key.ty)),
@@ -1441,12 +1397,12 @@ fn identity_summary(schema: &ResourceSchema) -> Option<String> {
     Some(format!("**Identity**\n{}", lines.join("\n")))
 }
 
-fn resource_member_summary(schema: &ResourceSchema) -> Option<String> {
+fn resource_member_summary(schema: &ResourceSchema, indexes: &[IndexSchema]) -> Option<String> {
     let mut lines = Vec::new();
     for member in &schema.members {
         resource_member_lines(member, "", &mut lines);
     }
-    lines.extend(schema.indexes.iter().map(|index| {
+    lines.extend(indexes.iter().map(|index| {
         let unique = if index.unique { " unique" } else { "" };
         format!("index {}({}){unique}", index.name, index.args.join(", "))
     }));
@@ -1557,18 +1513,15 @@ fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> b
             .ty
             .as_ref()
             .is_some_and(|ty| type_ref_covers(ty, offset)),
-        Declaration::Resource(resource) => {
-            resource
-                .members
-                .iter()
-                .any(|member| resource_member_type_annotation_at(member, offset))
-                || resource.store.as_ref().is_some_and(|store| {
-                    store
-                        .keys
-                        .iter()
-                        .any(|key| type_ref_covers(&key.ty, offset))
-                })
-        }
+        Declaration::Resource(resource) => resource
+            .members
+            .iter()
+            .any(|member| resource_member_type_annotation_at(member, offset)),
+        Declaration::Store(store) => store
+            .root
+            .keys
+            .iter()
+            .any(|key| type_ref_covers(&key.ty, offset)),
         Declaration::Function(function) => {
             function
                 .params
@@ -1603,7 +1556,6 @@ fn resource_member_type_annotation_at(member: &ResourceMember, offset: usize) ->
                     .iter()
                     .any(|member| resource_member_type_annotation_at(member, offset))
         }
-        ResourceMember::Index(_) => false,
     }
 }
 
@@ -1896,7 +1848,7 @@ fn markdown_hover(value: String) -> Hover {
 /// The symbol is resolved through the cached [`BindingIndex`] (the same one
 /// go-to-definition and references read), so this never rebuilds resolution per
 /// request. Only documentable declarations — functions, resources, module
-/// constants, enums, enum members, and a resource's saved fields, layers, and
+/// constants, enums, enum members, resource fields and layers, and store
 /// indexes — carry docs; a local or parameter has none and yields `None`. The
 /// declaration is located in
 /// the snapshot's parsed file by matching the definition span, and its `docs`
@@ -1916,9 +1868,8 @@ pub fn symbol_docs(
 
 /// The `docs` lines of the declaration the definition `symbol` names, found in
 /// `source` by matching the definition span, or `None` when the symbol is not a
-/// documentable declaration. A resource's generated identity shares its
-/// resource's span, so it reads the resource's docs; locals and parameters are
-/// not declarations here and return `None`.
+/// documentable declaration. Locals and parameters are not declarations here and
+/// return `None`.
 fn declaration_docs<'a>(
     source: &'a marrow_syntax::SourceFile,
     symbol: &SymbolRef,
@@ -1946,7 +1897,7 @@ fn declaration_docs<'a>(
                     _ => None,
                 })
         }
-        SymbolKind::Resource | SymbolKind::ResourceIdentity => {
+        SymbolKind::Resource => {
             resource_at(source, symbol.span).map(|resource| resource.docs.as_slice())
         }
         SymbolKind::Enum => enum_at(source, symbol.span).map(|enum_decl| enum_decl.docs.as_slice()),
@@ -1961,11 +1912,24 @@ fn declaration_docs<'a>(
                     _ => None,
                 })
         }
-        SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index => source
+        SymbolKind::Field | SymbolKind::Layer => {
+            source
+                .declarations
+                .iter()
+                .find_map(|declaration| match declaration {
+                    Declaration::Resource(resource) => member_docs(&resource.members, symbol.span),
+                    _ => None,
+                })
+        }
+        SymbolKind::Index => source
             .declarations
             .iter()
             .find_map(|declaration| match declaration {
-                Declaration::Resource(resource) => member_docs(&resource.members, symbol.span),
+                Declaration::Store(store) => store
+                    .indexes
+                    .iter()
+                    .find(|index| index.span == symbol.span)
+                    .map(|index| index.docs.as_slice()),
                 _ => None,
             }),
         // Locals, parameters, and module aliases carry no `;;` documentation.
@@ -2054,7 +2018,6 @@ fn resource_member_in(members: &[ResourceMember], span: SourceSpan) -> Option<&R
         match member {
             ResourceMember::Field(field) if field.span == span => return Some(member),
             ResourceMember::Group(group) if group.span == span => return Some(member),
-            ResourceMember::Index(index) if index.span == span => return Some(member),
             ResourceMember::Group(group) => {
                 if let Some(member) = resource_member_in(&group.members, span) {
                     return Some(member);
@@ -2064,6 +2027,35 @@ fn resource_member_in(members: &[ResourceMember], span: SourceSpan) -> Option<&R
         }
     }
     None
+}
+
+fn store_root_at<'a>(
+    source: &'a marrow_syntax::SourceFile,
+    text: &str,
+    offset: usize,
+) -> Option<&'a StoreDecl> {
+    for declaration in &source.declarations {
+        let Declaration::Store(store) = declaration else {
+            continue;
+        };
+        let Some((start, end)) = saved_root_span(text, store.span, &store.root.root) else {
+            continue;
+        };
+        if start <= offset && offset <= end {
+            return Some(store);
+        }
+    }
+    None
+}
+
+fn store_index_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&IndexDecl> {
+    source
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Store(store) => store.indexes.iter().find(|index| index.span == span),
+            _ => None,
+        })
 }
 
 fn resource_member_signature(member: &ResourceMember) -> String {
@@ -2080,18 +2072,18 @@ fn resource_member_signature(member: &ResourceMember) -> String {
         ResourceMember::Group(group) => {
             format!("{}{}", group.name, syntax_key_params(&group.keys))
         }
-        ResourceMember::Index(index) => {
-            let unique = if index.unique { " unique" } else { "" };
-            format!("index {}({}){unique}", index.name, index.args.join(", "))
-        }
     }
+}
+
+fn index_signature(index: &IndexDecl) -> String {
+    let unique = if index.unique { " unique" } else { "" };
+    format!("index {}({}){unique}", index.name, index.args.join(", "))
 }
 
 fn resource_member_name(member: &ResourceMember) -> &str {
     match member {
         ResourceMember::Field(field) => &field.name,
         ResourceMember::Group(group) => &group.name,
-        ResourceMember::Index(index) => &index.name,
     }
 }
 
@@ -2099,7 +2091,6 @@ fn resource_member_docs(member: &ResourceMember) -> &[String] {
     match member {
         ResourceMember::Field(field) => &field.docs,
         ResourceMember::Group(group) => &group.docs,
-        ResourceMember::Index(index) => &index.docs,
     }
 }
 
@@ -2124,7 +2115,6 @@ fn member_docs(members: &[ResourceMember], span: SourceSpan) -> Option<&[String]
         match member {
             ResourceMember::Field(field) if field.span == span => return Some(&field.docs),
             ResourceMember::Group(group) if group.span == span => return Some(&group.docs),
-            ResourceMember::Index(index) if index.span == span => return Some(&index.docs),
             // A nested group can hold the named member; descend before moving on.
             ResourceMember::Group(group) => {
                 if let Some(docs) = member_docs(&group.members, span) {
@@ -2609,7 +2599,7 @@ resource Book at ^books(id: int)
 pub fn f(): bool
     return exists(^books(1))
 
-pub fn g(): Book::Id
+pub fn g(): Id(^books)
     return nextId(^books)
 
 pub fn h()
@@ -3135,7 +3125,7 @@ pub fn current(): status
     }
 
     #[test]
-    fn hover_over_resource_identity_head_wins_over_same_named_project_module() {
+    fn hover_over_removed_resource_identity_head_does_not_invent_identity_hover() {
         let book_source = "\
 module book
 
@@ -3158,21 +3148,16 @@ pub fn load(): book::Id
         );
         let index = index_for(&snapshot);
         let head = offset_of(app_source, "book::Id(1)");
-        let value = hover_value_at(&snapshot, &index, &file, head + 1)
-            .expect("a hover over the resource identity path head");
-
-        assert!(
-            value.starts_with("```marrow\nbook::Id\n```"),
-            "identity path head should keep the generated identity hover: {value}"
-        );
-        assert!(
-            value.contains("Saved books."),
-            "identity path head should keep resource docs: {value}"
-        );
-        assert!(
-            !value.starts_with("```marrow\nmodule book\n```"),
-            "identity path head should not be stolen by the same-named module: {value}"
-        );
+        if let Some(value) = hover_value_at(&snapshot, &index, &file, head + 1) {
+            assert!(
+                !value.starts_with("```marrow\nbook::Id\n```"),
+                "removed identity path must not get a generated identity hover: {value}"
+            );
+            assert!(
+                !value.contains("Saved books."),
+                "removed identity path must not inherit resource docs: {value}"
+            );
+        }
     }
 
     #[test]
@@ -3596,37 +3581,40 @@ pub fn caller(): int
     }
 
     #[test]
-    fn hover_over_a_resource_declaration_name_shows_root_identity_docs_and_members() {
+    fn hover_over_a_resource_declaration_name_shows_docs_and_members_without_store_identity() {
         let source = "\
 module a
 
-;; Books saved by id.
-resource Book at ^books(id: int)
+;; Book records.
+resource Book
     ;; Display title.
     required title: string
     pages: int
     tags(pos: int): string
+
+;; Books saved by id.
+store ^books(id: int): Book
     index byTitle(title) unique
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
-        let value = hover_value(&snapshot, &index, &file, source, "Book at ^books");
+        let value = hover_value(&snapshot, &index, &file, source, "Book\n    ;; Display");
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
+            value.starts_with("```marrow\nresource Book\n```"),
             "resource signature should lead the hover: {value}"
         );
         assert!(
-            value.contains("Books saved by id."),
+            value.contains("Book records."),
             "resource docs should be shown: {value}"
         );
         assert!(
-            value.contains("id: int"),
-            "identity key should be summarized: {value}"
+            !value.contains("Books saved by id."),
+            "resource hover should not inherit store docs: {value}"
         );
         assert!(
-            value.contains("Book::Id"),
-            "identity summary should name the generated identity type: {value}"
+            !value.contains("Id(^books)"),
+            "resource hover should not name the store-owned identity type: {value}"
         );
         assert!(
             value.contains("required title: string"),
@@ -3641,8 +3629,8 @@ resource Book at ^books(id: int)
             "keyed leaf summary should include key and value type: {value}"
         );
         assert!(
-            value.contains("index byTitle(title) unique"),
-            "index summary should be included: {value}"
+            !value.contains("index byTitle(title) unique"),
+            "resource hover should not include store-owned indexes: {value}"
         );
     }
 
@@ -3651,9 +3639,11 @@ resource Book at ^books(id: int)
         let source = "\
 module a
 
-;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+;; Books saved by id.
+store ^books(id: int): Book
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
@@ -3665,9 +3655,7 @@ resource Book at ^books(id: int)
         }) = hover
         {
             assert!(
-                !markup
-                    .value
-                    .starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
+                !markup.value.starts_with("```marrow\nresource Book\n```"),
                 "resource keyword should not inherit the declaration-name hover: {}",
                 markup.value
             );
@@ -3680,18 +3668,18 @@ resource Book at ^books(id: int)
 module a
 
 ;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
 pub fn make(): Book
-    return Book(id: 1, title: \"x\")
+    return Book(title: \"x\")
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
-        let value = hover_value(&snapshot, &index, &file, source, "Book(id: 1");
+        let value = hover_value(&snapshot, &index, &file, source, "Book(title");
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
+            value.starts_with("```marrow\nresource Book\n```"),
             "constructor should show the resource declaration, not only the type: {value}"
         );
         assert!(
@@ -3770,7 +3758,7 @@ pub fn make()
 module a
 
 ;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
 pub fn echo(book: Book): Book
@@ -3789,7 +3777,7 @@ pub fn echo(book: Book): Book
             let value = markup.value;
 
             assert!(
-                value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
+                value.starts_with("```marrow\nresource Book\n```"),
                 "resource annotation hover should lead with resource signature: {value}"
             );
             assert!(
@@ -3797,8 +3785,8 @@ pub fn echo(book: Book): Book
                 "resource annotation hover should include resource docs: {value}"
             );
             assert!(
-                value.contains("Book::Id"),
-                "resource annotation hover should name the generated identity type: {value}"
+                !value.contains("Id(^books)"),
+                "resource annotation hover should not name the store-owned identity type: {value}"
             );
             assert!(
                 value.contains("required title: string"),
@@ -3813,14 +3801,14 @@ pub fn echo(book: Book): Book
 module shelf::first
 
 ;; First module books.
-resource Book at ^first_books(id: int)
+resource Book
     required title: string
 ";
         let second_source = "\
 module shelf::second
 
 ;; Second module books.
-resource Book at ^second_books(code: string)
+resource Book
     required subtitle: string
 
 pub fn echo(book: Book): Book
@@ -3842,7 +3830,7 @@ pub fn echo(book: Book): Book
         let value = markup.value;
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^second_books(code: string)\n```"),
+            value.starts_with("```marrow\nresource Book\n```"),
             "resource annotation hover should use the current module schema: {value}"
         );
         assert!(
@@ -3854,12 +3842,12 @@ pub fn echo(book: Book): Book
             "resource annotation hover should include the current module members: {value}"
         );
         assert!(
-            !value.contains("^first_books"),
-            "resource annotation hover should not use the other module root: {value}"
-        );
-        assert!(
             !value.contains("First module books."),
             "resource annotation hover should not use the other module docs: {value}"
+        );
+        assert!(
+            !value.contains("id: int"),
+            "resource annotation hover should not use the other module store keys: {value}"
         );
     }
 
@@ -3869,7 +3857,7 @@ pub fn echo(book: Book): Book
 module shelf::state
 
 ;; Books from state.
-resource Book at ^state_books(id: int)
+resource Book
     required title: string
 ";
         let app_source = "\
@@ -3878,7 +3866,7 @@ module shelf::app
 use shelf::state
 
 ;; App-local books.
-resource Book at ^app_books(code: string)
+resource Book
     required subtitle: string
 
 pub fn books(items: sequence[state::Book])
@@ -3900,9 +3888,7 @@ pub fn books(items: sequence[state::Book])
         }) = qualifier_hover
         {
             assert!(
-                !markup
-                    .value
-                    .starts_with("```marrow\nresource Book at ^state_books"),
+                !markup.value.starts_with("```marrow\nresource Book\n```"),
                 "module qualifier should not pretend to be the resource: {}",
                 markup.value
             );
@@ -3916,7 +3902,7 @@ pub fn books(items: sequence[state::Book])
         let value = markup.value;
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^state_books(id: int)\n```"),
+            value.starts_with("```marrow\nresource Book\n```"),
             "wrapped resource annotation hover should use the qualified module schema: {value}"
         );
         assert!(
@@ -3928,7 +3914,7 @@ pub fn books(items: sequence[state::Book])
             "wrapped resource annotation hover should include foreign members: {value}"
         );
         assert!(
-            !value.contains("^app_books"),
+            !value.contains("code: string"),
             "wrapped resource annotation hover should not use app-local same-named resource: {value}"
         );
         assert!(
@@ -3938,178 +3924,19 @@ pub fn books(items: sequence[state::Book])
     }
 
     #[test]
-    fn hover_over_qualified_resource_identity_annotation_shows_identity_hover() {
-        let state_source = "\
-module shelf::state
-
-;; Books from state.
-resource Book at ^books(id: int, locale: string)
-    required title: string
-";
-        let app_source = "\
-module shelf::app
-
-use shelf::state
-
-pub fn load(id: state::Book::Id): state::Book::Id
-    return id
-";
-        let (snapshot, file) = analyze_files(
-            &[
-                ("shelf/state.mw", state_source),
-                ("shelf/app.mw", app_source),
-            ],
-            "shelf/app.mw",
-        );
-        let index = index_for(&snapshot);
-        let annotation = offset_of(app_source, "state::Book::Id");
-        let qualifier_hover = hover_with_index(&snapshot, &index, &file, annotation + 1, None);
-        if let Some(Hover {
-            contents: HoverContents::Markup(markup),
-            ..
-        }) = qualifier_hover
-        {
-            assert!(
-                !markup.value.starts_with("```marrow\nBook::Id\n```"),
-                "module qualifier should not pretend to be the identity: {}",
-                markup.value
-            );
-            assert!(
-                !markup
-                    .value
-                    .starts_with("```marrow\nresource Book at ^books"),
-                "module qualifier should not pretend to be the resource: {}",
-                markup.value
-            );
-        }
-
-        let identity_leaf = annotation + "state::Book::".len();
-        let hover =
-            hover_with_index(&snapshot, &index, &file, identity_leaf, None).expect("a hover");
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("expected markup");
-        };
-        let value = markup.value;
-
-        assert!(
-            value.starts_with("```marrow\nBook::Id\n```"),
-            "qualified identity annotation hover should lead with the generated identity type: {value}"
-        );
-        assert!(
-            value.contains("Books from state."),
-            "qualified identity annotation hover should include resource docs: {value}"
-        );
-        assert!(
-            value.contains("id: int"),
-            "qualified identity annotation hover should include the first key: {value}"
-        );
-        assert!(
-            value.contains("locale: string"),
-            "qualified identity annotation hover should include composite keys: {value}"
-        );
-    }
-
-    #[test]
-    fn hover_over_wrapped_qualified_resource_identity_annotation_shows_identity_hover() {
-        let state_source = "\
-module shelf::state
-
-;; Books from state.
-resource Book at ^state_books(id: int, locale: string)
-    required title: string
-";
-        let app_source = "\
-module shelf::app
-
-use shelf::state
-
-;; App-local books.
-resource Book at ^app_books(code: string)
-    required subtitle: string
-
-pub fn ids(ids: sequence[state::Book::Id])
-    return
-";
-        let (snapshot, file) = analyze_files(
-            &[
-                ("shelf/state.mw", state_source),
-                ("shelf/app.mw", app_source),
-            ],
-            "shelf/app.mw",
-        );
-        let index = index_for(&snapshot);
-        let annotation = offset_of(app_source, "state::Book::Id");
-        let qualifier_hover = hover_with_index(&snapshot, &index, &file, annotation + 1, None);
-        if let Some(Hover {
-            contents: HoverContents::Markup(markup),
-            ..
-        }) = qualifier_hover
-        {
-            assert!(
-                !markup.value.starts_with("```marrow\nBook::Id\n```"),
-                "module qualifier should not pretend to be the identity: {}",
-                markup.value
-            );
-            assert!(
-                !markup
-                    .value
-                    .starts_with("```marrow\nresource Book at ^state_books"),
-                "module qualifier should not pretend to be the resource: {}",
-                markup.value
-            );
-        }
-
-        for offset in [
-            annotation + "state::".len(),
-            annotation + "state::Book::".len(),
-        ] {
-            let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
-            let HoverContents::Markup(markup) = hover.contents else {
-                panic!("expected markup");
-            };
-            let value = markup.value;
-
-            assert!(
-                value.starts_with("```marrow\nBook::Id\n```"),
-                "wrapped identity annotation hover should lead with the generated identity type: {value}"
-            );
-            assert!(
-                value.contains("Books from state."),
-                "wrapped identity annotation hover should include foreign docs: {value}"
-            );
-            assert!(
-                value.contains("id: int"),
-                "wrapped identity annotation hover should include the first key: {value}"
-            );
-            assert!(
-                value.contains("locale: string"),
-                "wrapped identity annotation hover should include composite keys: {value}"
-            );
-            assert!(
-                !value.contains("code: string"),
-                "wrapped identity annotation hover should not use app-local identity keys: {value}"
-            );
-            assert!(
-                !value.contains("App-local books."),
-                "wrapped identity annotation hover should not include app-local docs: {value}"
-            );
-        }
-    }
-
-    #[test]
     fn hover_over_same_named_resource_declaration_uses_that_module_schema() {
         let first_source = "\
 module shelf::first
 
 ;; First module books.
-resource Book at ^first_books(id: int)
+resource Book
     required title: string
 ";
         let second_source = "\
 module shelf::second
 
 ;; Second module books.
-resource Book at ^second_books(code: string)
+resource Book
     required subtitle: string
 ";
         let (snapshot, file) = analyze_files(
@@ -4120,16 +3947,10 @@ resource Book at ^second_books(code: string)
             "shelf/second.mw",
         );
         let index = index_for(&snapshot);
-        let value = hover_value(
-            &snapshot,
-            &index,
-            &file,
-            second_source,
-            "Book at ^second_books",
-        );
+        let value = hover_value(&snapshot, &index, &file, second_source, "Book");
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^second_books(code: string)\n```"),
+            value.starts_with("```marrow\nresource Book\n```"),
             "resource hover should use the declaring module schema: {value}"
         );
         assert!(
@@ -4141,24 +3962,26 @@ resource Book at ^second_books(code: string)
             "resource hover should include the second module members: {value}"
         );
         assert!(
-            !value.contains("^first_books"),
-            "resource hover should not use the first module root: {value}"
-        );
-        assert!(
             !value.contains("First module books."),
             "resource hover should not use the first module docs: {value}"
+        );
+        assert!(
+            !value.contains("id: int"),
+            "resource hover should not use the first module store keys: {value}"
         );
     }
 
     #[test]
-    fn hover_over_saved_root_caret_and_chained_use_shows_resource_hover() {
+    fn hover_over_saved_root_caret_and_chained_use_shows_store_hover() {
         let source = "\
 module a
 
-;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     ;; Display title.
     required title: string
+
+;; Books saved by id.
+store ^books(id: int): Book
 
 pub fn f(): string
     return ^books(1).title
@@ -4178,12 +4001,16 @@ pub fn f(): string
             let value = markup.value;
 
             assert!(
-                value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
-                "saved root hover should show the resource signature: {value}"
+                value.starts_with("```marrow\nstore ^books(id: int): Book\n```"),
+                "saved root hover should show the store signature: {value}"
             );
             assert!(
                 value.contains("Books saved by id."),
-                "saved root hover should include resource docs: {value}"
+                "saved root hover should include store docs: {value}"
+            );
+            assert!(
+                value.contains("Id(^books)"),
+                "saved root hover should include the store-owned identity type: {value}"
             );
         }
 
@@ -4205,64 +4032,15 @@ pub fn f(): string
     }
 
     #[test]
-    fn hover_over_same_named_resource_identity_uses_current_module_schema() {
-        let first_source = "\
-module shelf::first
-
-;; First module books.
-resource Book at ^first_books(id: int)
-    required title: string
-";
-        let second_source = "\
-module shelf::second
-
-;; Second module books.
-resource Book at ^second_books(code: string)
-    required subtitle: string
-
-pub fn load(id: Book::Id): Book::Id
-    return id
-";
-        let (snapshot, file) = analyze_files(
-            &[
-                ("shelf/first.mw", first_source),
-                ("shelf/second.mw", second_source),
-            ],
-            "shelf/second.mw",
-        );
-        let index = index_for(&snapshot);
-        let value = hover_value(&snapshot, &index, &file, second_source, "Book::Id");
-
-        assert!(
-            value.starts_with("```marrow\nBook::Id\n```"),
-            "identity hover should lead with the generated identity type: {value}"
-        );
-        assert!(
-            value.contains("Second module books."),
-            "identity hover should include the second module docs: {value}"
-        );
-        assert!(
-            value.contains("code: string"),
-            "identity hover should include the second module key: {value}"
-        );
-        assert!(
-            !value.contains("First module books."),
-            "identity hover should not use the first module docs: {value}"
-        );
-        assert!(
-            !value.contains("id: int"),
-            "identity hover should not use the first module key: {value}"
-        );
-    }
-
-    #[test]
     fn hover_over_saved_root_declaration_works_when_resource_name_matches_root() {
         let source = "\
 module a
 
-;; Books saved by id.
-resource books at ^books(id: int)
+resource books
     required title: string
+
+;; Books saved by id.
+store ^books(id: int): books
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
@@ -4274,12 +4052,12 @@ resource books at ^books(id: int)
         let value = markup.value;
 
         assert!(
-            value.starts_with("```marrow\nresource books at ^books(id: int)\n```"),
-            "saved root hover should use the resource signature: {value}"
+            value.starts_with("```marrow\nstore ^books(id: int): books\n```"),
+            "saved root hover should use the store signature: {value}"
         );
         assert!(
             value.contains("Books saved by id."),
-            "saved root hover should include resource docs: {value}"
+            "saved root hover should include store docs: {value}"
         );
     }
 
@@ -4288,7 +4066,7 @@ resource books at ^books(id: int)
         let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     one: string
     two: string
     three: string
@@ -4298,7 +4076,7 @@ resource Book at ^books(id: int)
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
-        let value = hover_value(&snapshot, &index, &file, source, "Book at ^books");
+        let value = hover_value(&snapshot, &index, &file, source, "Book");
 
         assert!(
             value.contains("- `five: string`"),
@@ -4319,7 +4097,7 @@ resource Book at ^books(id: int)
         let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     details
         required subtitle: string
         pages: int
@@ -4329,7 +4107,7 @@ resource Book at ^books(id: int)
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
-        let value = hover_value(&snapshot, &index, &file, source, "Book at ^books");
+        let value = hover_value(&snapshot, &index, &file, source, "Book");
 
         assert!(
             value.contains("- `details`"),
@@ -4366,9 +4144,11 @@ resource Book at ^books(id: int)
         let source = "\
 module a
 
-;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+;; Books saved by id.
+store ^books(id: int): Book
 
 pub fn clear()
     delete ^books
@@ -4383,12 +4163,12 @@ pub fn clear()
         let value = markup.value;
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
-            "saved root should show its resource even without live data: {value}"
+            value.starts_with("```marrow\nstore ^books(id: int): Book\n```"),
+            "saved root should show its store even without live data: {value}"
         );
         assert!(
             value.contains("Books saved by id."),
-            "saved root should include resource docs: {value}"
+            "saved root should include store docs: {value}"
         );
         assert!(
             !value.contains("**debug/admin live data (advisory)**"),
@@ -4401,9 +4181,11 @@ pub fn clear()
         let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     ;; The displayed title.
     required title: string
+
+store ^books(id: int): Book
 
 pub fn f(): string
     return ^books(1).title
@@ -4460,9 +4242,11 @@ resource Book at ^books(id: int)
         let source = "\
 module a
 
-;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+;; Books saved by id.
+store ^books(id: int): Book
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
@@ -4474,12 +4258,12 @@ resource Book at ^books(id: int)
         let value = markup.value;
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
-            "declared saved root should show its resource even without live data: {value}"
+            value.starts_with("```marrow\nstore ^books(id: int): Book\n```"),
+            "declared saved root should show its store even without live data: {value}"
         );
         assert!(
             value.contains("Books saved by id."),
-            "declared saved root should include resource docs: {value}"
+            "declared saved root should include store docs: {value}"
         );
         assert!(
             !value.contains("**debug/admin live data (advisory)**"),
@@ -4488,71 +4272,26 @@ resource Book at ^books(id: int)
     }
 
     #[test]
-    fn hover_over_a_generated_identity_use_shows_identity_keys() {
+    fn hover_over_keyless_store_root_says_no_generated_identity_type() {
         let source = "\
 module a
 
-;; Books saved by id.
-resource Book at ^books(id: int, locale: string)
-    required title: string
-
-pub fn load(id: Book::Id): Book::Id
-    return id
-";
-        let (snapshot, file) = analyze(source);
-        let index = index_for(&snapshot);
-        let value = hover_value(&snapshot, &index, &file, source, "Book::Id");
-
-        assert!(
-            value.starts_with("```marrow\nBook::Id\n```"),
-            "identity hover should lead with the generated identity type: {value}"
-        );
-        assert!(
-            value.contains("Books saved by id."),
-            "identity hover can reuse resource docs: {value}"
-        );
-        assert!(
-            value.contains("id: int"),
-            "identity hover should include the first key: {value}"
-        );
-        assert!(
-            value.contains("locale: string"),
-            "identity hover should include composite keys: {value}"
-        );
-    }
-
-    #[test]
-    fn hover_over_keyless_resource_identity_annotation_does_not_show_identity() {
-        let source = "\
-module a
-
-;; Singleton settings.
-resource Settings at ^settings
+resource Settings
     theme: string
 
-pub fn load(id: Settings::Id)
-    return
+;; Singleton settings.
+store ^settings: Settings
 ";
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
-        let offset = offset_of(source, "Settings::Id");
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None);
-        if let Some(Hover {
-            contents: HoverContents::Markup(markup),
-            ..
-        }) = hover
-        {
-            assert!(
-                !markup.value.starts_with("```marrow\nSettings::Id\n```"),
-                "keyless resource should not render generated identity hover: {}",
-                markup.value
-            );
-        }
-
-        let value = hover_value(&snapshot, &index, &file, source, "Settings at ^settings");
+        let value = hover_value(&snapshot, &index, &file, source, "^settings");
+        assert!(
+            value.starts_with("```marrow\nstore ^settings: Settings\n```"),
+            "keyless store hover should lead with the store signature: {value}"
+        );
         assert!(
             value.contains("no generated identity type"),
-            "keyless resource hover should say it has no generated identity type: {value}"
+            "keyless store hover should say it has no generated identity type: {value}"
         );
     }
 
@@ -5054,9 +4793,11 @@ pub fn f(): string
         let source = "\
 module a
 
-;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+;; Books saved by id.
+store ^books(id: int): Book
 ";
         let (snapshot, file, project) = analyze_with_store(source);
         let reader = StoreReader::for_project(&project).expect("native store reader");
@@ -5070,12 +4811,12 @@ resource Book at ^books(id: int)
         let value = markup.value;
 
         assert!(
-            value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
-            "declared saved root should keep the resource signature: {value}"
+            value.starts_with("```marrow\nstore ^books(id: int): Book\n```"),
+            "declared saved root should keep the store signature: {value}"
         );
         assert!(
             value.contains("Books saved by id."),
-            "declared saved root should keep resource docs: {value}"
+            "declared saved root should keep store docs: {value}"
         );
         assert!(
             value.contains("**debug/admin live data (advisory)**: 1 record"),

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckedProgram, type_at};
 use marrow_run::{Host, RunOutput, RuntimeError, Value, run_entry_with_host};
-use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, SavedRootSchema, Type};
+use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::mem::MemStore;
 use serde_json::{Value as Json, json};
 
@@ -295,10 +295,11 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
 }
 
 /// `mw_resource_schema`: a JSON projection of one resource schema (by `name`) or
-/// every resource in the project when `name` is omitted. The shape mirrors what an
-/// agent needs to write correct saved paths: the resource's name, its saved root
-/// (root + identity keys), its member tree (fields, keyed leaves, groups, nested),
-/// and its indexes. Built from `ResourceSchema` — no schema logic is reinvented.
+/// every resource in the project when `name` is omitted. The shape mirrors what
+/// an agent needs to write correct saved paths: the resource's name, every store
+/// that persists it (root + identity keys + indexes), and its member tree (fields,
+/// keyed leaves, groups, nested). Built from checked schemas — no schema logic is
+/// reinvented.
 pub fn resource_schema(file: &Path, name: Option<&str>) -> Json {
     let contract = resource_schema_contract();
     let workspace = match load_project(file, None) {
@@ -308,30 +309,48 @@ pub fn resource_schema(file: &Path, name: Option<&str>) -> Json {
     let Some(program) = workspace.program() else {
         return with_contract(json!({ "resources": [] }), contract);
     };
-    let resources: Vec<Json> = all_resources(program)
-        .filter(|resource| name.is_none_or(|name| resource.name == name))
-        .map(schema_to_json)
+    let resources: Vec<Json> = program
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .resources
+                .iter()
+                .filter(|resource| name.is_none_or(|name| resource.name == name))
+                .map(move |resource| {
+                    let stores = module
+                        .stores
+                        .iter()
+                        .filter(|store| store.resource == resource.name);
+                    schema_to_json(resource, stores)
+                })
+        })
         .collect();
     with_contract(json!({ "resources": resources }), contract)
 }
 
-/// Project one resource schema to JSON: name, optional saved root, member tree, and
-/// indexes. The member tree is recursive (a group carries its nested members), so an
-/// agent can navigate `^root(key).layer(key).field` from one document.
-fn schema_to_json(resource: &ResourceSchema) -> Json {
+/// Project one resource schema to JSON: name, stores, and member tree. The member
+/// tree is recursive (a group carries its nested members), so an agent can
+/// navigate `^root(key).layer(key).field` from one document.
+fn schema_to_json<'a>(
+    resource: &ResourceSchema,
+    stores: impl Iterator<Item = &'a StoreSchema>,
+) -> Json {
     json!({
         "name": resource.name,
         "docs": resource.docs,
-        "savedRoot": resource.saved_root.as_ref().map(saved_root_to_json),
+        "stores": stores.map(store_to_json).collect::<Vec<_>>(),
         "members": resource.members.iter().map(node_to_json).collect::<Vec<_>>(),
-        "indexes": resource.indexes.iter().map(index_to_json).collect::<Vec<_>>(),
     })
 }
 
-fn saved_root_to_json(saved: &SavedRootSchema) -> Json {
+fn store_to_json(store: &StoreSchema) -> Json {
     json!({
-        "root": saved.root,
-        "identityKeys": saved.identity_keys.iter().map(key_def_to_json).collect::<Vec<_>>(),
+        "root": store.root,
+        "resource": store.resource,
+        "docs": store.docs,
+        "identityKeys": store.identity_keys.iter().map(key_def_to_json).collect::<Vec<_>>(),
+        "indexes": store.indexes.iter().map(index_to_json).collect::<Vec<_>>(),
     })
 }
 
@@ -852,14 +871,6 @@ fn merge(mut base: Json, extra: Json) -> Json {
     base
 }
 
-/// Every resource declared across the program's modules.
-fn all_resources(program: &CheckedProgram) -> impl Iterator<Item = &ResourceSchema> {
-    program
-        .modules
-        .iter()
-        .flat_map(|module| module.resources.iter())
-}
-
 /// The `.mw` spelling of a schema type, for the resource-schema projection.
 fn type_name(ty: &Type) -> String {
     ty.to_string()
@@ -932,10 +943,11 @@ mod tests {
             "\
 module shelf::books
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     tags(pos: int): string
 
+store ^books(id: int): Book
     index byTitle(title, id)
 
 pub fn double(n: int): int
@@ -989,9 +1001,9 @@ pub fn shout()
     #[test]
     fn type_at_reports_the_type_of_a_parameter_use() {
         let (_dir, file) = project();
-        // `    return n * 2` is line 9 (zero-based); `    return ` is 11 chars, so
+        // `    return n * 2` is line 10 (zero-based); `    return ` is 11 chars, so
         // the `n` parameter use sits at character 11.
-        let result = type_at_position(&file, 9, 11);
+        let result = type_at_position(&file, 10, 11);
         assert_eq!(
             result["type"], "int",
             "the `n` parameter use is an int: {result}"
@@ -1001,10 +1013,10 @@ pub fn shout()
     #[test]
     fn complete_in_a_function_body_lists_locals_and_keywords() {
         let (_dir, file) = project();
-        // A bare position inside `double`'s body (line 9, after `    return `) lists
+        // A bare position inside `double`'s body (line 10, after `    return `) lists
         // in-scope names and keywords — proving the schema-backed program loaded and
         // the classifier ran against the file's own text.
-        let result = complete(&file, 9, 11);
+        let result = complete(&file, 10, 11);
         let items = result["items"].as_array().unwrap();
         assert!(
             !items.is_empty(),
@@ -1036,9 +1048,13 @@ pub fn shout()
         assert_eq!(resources.len(), 1, "one Book resource: {result}");
         let book = &resources[0];
         assert_eq!(book["name"], "Book");
-        assert_eq!(book["savedRoot"]["root"], "books");
-        assert_eq!(book["savedRoot"]["identityKeys"][0]["name"], "id");
-        assert_eq!(book["savedRoot"]["identityKeys"][0]["type"], "int");
+        let stores = book["stores"].as_array().unwrap();
+        assert_eq!(stores.len(), 1);
+        let store = &stores[0];
+        assert_eq!(store["root"], "books");
+        assert_eq!(store["resource"], "Book");
+        assert_eq!(store["identityKeys"][0]["name"], "id");
+        assert_eq!(store["identityKeys"][0]["type"], "int");
         // `title` is a required string field; `tags` is a keyed leaf; `byTitle` an index.
         let members = book["members"].as_array().unwrap();
         assert!(
@@ -1052,7 +1068,7 @@ pub fn shout()
                 .any(|m| m["name"] == "tags" && m["kind"] == "leaf")
         );
         assert!(
-            book["indexes"]
+            store["indexes"]
                 .as_array()
                 .unwrap()
                 .iter()

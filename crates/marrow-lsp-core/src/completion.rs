@@ -12,11 +12,8 @@
 use std::path::Path;
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
-use marrow_check::{
-    CheckedModule, CheckedProgram, DefItem, Resolution, ResolvableKind, build_alias_map,
-    expand_alias, resolve, scope_at,
-};
-use marrow_schema::{EnumSchema, Node, NodeKind, ResourceSchema, stdlib};
+use marrow_check::{CheckedModule, CheckedProgram, build_alias_map, expand_alias, scope_at};
+use marrow_schema::{EnumSchema, Node, NodeKind, ResourceSchema, StoreSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
 
 use crate::{language_facts, types::render_type};
@@ -85,15 +82,15 @@ enum Context {
     /// Just after a `^`: the durable saved roots.
     Root,
     /// After `^root(...).` (`layers` are the names already descended past the
-    /// key): the resource's fields and deeper layers.
+    /// key): fields and deeper layers of the resource stored at that root.
     SavedPath { root: String, layers: Vec<String> },
-    /// After `^root.` with no key: the resource's index names.
+    /// After `^root.` with no key: the store's index names.
     SavedIndex { root: String },
-    /// After `qualifier::`: what the qualifier (a resource, a used module, or a
+    /// After `qualifier::`: what the qualifier (an enum, a used module, or a
     /// `std` module path) exposes.
     Namespace { qualifier: Vec<String> },
     /// A type annotation position (after a `:` introducing a type): type names and
-    /// resource identities.
+    /// store identity types.
     Type,
     /// A bare identifier in expression position: in-scope names, keywords, builtins.
     Bare,
@@ -176,8 +173,9 @@ fn qualifier_before(source: &str, tokens: &[Token], colon_index: usize) -> Optio
 /// classify it. Two shapes complete:
 ///
 /// - `^root(keys).` and any deeper `.layer` or `.layer(keys)` chain — a keyed
-///   read: the resource's fields and the members of the innermost named layer.
-/// - `^root.` with no key application — the resource's index names.
+///   read: fields on the resource stored at the root, or the innermost layer's
+///   members.
+/// - `^root.` with no key application — the store's index names.
 ///
 /// The chain left of the final `.` is a run of segments, each a layer name with
 /// an optional `(keys)` application, separated by `.`; this walks it leftward
@@ -202,8 +200,8 @@ fn saved_context_before(source: &str, tokens: &[Token], dot_index: usize) -> Opt
         let before = segment.checked_sub(1)?;
         match tokens[before].kind {
             // `^name` — the segment is the root. A bare `^root.` (no key) lists the
-            // resource's index names; a keyed `^root(keys).…` lists its fields and
-            // layers, descending any gathered group names.
+            // store's index names; a keyed `^root(keys).…` lists fields and layers on
+            // the stored resource, descending any gathered group names.
             TokenKind::Caret => {
                 let root = tokens[segment].text(source).to_string();
                 if !keyed && layers.is_empty() {
@@ -258,23 +256,20 @@ fn introduces_type(tokens: &[Token], colon_index: usize) -> bool {
     )
 }
 
-/// The durable saved roots declared across every module: one item per resource
-/// that has a saved root.
+/// The durable saved roots declared across every module: one item per store.
 fn root_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
     let mut items = Vec::new();
-    for resource in resources(program) {
-        if let Some(saved) = &resource.saved_root {
-            items.push(
-                item(&saved.root, CompletionItemKind::STRUCT)
-                    .detail(format!("saved root of {}", resource.name))
-                    .docs_from(&resource.docs),
-            );
-        }
+    for store in stores(program) {
+        items.push(
+            item(&store.root, CompletionItemKind::STRUCT)
+                .detail(format!("saved root of {}", store.resource))
+                .docs_from(&store.docs),
+        );
     }
     dedup(items)
 }
 
-/// The fields and deeper layers of the resource whose saved root is `root`, after
+/// The fields and deeper layers of the resource stored at `root`, after
 /// descending the already-typed `layers`. With no layers this is the resource's
 /// top-level members; otherwise the members of the innermost layer.
 fn saved_path_completions(
@@ -282,7 +277,8 @@ fn saved_path_completions(
     root: &str,
     layers: &[String],
 ) -> Vec<CompletionItem> {
-    let Some(resource) = resource_by_root(program, root) else {
+    let Some((_store, resource)) = marrow_check::resolve::resolve_store_by_root(program, root)
+    else {
         return Vec::new();
     };
     let members: &[Node] = if layers.is_empty() {
@@ -297,12 +293,13 @@ fn saved_path_completions(
     members.iter().map(member_item).collect()
 }
 
-/// The index names of the resource whose saved root is `root` (`^root.`).
+/// The index names of the store whose saved root is `root` (`^root.`).
 fn saved_index_completions(program: &CheckedProgram, root: &str) -> Vec<CompletionItem> {
-    let Some(resource) = resource_by_root(program, root) else {
+    let Some((store, _resource)) = marrow_check::resolve::resolve_store_by_root(program, root)
+    else {
         return Vec::new();
     };
-    resource
+    store
         .indexes
         .iter()
         .map(|index| {
@@ -313,8 +310,8 @@ fn saved_index_completions(program: &CheckedProgram, root: &str) -> Vec<Completi
         .collect()
 }
 
-/// What `qualifier::` exposes: a resource's `Id`, an enum's members, a used
-/// module's public functions and constants, or a `std` module's ops.
+/// What `qualifier::` exposes: an enum's members, a used module's public
+/// functions and constants, or a `std` module's ops.
 fn namespace_completions(
     program: &CheckedProgram,
     file: &Path,
@@ -327,14 +324,6 @@ fn namespace_completions(
             [_, module] => std_module_completions(module),
             _ => Vec::new(),
         };
-    }
-
-    if let Some(resource) = resource_for_namespace(program, file, qualifier) {
-        return vec![
-            item("Id", CompletionItemKind::CLASS)
-                .detail(format!("{}::Id", resource.name))
-                .docs_from(&resource.docs),
-        ];
     }
 
     if let Some(enum_schema) = enum_for_namespace(program, file, qualifier) {
@@ -402,7 +391,7 @@ fn module_member_completions(module: &CheckedModule) -> Vec<CompletionItem> {
 }
 
 /// Type-position completions: the built-in type names plus every resource name,
-/// resource identity, and enum name.
+/// keyed store identity, and enum name.
 fn type_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
     let mut items: Vec<CompletionItem> = TYPE_NAMES
         .iter()
@@ -410,9 +399,11 @@ fn type_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
         .collect();
     for resource in resources(program) {
         items.push(item(&resource.name, CompletionItemKind::STRUCT).detail("resource".to_string()));
+    }
+    for store in stores(program).filter(|store| !store.identity_keys.is_empty()) {
         items.push(
-            item(&format!("{}::Id", resource.name), CompletionItemKind::CLASS)
-                .detail("identity".to_string()),
+            item(&format!("Id(^{})", store.root), CompletionItemKind::CLASS)
+                .detail(format!("identity of ^{}", store.root)),
         );
     }
     for enum_schema in enums(program) {
@@ -461,36 +452,20 @@ fn resources(program: &CheckedProgram) -> impl Iterator<Item = &ResourceSchema> 
         .flat_map(|module| module.resources.iter())
 }
 
+/// Every store schema declared across all modules of the program.
+fn stores(program: &CheckedProgram) -> impl Iterator<Item = &StoreSchema> {
+    program
+        .modules
+        .iter()
+        .flat_map(|module| module.stores.iter())
+}
+
 /// Every enum schema declared across all modules of the program.
 fn enums(program: &CheckedProgram) -> impl Iterator<Item = &EnumSchema> {
     program
         .modules
         .iter()
         .flat_map(|module| module.enums.iter())
-}
-
-fn resource_for_namespace<'a>(
-    program: &'a CheckedProgram,
-    file: &Path,
-    qualifier: &[String],
-) -> Option<&'a ResourceSchema> {
-    if let [name] = qualifier {
-        return resource_by_name(program, file, name);
-    }
-    let mut identity_path = qualifier.to_vec();
-    identity_path.push("Id".to_string());
-    match resolve(
-        program,
-        module_name_for_file(program, file).unwrap_or_default(),
-        &identity_path,
-        ResolvableKind::ResourceIdentity,
-    ) {
-        Resolution::Found(def) => match def.item {
-            DefItem::Resource(resource) => Some(resource),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 fn enum_for_namespace<'a>(
@@ -549,24 +524,6 @@ fn enum_in_module<'a>(module: &'a CheckedModule, name: &str) -> Option<&'a EnumS
         .find(|enum_schema| enum_schema.name == name)
 }
 
-fn resource_by_name<'a>(
-    program: &'a CheckedProgram,
-    file: &Path,
-    name: &str,
-) -> Option<&'a ResourceSchema> {
-    program
-        .modules
-        .iter()
-        .find(|module| module.source_file == file)
-        .and_then(|module| {
-            module
-                .resources
-                .iter()
-                .find(|resource| resource.name == name)
-        })
-        .or_else(|| resources(program).find(|resource| resource.name == name))
-}
-
 fn current_module<'a>(program: &'a CheckedProgram, file: &Path) -> Option<&'a CheckedModule> {
     program
         .modules
@@ -584,17 +541,6 @@ fn module_by_name<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a Che
 
 fn enum_is_public(module: &CheckedModule, name: &str) -> bool {
     module.enum_public.get(name).copied().unwrap_or(true)
-}
-
-/// The resource whose saved root is `root`, searched across all modules. The
-/// first match wins; saved roots are unique per project in practice.
-fn resource_by_root<'a>(program: &'a CheckedProgram, root: &str) -> Option<&'a ResourceSchema> {
-    resources(program).find(|resource| {
-        resource
-            .saved_root
-            .as_ref()
-            .is_some_and(|saved| saved.root == root)
-    })
 }
 
 /// The checked module a `use`d name refers to from `file`. A `use` records the
@@ -766,9 +712,9 @@ mod tests {
     use marrow_project::parse_config;
     use marrow_syntax::{lex_source, parse_source};
 
-    /// A two-file project: `shelf::books` declares the `Book` saved resource and a
-    /// public helper; `shelf::app` uses it. Returns the checked program and the
-    /// path of the file completion runs in (the `app` file).
+    /// A two-file project: `shelf::books` declares the `Book` resource, a store,
+    /// and a public helper; `shelf::app` uses it. Returns the checked program and
+    /// the path of the file completion runs in (the `app` file).
     fn project() -> (CheckedProgram, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -780,8 +726,7 @@ mod tests {
             "\
 module shelf::books
 
-;; Books saved by id.
-resource Book at ^books(id: int)
+resource Book
     ;; Display title.
     required title: string
     required shelf: string
@@ -790,6 +735,8 @@ resource Book at ^books(id: int)
     notes(noteId: string)
         text: string
 
+;; Books saved by id.
+store ^books(id: int): Book
     index byShelf(shelf, id)
 
 ;; Lifecycle state.
@@ -800,7 +747,7 @@ pub enum Status
     archived
 
 ;; Returns a book title.
-pub fn titleOf(id: Book::Id): string
+pub fn titleOf(id: Id(^books)): string
     return ^books(id).title
 
 const LIMIT: int = 100
@@ -827,36 +774,6 @@ pub fn run(count: int): int
         (snapshot.program, app)
     }
 
-    fn same_named_resource_project() -> (CheckedProgram, std::path::PathBuf) {
-        let app = std::path::PathBuf::from("/project/src/shelf/app.mw");
-        let library = std::path::PathBuf::from("/project/src/shelf/library.mw");
-        let book = |docs: &str| ResourceSchema {
-            name: "Book".to_string(),
-            docs: vec![docs.to_string()],
-            saved_root: None,
-            members: Vec::new(),
-            indexes: Vec::new(),
-        };
-        let module = |name: &str, source_file: std::path::PathBuf, docs: &str| CheckedModule {
-            name: name.to_string(),
-            source_file,
-            span: Default::default(),
-            imports: Vec::new(),
-            constants: Vec::new(),
-            functions: Vec::new(),
-            resources: vec![book(docs)],
-            enums: Vec::new(),
-            enum_public: Default::default(),
-        };
-        (
-            CheckedProgram::from_modules(vec![
-                module("shelf::library", library, "Library book docs."),
-                module("shelf::app", app.clone(), "App book docs."),
-            ]),
-            app,
-        )
-    }
-
     fn same_named_enum_project() -> (CheckedProgram, std::path::PathBuf) {
         let app = std::path::PathBuf::from("/project/src/shelf/app.mw");
         let library = std::path::PathBuf::from("/project/src/shelf/private.mw");
@@ -881,6 +798,7 @@ pub fn run(count: int): int
                 constants: Vec::new(),
                 functions: Vec::new(),
                 resources: Vec::new(),
+                stores: Vec::new(),
                 enums: vec![enum_schema(member)],
                 enum_public,
             }
@@ -1073,78 +991,45 @@ pub fn run(count: int): int
     }
 
     #[test]
-    fn resource_namespace_lists_id() {
+    fn resource_namespace_does_not_list_identity() {
         let (program, file) = project();
         let labels = complete(
             &program,
             &file,
             "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
         );
-        assert_eq!(labels, vec!["Id".to_string()], "`Book::` offers only `Id`");
+        assert!(
+            !labels.contains(&"Id".to_string()),
+            "`Book::` must not offer stale resource-owned identities, got {labels:?}"
+        );
     }
 
     #[test]
-    fn resource_namespace_id_completion_shows_identity_shape_and_docs() {
+    fn used_module_qualified_resource_namespace_does_not_list_identity() {
         let (program, file) = project();
-        let items = complete_items(
-            &program,
-            &file,
-            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
-        );
-        let id = item_named(&items, "Id");
-        assert_eq!(id.kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(id.detail.as_deref(), Some("Book::Id"));
-        assert_eq!(documentation_value(id), "Books saved by id.");
-    }
-
-    #[test]
-    fn resource_namespace_id_completion_prefers_current_module_docs() {
-        let (program, file) = same_named_resource_project();
-        let items = complete_items(
-            &program,
-            &file,
-            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
-        );
-        let id = item_named(&items, "Id");
-        assert_eq!(id.kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(id.detail.as_deref(), Some("Book::Id"));
-        assert_eq!(documentation_value(id), "App book docs.");
-    }
-
-    #[test]
-    fn used_module_qualified_resource_namespace_lists_id_with_bare_shape() {
-        let (program, file) = project();
-        let bare_items = complete_items(
-            &program,
-            &file,
-            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
-        );
-        let items = complete_items(
+        let labels = complete(
             &program,
             &file,
             "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x: books::Book::|\n",
         );
-        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-        assert_eq!(labels, ["Id"]);
-        assert_same_completion_shape(item_named(&items, "Id"), item_named(&bare_items, "Id"));
+        assert!(
+            !labels.contains(&"Id".to_string()),
+            "`books::Book::` must not offer stale resource-owned identities, got {labels:?}"
+        );
     }
 
     #[test]
-    fn fully_qualified_resource_namespace_lists_id_with_bare_shape() {
+    fn fully_qualified_resource_namespace_does_not_list_identity() {
         let (program, file) = project();
-        let bare_items = complete_items(
-            &program,
-            &file,
-            "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
-        );
-        let items = complete_items(
+        let labels = complete(
             &program,
             &file,
             "module shelf::app\n\npub fn f()\n    const x: shelf::books::Book::|\n",
         );
-        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-        assert_eq!(labels, ["Id"]);
-        assert_same_completion_shape(item_named(&items, "Id"), item_named(&bare_items, "Id"));
+        assert!(
+            !labels.contains(&"Id".to_string()),
+            "`shelf::books::Book::` must not offer stale resource-owned identities, got {labels:?}"
+        );
     }
 
     #[test]
@@ -1297,7 +1182,7 @@ pub fn run(count: int): int
         );
         let title_of = item_named(&items, "titleOf");
         assert_eq!(title_of.kind, Some(CompletionItemKind::FUNCTION));
-        assert_eq!(title_of.detail.as_deref(), Some("(id: Book::Id): string"));
+        assert_eq!(title_of.detail.as_deref(), Some("(id: Id(^books)): string"));
         assert_eq!(title_of.documentation, None);
     }
 
@@ -1338,8 +1223,8 @@ pub fn run(count: int): int
             "a resource, got {labels:?}"
         );
         assert!(
-            labels.contains(&"Book::Id".to_string()),
-            "a resource identity, got {labels:?}"
+            labels.contains(&"Id(^books)".to_string()),
+            "a store identity, got {labels:?}"
         );
         assert!(
             labels.contains(&"Status".to_string()),
