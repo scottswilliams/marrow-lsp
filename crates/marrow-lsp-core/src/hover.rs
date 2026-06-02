@@ -16,7 +16,7 @@ use marrow_check::{
     SavedPlaceEffect, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
     expand_module_alias, resolve, type_at,
 };
-use marrow_schema::{Element, EnumSchema, ResourceSchema, stdlib};
+use marrow_schema::{EnumSchema, NodeKind, ResourceSchema, stdlib};
 use marrow_store::backend::Presence;
 use marrow_syntax::{
     Block, Declaration, EnumDecl, EnumMember, FunctionDecl, KeyParam, Keyword, ParamMode,
@@ -1460,12 +1460,12 @@ fn resource_member_lines(member: &marrow_schema::Node, prefix: &str, lines: &mut
     } else {
         format!("{prefix}.{name}")
     };
-    match &member.element {
-        Element::Slot { ty, required } => {
+    match &member.kind {
+        NodeKind::Slot { ty, required } => {
             let required = if *required { "required " } else { "" };
             lines.push(format!("{required}{path}: {ty}"));
         }
-        Element::Group => {
+        NodeKind::Group => {
             lines.push(path.clone());
             for child in &member.members {
                 resource_member_lines(child, &path, lines);

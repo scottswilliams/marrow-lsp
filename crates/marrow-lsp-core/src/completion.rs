@@ -16,7 +16,7 @@ use marrow_check::{
     CheckedModule, CheckedProgram, DefItem, Resolution, ResolvableKind, build_alias_map,
     expand_alias, resolve, scope_at,
 };
-use marrow_schema::{Element, EnumSchema, Node, ResourceSchema, stdlib};
+use marrow_schema::{EnumSchema, Node, NodeKind, ResourceSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
 
 use crate::{language_facts, types::render_type};
@@ -621,15 +621,15 @@ fn module_named<'a>(
 
 /// A completion item for one resource member: a field, a keyed leaf, or a group.
 fn member_item(node: &Node) -> CompletionItem {
-    let (kind, detail) = match &node.element {
-        Element::Slot { ty, .. } if node.key_params.is_empty() => {
+    let (kind, detail) = match &node.kind {
+        NodeKind::Slot { ty, .. } if node.key_params.is_empty() => {
             (CompletionItemKind::FIELD, ty.to_string())
         }
-        Element::Slot { ty, .. } => (
+        NodeKind::Slot { ty, .. } => (
             CompletionItemKind::METHOD,
             format!("({}): {ty}", key_params(node)),
         ),
-        Element::Group => (
+        NodeKind::Group => (
             CompletionItemKind::MODULE,
             format!("group({})", key_params(node)),
         ),

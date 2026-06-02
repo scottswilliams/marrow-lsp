@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use marrow_check::CheckedProgram;
-use marrow_schema::{Element, IndexSchema, KeyDef, Node, ResourceSchema, Type};
+use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, Type};
 use marrow_store::backend::Presence;
 use marrow_store::path::{ChildSegment, PathSegment, SavedKey};
 
@@ -421,14 +421,14 @@ fn member_context<'a>(mut members: &'a [Node], mut rest: &[PathSegment]) -> Sche
             return SchemaContext::Unknown;
         }
         if after_keys.is_empty() {
-            return match &node.element {
-                Element::Group => SchemaContext::Members {
+            return match &node.kind {
+                NodeKind::Group => SchemaContext::Members {
                     members: &node.members,
                 },
-                Element::Slot { .. } => SchemaContext::Leaf,
+                NodeKind::Slot { .. } => SchemaContext::Leaf,
             };
         }
-        if !matches!(node.element, Element::Group) {
+        if !matches!(node.kind, NodeKind::Group) {
             return SchemaContext::Unknown;
         }
         members = &node.members;
@@ -538,20 +538,20 @@ fn index_metadata(index: &IndexSchema) -> ChildMetadata {
 }
 
 fn node_metadata(node: &Node) -> ChildMetadata {
-    match &node.element {
-        Element::Slot { ty, required } if node.key_params.is_empty() => ChildMetadata {
+    match &node.kind {
+        NodeKind::Slot { ty, required } if node.key_params.is_empty() => ChildMetadata {
             role: Some("field".to_string()),
             detail: required.then(|| "required".to_string()),
             r#type: Some(type_name(ty)),
             append_segment: Some(SegmentJson::Field(node.name.clone())),
         },
-        Element::Slot { ty, .. } => ChildMetadata {
+        NodeKind::Slot { ty, .. } => ChildMetadata {
             role: Some("layer".to_string()),
             detail: key_params_detail(&node.key_params),
             r#type: Some(type_name(ty)),
             append_segment: Some(SegmentJson::Layer(node.name.clone())),
         },
-        Element::Group => ChildMetadata {
+        NodeKind::Group => ChildMetadata {
             role: Some(if node.key_params.is_empty() {
                 "group".to_string()
             } else {

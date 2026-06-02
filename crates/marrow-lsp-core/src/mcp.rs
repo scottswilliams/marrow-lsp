@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckedProgram, type_at};
 use marrow_run::{Host, RunOutput, RuntimeError, Value, run_entry_with_host};
-use marrow_schema::{Element, IndexSchema, KeyDef, Node, ResourceSchema, SavedRootSchema, Type};
+use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, SavedRootSchema, Type};
 use marrow_store::mem::MemStore;
 use serde_json::{Value as Json, json};
 
@@ -268,22 +268,22 @@ fn key_def_to_json(key: &KeyDef) -> Json {
 /// leaf is `{ kind: "leaf", type, keyParams }`; a group is `{ kind: "group",
 /// keyParams, members }` with its nested members projected recursively.
 fn node_to_json(node: &Node) -> Json {
-    match &node.element {
-        Element::Slot { ty, required } if node.key_params.is_empty() => json!({
+    match &node.kind {
+        NodeKind::Slot { ty, required } if node.key_params.is_empty() => json!({
             "name": node.name,
             "kind": "field",
             "type": type_name(ty),
             "required": required,
             "docs": node.docs,
         }),
-        Element::Slot { ty, .. } => json!({
+        NodeKind::Slot { ty, .. } => json!({
             "name": node.name,
             "kind": "leaf",
             "type": type_name(ty),
             "keyParams": node.key_params.iter().map(key_def_to_json).collect::<Vec<_>>(),
             "docs": node.docs,
         }),
-        Element::Group => json!({
+        NodeKind::Group => json!({
             "name": node.name,
             "kind": "group",
             "keyParams": node.key_params.iter().map(key_def_to_json).collect::<Vec<_>>(),

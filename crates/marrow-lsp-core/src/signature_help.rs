@@ -10,7 +10,7 @@ use marrow_check::{
     AnalysisSnapshot, CheckedFunction, CheckedProgram, Def, DefItem, Resolution, ResolvableKind,
     build_alias_map, expand_alias, resolve,
 };
-use marrow_schema::{Element, ResourceSchema, stdlib};
+use marrow_schema::{NodeKind, ResourceSchema, stdlib};
 use marrow_syntax::{
     Declaration, FunctionDecl, Keyword, LexedSource, ParamMode, SourceSpan, Token, TokenKind,
 };
@@ -499,8 +499,8 @@ fn resource_constructor_signature(resource: &ResourceSchema) -> Signature {
         resource
             .members
             .iter()
-            .filter_map(|node| match &node.element {
-                Element::Slot { ty, .. } if node.key_params.is_empty() => Some(
+            .filter_map(|node| match &node.kind {
+                NodeKind::Slot { ty, .. } if node.key_params.is_empty() => Some(
                     named_param_with_docs(&node.name, &ty.to_string(), join_docs(&node.docs)),
                 ),
                 _ => None,
