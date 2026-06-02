@@ -284,11 +284,20 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
             "breakpoints": [{ "line": 10 }],
         }),
     );
-    let verified = client.response_for(set);
-    let breakpoints = verified["body"]["breakpoints"].as_array().unwrap();
-    assert_eq!(breakpoints.len(), 1, "{verified}");
-    assert_eq!(breakpoints[0]["verified"], true, "{verified}");
-    assert_eq!(breakpoints[0]["line"], 10, "{verified}");
+    let advisory = client.response_for(set);
+    let breakpoints = advisory["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 1, "{advisory}");
+    assert_eq!(breakpoints[0]["verified"], false, "{advisory}");
+    assert_eq!(breakpoints[0]["line"], 10, "{advisory}");
+    let message = breakpoints[0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("blocked-on-marrow"),
+        "advisory breakpoint should name the Marrow blocker: {advisory}"
+    );
+    assert!(
+        message.contains("canonical stop-point facts"),
+        "advisory breakpoint should name the missing facts: {advisory}"
+    );
 
     // configurationDone starts the run; it should hit the breakpoint and stop.
     let done = client.request("configurationDone", json!({}));
@@ -415,6 +424,55 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
         "{output}"
     );
     client.event("terminated");
+}
+
+#[test]
+fn an_equivalent_breakpoint_path_still_stops_at_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let source_name = file.file_name().unwrap();
+    let aliased_file = file
+        .parent()
+        .unwrap()
+        .join("..")
+        .join("src")
+        .join(source_name);
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": aliased_file.display().to_string() },
+            "breakpoints": [{ "line": 10 }],
+        }),
+    );
+    let advisory = client.response_for(set);
+    let breakpoint = &advisory["body"]["breakpoints"][0];
+    assert_eq!(breakpoint["verified"], false, "{advisory}");
+    assert_eq!(breakpoint["line"], 10, "{advisory}");
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let event = client.read_until(|message| {
+        message["type"] == "event"
+            && (message["event"] == "stopped" || message["event"] == "terminated")
+    });
+    assert_eq!(event["event"], "stopped", "{event}");
+    assert_eq!(event["body"]["reason"], "breakpoint", "{event}");
 }
 
 #[test]

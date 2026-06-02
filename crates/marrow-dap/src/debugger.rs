@@ -115,8 +115,9 @@ pub enum RunEvent {
 /// thread, the breakpoint line set, the program (for schema-typed durable
 /// rendering and watch resolution), and the pending step mode.
 pub struct Debugger {
-    /// Lines (1-based) that carry a verified breakpoint, in the entry file. A
-    /// statement whose span starts on one of these stops unconditionally.
+    /// Locally resolved breakpoint lines (1-based) in the entry file. A
+    /// statement whose span starts on one of these prototype stop lines stops
+    /// unconditionally.
     breakpoints: Vec<u32>,
     /// The step mode governing the *next* stop, updated each time the run resumes.
     mode: Resume,
@@ -130,8 +131,8 @@ pub struct Debugger {
 }
 
 impl Debugger {
-    /// Build the hook for a launch: the verified breakpoint lines, whether to stop
-    /// on entry, the program, and the channel ends.
+    /// Build the hook for a launch: the locally resolved breakpoint lines,
+    /// whether to stop on entry, the program, and the channel ends.
     pub fn new(
         breakpoints: Vec<u32>,
         stop_on_entry: bool,

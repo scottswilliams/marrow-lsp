@@ -36,6 +36,9 @@ const RAW_DATA_INSPECTION_BLOCKED: &str = "blocked-on-marrow: raw durable-data i
 const EXPRESSION_EVALUATE_BLOCKED: &str = "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow";
 const PROTOTYPE_ARGS_BLOCKED: &str =
     "blocked-on-marrow: DAP launch args need typed launch argument decoding facts from Marrow";
+const BREAKPOINT_VERIFICATION_BLOCKED: &str =
+    "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
+const BREAKPOINT_PLACEMENT_PENDING: &str = "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow; local syntax-walk placement is pending until launch/program analysis";
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread: a
 /// local value is expanded in memory, a durable path is read from the live store.
@@ -59,12 +62,12 @@ struct Running {
 pub struct Session<W: Write> {
     out: W,
     seq: i64,
-    /// Requested breakpoint lines per source file. They are resolved against the
-    /// loaded program when answering `setBreakpoints` and again when the run starts,
-    /// so breakpoints sent before `launch` are not lost.
+    /// Requested breakpoint lines per source file. They are locally resolved
+    /// when answering `setBreakpoints` and again when the run starts, so
+    /// breakpoints sent before `launch` are not lost.
     breakpoints: HashMap<PathBuf, Vec<u32>>,
-    /// The program for the launched project, for breakpoint resolution. Set at
-    /// launch.
+    /// The program for the launched project, used for prototype breakpoint
+    /// placement. Set at launch.
     program: Option<CheckedProgram>,
     /// The entry source file, the one the debugger reports stack frames in.
     entry_file: Option<PathBuf>,
@@ -262,8 +265,8 @@ impl<W: Write> Session<W> {
     }
 
     /// `setBreakpoints`: snap each requested line to the next statement in the
-    /// source file and verify it back. Lines that fall past the last statement are
-    /// returned unverified.
+    /// source file, but report the result as advisory until Marrow provides
+    /// canonical stop-point facts.
     fn on_set_breakpoints(&mut self, request: &Json, arguments: &Json) {
         let path = arguments
             .get("source")
@@ -287,31 +290,50 @@ impl<W: Write> Session<W> {
             return;
         };
 
-        let (verified, _) = self.resolve_breakpoints(&path, &requested);
+        let (advisory, _) = self.resolve_breakpoints(&path, &requested);
         self.breakpoints.insert(path, requested);
-        self.respond(request, true, json!({ "breakpoints": verified }));
+        self.respond(request, true, json!({ "breakpoints": advisory }));
     }
 
     /// Resolve requested lines against the program's statement lines for `path`,
     /// returning the per-breakpoint client objects and the resolved line set.
     fn resolve_breakpoints(&self, path: &Path, requested: &[u32]) -> (Vec<Json>, Vec<u32>) {
-        let lines = self
-            .program
-            .as_ref()
-            .map(|program| breakpoints::statement_lines(program, path))
-            .unwrap_or_default();
-        let mut verified = Vec::new();
+        let Some(program) = self.program.as_ref() else {
+            return (
+                requested
+                    .iter()
+                    .map(|line| {
+                        json!({
+                            "verified": false,
+                            "line": *line,
+                            "message": BREAKPOINT_PLACEMENT_PENDING,
+                        })
+                    })
+                    .collect(),
+                Vec::new(),
+            );
+        };
+        let lines = breakpoints::statement_lines(program, path);
+        let mut advisory = Vec::new();
         let mut resolved = Vec::new();
         for &line in requested {
             match breakpoints::resolve_line(&lines, line) {
                 Some(stmt_line) => {
                     resolved.push(stmt_line);
-                    verified.push(json!({ "verified": true, "line": stmt_line }));
+                    advisory.push(json!({
+                        "verified": false,
+                        "line": stmt_line,
+                        "message": format!("{BREAKPOINT_VERIFICATION_BLOCKED}; local syntax-walk resolution is advisory"),
+                    }));
                 }
-                None => verified.push(json!({ "verified": false, "line": line })),
+                None => advisory.push(json!({
+                    "verified": false,
+                    "line": line,
+                    "message": format!("{BREAKPOINT_VERIFICATION_BLOCKED}; local syntax-walk resolution found no statement for this line"),
+                })),
             }
         }
-        (verified, resolved)
+        (advisory, resolved)
     }
 
     /// `configurationDone`: start the run-thread with the captured launch and the
@@ -349,15 +371,16 @@ impl<W: Write> Session<W> {
         }
     }
 
-    /// The verified breakpoint lines in the entry source file — the file the run
-    /// reports frames in and the runtime spans line up with.
+    /// The locally resolved breakpoint lines in the entry source file — the file
+    /// the run reports frames in and the runtime spans line up with.
     fn entry_breakpoint_lines(&self) -> Vec<u32> {
         match &self.entry_file {
             Some(file) => self
                 .breakpoints
-                .get(file)
-                .map(|requested| self.resolved_breakpoint_lines(file, requested))
-                .unwrap_or_default(),
+                .iter()
+                .filter(|(path, _)| breakpoints::same_file(file, path))
+                .flat_map(|(path, requested)| self.resolved_breakpoint_lines(path, requested))
+                .collect(),
             // No known entry file: union every set breakpoint line, since a
             // single-file project's spans still match by line.
             None => self
@@ -860,5 +883,41 @@ mod tests {
         session.entry_file = Some(file);
 
         assert_eq!(session.entry_breakpoint_lines(), vec![4]);
+    }
+
+    #[test]
+    fn breakpoint_response_before_launch_says_local_placement_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("m.mw");
+        std::fs::write(&file, "module m\n\npub fn f(): int\n    return 1\n").unwrap();
+        let mut session = Session::new(Vec::new());
+        let request = json!({ "seq": 1, "command": "setBreakpoints" });
+
+        session.on_set_breakpoints(
+            &request,
+            &json!({
+                "source": { "path": file.display().to_string() },
+                "breakpoints": [{ "line": 3 }]
+            }),
+        );
+
+        let output = String::from_utf8(session.out).unwrap();
+        let (_, body) = output.split_once("\r\n\r\n").unwrap();
+        let response: Json = serde_json::from_str(body).unwrap();
+        let breakpoint = &response["body"]["breakpoints"][0];
+        assert_eq!(breakpoint["verified"], false, "{response}");
+        let message = breakpoint["message"].as_str().unwrap();
+        assert!(
+            message.contains("blocked-on-marrow"),
+            "pending message should keep the Marrow blocker: {response}"
+        );
+        assert!(
+            message.contains("pending until launch"),
+            "pre-launch message should not claim no statement was found: {response}"
+        );
+        assert!(
+            !message.contains("found no statement"),
+            "pre-launch message should distinguish missing analysis from an unresolved line: {response}"
+        );
     }
 }

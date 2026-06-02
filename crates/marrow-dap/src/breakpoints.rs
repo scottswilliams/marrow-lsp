@@ -1,13 +1,13 @@
-//! Resolve client breakpoint lines to the statements the runtime can actually
+//! Locally map client breakpoint lines to statements the prototype runtime can
 //! stop on.
 //!
 //! A `.mw` debugger stops at statement granularity: the hook fires before each
 //! statement, carrying that statement's span. A client sets a breakpoint on a
 //! source line, which may be blank, a comment, or the middle of a multi-line
 //! statement. We bind each requested line to the first statement whose span
-//! starts at or after it (in the same file), and report that statement's line
-//! back as the *verified* breakpoint line — so the editor's marker lands where
-//! the run will really stop, and a line past the last statement is rejected.
+//! starts at or after it (in the same file), giving the runtime a useful local
+//! stop line while client-facing verification stays blocked on canonical
+//! stop-point facts from Marrow.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -16,8 +16,8 @@ use marrow_check::CheckedProgram;
 use marrow_syntax::{Block, Statement};
 
 /// The statement start lines of every function body in `file`, gathered in
-/// ascending order with duplicates removed. The set a breakpoint request snaps
-/// against: only these lines are real stop points.
+/// ascending order with duplicates removed. This is only a local placement aid;
+/// Marrow does not yet expose canonical debugger stop-point facts.
 pub fn statement_lines(program: &CheckedProgram, file: &Path) -> BTreeSet<u32> {
     let mut lines = BTreeSet::new();
     for module in &program.modules {
@@ -34,7 +34,7 @@ pub fn statement_lines(program: &CheckedProgram, file: &Path) -> BTreeSet<u32> {
 /// the analyzed `source_file` may differ in canonical form (symlinked temp dirs,
 /// `..` segments), so compare canonicalized forms, falling back to raw equality
 /// when a path cannot be canonicalized (e.g. it does not exist on disk).
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -125,9 +125,9 @@ fn nested_blocks(statement: &Statement) -> Vec<&Block> {
 
 /// Resolve one requested breakpoint `line` (1-based) against the statement lines
 /// of a file: the first statement line at or after `line`, or `None` when the
-/// request falls past the last statement (an unverifiable breakpoint). Snapping
+/// request falls past the last statement (an unresolved breakpoint). Snapping
 /// forward means a breakpoint on a blank line, a comment, or a signature lands on
-/// the next executable statement — exactly where the run will stop.
+/// the next statement the prototype run hook can stop before.
 pub fn resolve_line(lines: &BTreeSet<u32>, line: u32) -> Option<u32> {
     lines.range(line..).next().copied()
 }

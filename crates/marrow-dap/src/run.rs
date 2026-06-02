@@ -32,7 +32,7 @@ pub struct RunHandle {
 }
 
 /// Start the run on a dedicated thread: prepare the launch (program, entry,
-/// store), build the [`Debugger`] with the verified breakpoint lines, and run.
+/// store), build the [`Debugger`] with prototype breakpoint lines, and run.
 /// Returns the handle and channels, or an error string if the launch could not be
 /// prepared. Preparing here (again) keeps the store open on the thread that uses
 /// it, never crossing back to the protocol thread.
