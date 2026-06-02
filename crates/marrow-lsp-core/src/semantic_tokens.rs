@@ -63,6 +63,7 @@ const TOKEN_TYPES: &[SemanticTokenType] = &[
 const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
     SemanticTokenModifier::MODIFICATION,
     SemanticTokenModifier::DEFAULT_LIBRARY,
+    SemanticTokenModifier::READONLY,
 ];
 
 // Indices into `TOKEN_TYPES`, kept beside it so the two cannot drift.
@@ -86,6 +87,7 @@ const TYPE_BOOLEAN_LITERAL: u32 = 15;
 /// Modifier bits, matching `TOKEN_MODIFIERS`.
 const MOD_MODIFICATION: u32 = 1 << 0;
 const MOD_DEFAULT_LIBRARY: u32 = 1 << 1;
+const MOD_READONLY: u32 = 1 << 2;
 
 /// The legend the server advertises in its `initialize` capabilities. Token and
 /// modifier indices in [`semantic_tokens`] are positions in these lists.
@@ -123,6 +125,7 @@ pub fn semantic_tokens_with_bindings(
     let mut tokens = Vec::new();
     let mut prev_line = 0u32;
     let mut prev_start = 0u32;
+    let const_declaration_overrides = const_declaration_overrides(lexed, file, index.text());
     let declaration_overrides = declaration_overrides(lexed, file, index.text());
     let reference_overrides = binding_index
         .map(|(binding_index, path)| reference_overrides(lexed, index.text(), binding_index, path))
@@ -166,10 +169,15 @@ pub fn semantic_tokens_with_bindings(
             continue;
         }
 
-        if let Some(style) = declaration_overrides
+        if let Some(style) = const_declaration_overrides
             .get(&(token.span.start_byte, token.span.end_byte))
             .copied()
-            .map(TokenStyle::plain)
+            .or_else(|| {
+                declaration_overrides
+                    .get(&(token.span.start_byte, token.span.end_byte))
+                    .copied()
+                    .map(TokenStyle::plain)
+            })
             .or_else(|| {
                 builtin_overrides
                     .get(&(token.span.start_byte, token.span.end_byte))
@@ -218,6 +226,30 @@ impl TokenStyle {
             modifiers: 0,
         }
     }
+}
+
+fn const_declaration_overrides(
+    lexed: &LexedSource,
+    file: &SourceFile,
+    source: &str,
+) -> HashMap<ByteSpan, TokenStyle> {
+    let mut overrides = HashMap::new();
+    for declaration in &file.declarations {
+        if let Declaration::Const(const_decl) = declaration {
+            add_first_identifier_style_override(
+                &mut overrides,
+                lexed,
+                source,
+                const_decl.span,
+                &const_decl.name,
+                TokenStyle {
+                    token_type: TYPE_VARIABLE,
+                    modifiers: MOD_READONLY,
+                },
+            );
+        }
+    }
+    overrides
 }
 
 fn declaration_overrides(
@@ -514,16 +546,38 @@ fn add_first_identifier_override(
     name: &str,
     token_type: u32,
 ) -> Option<usize> {
+    let index = first_identifier_index(lexed, source, span, name)?;
+    insert_override(overrides, &lexed.tokens[index], token_type);
+    Some(index)
+}
+
+fn add_first_identifier_style_override(
+    overrides: &mut HashMap<ByteSpan, TokenStyle>,
+    lexed: &LexedSource,
+    source: &str,
+    span: SourceSpan,
+    name: &str,
+    style: TokenStyle,
+) -> Option<usize> {
+    let index = first_identifier_index(lexed, source, span, name)?;
+    insert_style_override(overrides, &lexed.tokens[index], style);
+    Some(index)
+}
+
+fn first_identifier_index(
+    lexed: &LexedSource,
+    source: &str,
+    span: SourceSpan,
+    name: &str,
+) -> Option<usize> {
     if name.is_empty() {
         return None;
     }
-    let index = lexed.tokens.iter().position(|token| {
+    lexed.tokens.iter().position(|token| {
         token_in_span(token, span)
             && token.kind == TokenKind::Identifier
             && token.text(source) == name
-    })?;
-    insert_override(overrides, &lexed.tokens[index], token_type);
-    Some(index)
+    })
 }
 
 fn add_colon_name_overrides<'a>(
@@ -602,6 +656,14 @@ fn matching_parens_after(
 
 fn insert_override(overrides: &mut HashMap<ByteSpan, u32>, token: &Token, token_type: u32) {
     overrides.insert((token.span.start_byte, token.span.end_byte), token_type);
+}
+
+fn insert_style_override(
+    overrides: &mut HashMap<ByteSpan, TokenStyle>,
+    token: &Token,
+    style: TokenStyle,
+) {
+    overrides.insert((token.span.start_byte, token.span.end_byte), style);
 }
 
 fn token_in_span(token: &Token, span: SourceSpan) -> bool {
@@ -796,7 +858,13 @@ fn style_for_symbol_kind(kind: SymbolKind) -> Option<TokenStyle> {
         SymbolKind::EnumMember => TYPE_ENUM_MEMBER,
         SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index => TYPE_PROPERTY,
         SymbolKind::Local => TYPE_VARIABLE,
-        SymbolKind::ModuleConst | SymbolKind::ModuleRef => return None,
+        SymbolKind::ModuleConst => {
+            return Some(TokenStyle {
+                token_type: TYPE_VARIABLE,
+                modifiers: MOD_READONLY,
+            });
+        }
+        SymbolKind::ModuleRef => return None,
     };
     Some(TokenStyle::plain(token_type))
 }
@@ -1444,6 +1512,27 @@ mod tests {
     }
 
     #[test]
+    fn readonly_modifier_is_appended_after_default_library() {
+        let legend = legend();
+        let default_library = legend
+            .token_modifiers
+            .iter()
+            .position(|modifier| modifier == &SemanticTokenModifier::DEFAULT_LIBRARY)
+            .expect("legend should contain defaultLibrary");
+        let readonly = legend
+            .token_modifiers
+            .iter()
+            .position(|modifier| modifier == &SemanticTokenModifier::READONLY)
+            .expect("legend should contain readonly");
+
+        assert_eq!(
+            readonly,
+            default_library + 1,
+            "readonly should be appended after existing modifiers so prior bits stay stable"
+        );
+    }
+
+    #[test]
     fn boolean_literal_token_is_appended_after_parameter() {
         let boolean_literal = SemanticTokenType::new("booleanLiteral");
 
@@ -1753,6 +1842,137 @@ pub enum Genre
             "pub fn paint(book_id: int, label: string): int",
             "label",
             parameter,
+        );
+    }
+
+    #[test]
+    fn module_const_declarations_are_readonly_variables() {
+        let source = "\
+module m
+
+const LIMIT: int = 10
+
+fn f(): int
+    const local_value = LIMIT
+    return local_value
+";
+        let (index, decoded) = decoded_for(source);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "const LIMIT: int = 10",
+            "LIMIT",
+            legend_index(&SemanticTokenType::VARIABLE),
+            modifier_bit(&SemanticTokenModifier::READONLY),
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const local_value = LIMIT",
+            "local_value",
+            legend_index(&SemanticTokenType::VARIABLE),
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const local_value = LIMIT",
+            "LIMIT",
+            legend_index(&SemanticTokenType::VARIABLE),
+            0,
+        );
+    }
+
+    #[test]
+    fn module_const_references_are_readonly_variables_from_binding_facts() {
+        let source = "\
+module m
+
+const LIMIT: int = 10
+
+fn f(): int
+    const local_value = LIMIT
+    var mutable_value = local_value
+    return mutable_value
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let variable = legend_index(&SemanticTokenType::VARIABLE);
+        let readonly = modifier_bit(&SemanticTokenModifier::READONLY);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const local_value = LIMIT",
+            "LIMIT",
+            variable,
+            readonly,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    var mutable_value = local_value",
+            "local_value",
+            variable,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return mutable_value",
+            "mutable_value",
+            variable,
+            0,
+        );
+    }
+
+    #[test]
+    fn shadowing_local_const_references_do_not_inherit_module_const_readonly() {
+        let source = "\
+module m
+
+const LIMIT: int = 10
+
+fn f(): int
+    const LIMIT: int = 1
+    return LIMIT
+";
+        let (index, decoded) = decoded_for_checked(source);
+        let variable = legend_index(&SemanticTokenType::VARIABLE);
+        let readonly = modifier_bit(&SemanticTokenModifier::READONLY);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "const LIMIT: int = 10",
+            "LIMIT",
+            variable,
+            readonly,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    const LIMIT: int = 1",
+            "LIMIT",
+            variable,
+            0,
+        );
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "    return LIMIT",
+            "LIMIT",
+            variable,
+            0,
         );
     }
 

@@ -132,6 +132,11 @@ assertScopeMapping(marrowSemanticScopes, "keyword", [
 ]);
 assertScopeMapping(marrowSemanticScopes, "booleanLiteral", ["constant.language.boolean.marrow"]);
 assertScopeMapping(marrowSemanticScopes, "variable", ["variable.other.marrow"]);
+assertScopeMapping(marrowSemanticScopes, "variable.readonly", [
+  "variable.other.constant.marrow",
+  "variable.other.readonly.marrow",
+  "variable.other.marrow",
+]);
 assertScopeMapping(marrowSemanticScopes, "string", [
   "string.quoted.double.marrow",
   "string.quoted.double.bytes.marrow",

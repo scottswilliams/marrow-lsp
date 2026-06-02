@@ -154,6 +154,11 @@
           "variable": [
             "variable.other.marrow"
           ],
+          "variable.readonly": [
+            "variable.other.constant.marrow",
+            "variable.other.readonly.marrow",
+            "variable.other.marrow"
+          ],
           "string": [
             "string.quoted.double.marrow",
             "string.quoted.double.bytes.marrow",
