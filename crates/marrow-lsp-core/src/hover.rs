@@ -1353,7 +1353,7 @@ fn resource_hover(schema: &ResourceSchema, reader: Option<&StoreReader>) -> Stri
         && let Availability::Available(count) = reader.record_count(root)
     {
         value.push_str("\n\n");
-        value.push_str(&format!("**live**: {}", count.display()));
+        value.push_str(&live_advisory_line(count.display()));
     }
     value
 }
@@ -2153,9 +2153,10 @@ fn join_docs(lines: &[String]) -> Option<String> {
     }
 }
 
-/// The live-data line for a resolved saved path, or `None` when the store is
-/// unavailable so the hover stays type-only. A root path shows its record count;
-/// any other path shows its presence and, for a stored value, the typed value.
+/// The debug/admin advisory line for a resolved saved path, or `None` when the
+/// store is unavailable so the hover stays type-only. A root path shows its
+/// record count; any other path shows its presence and, for a stored value, the
+/// typed value.
 fn live_value_line(
     reader: &StoreReader,
     segments: &[marrow_store::path::PathSegment],
@@ -2165,14 +2166,19 @@ fn live_value_line(
     // A bare `^root` reads as the record count, the useful fact at a root.
     if let [PathSegment::Root(root)] = segments {
         return match reader.record_count(root) {
-            Availability::Available(count) => Some(format!("**live**: {}", count.display())),
+            Availability::Available(count) => Some(live_advisory_line(count.display())),
             Availability::Unavailable => None,
         };
     }
     match reader.get(segments, program) {
-        Availability::Available(stored) => Some(format!("**live**: {}", present(&stored))),
+        Availability::Available(stored) => Some(live_advisory_line(present(&stored))),
         Availability::Unavailable => None,
     }
+}
+
+fn live_advisory_line(value: impl std::fmt::Display) -> String {
+    const LIVE_ADVISORY_LABEL: &str = "**debug/admin live data (advisory)**";
+    format!("{LIVE_ADVISORY_LABEL}: {value}")
 }
 
 /// The live-value text for a non-root path: the stored value when one is present,
@@ -4385,8 +4391,8 @@ pub fn clear()
             "saved root should include resource docs: {value}"
         );
         assert!(
-            !value.contains("**live**"),
-            "no reader means no live line: {value}"
+            !value.contains("**debug/admin live data (advisory)**"),
+            "no reader means no live advisory line: {value}"
         );
     }
 
@@ -4474,6 +4480,10 @@ resource Book at ^books(id: int)
         assert!(
             value.contains("Books saved by id."),
             "declared saved root should include resource docs: {value}"
+        );
+        assert!(
+            !value.contains("**debug/admin live data (advisory)**"),
+            "no reader means no live advisory line: {value}"
         );
     }
 
@@ -5000,7 +5010,7 @@ pub fn caller(): int
     }
 
     #[test]
-    fn hover_on_a_saved_path_shows_the_live_value() {
+    fn hover_on_a_saved_path_marks_live_value_advisory() {
         let source = "\
 module a
 
@@ -5021,14 +5031,59 @@ pub fn f(): string
             panic!("expected markup contents");
         };
         assert!(
-            markup.value.contains("```marrow\nstring\n```"),
-            "the type is always shown: {}",
+            markup.value.starts_with("```marrow\nstring\n```"),
+            "the checked type should lead the hover: {}",
             markup.value
         );
         assert!(
-            markup.value.contains("\"Mort\""),
-            "the live stored value should be shown: {}",
+            markup
+                .value
+                .contains("**debug/admin live data (advisory)**: \"Mort\""),
+            "the live stored value should be marked advisory: {}",
             markup.value
+        );
+        assert!(
+            !markup.value.contains("**live**: \"Mort\""),
+            "the old bare live label should not be shown: {}",
+            markup.value
+        );
+    }
+
+    #[test]
+    fn hover_over_a_saved_root_declaration_marks_live_count_advisory() {
+        let source = "\
+module a
+
+;; Books saved by id.
+resource Book at ^books(id: int)
+    required title: string
+";
+        let (snapshot, file, project) = analyze_with_store(source);
+        let reader = StoreReader::for_project(&project).expect("native store reader");
+        let index = index_for(&snapshot);
+        let offset = offset_of(source, "^books") + 1;
+        let hover =
+            hover_with_index(&snapshot, &index, &file, offset, Some(&reader)).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nresource Book at ^books(id: int)\n```"),
+            "declared saved root should keep the resource signature: {value}"
+        );
+        assert!(
+            value.contains("Books saved by id."),
+            "declared saved root should keep resource docs: {value}"
+        );
+        assert!(
+            value.contains("**debug/admin live data (advisory)**: 1 record"),
+            "declared saved root should mark the record count advisory: {value}"
+        );
+        assert!(
+            !value.contains("**live**: 1 record"),
+            "the old bare live label should not be shown: {value}"
         );
     }
 
