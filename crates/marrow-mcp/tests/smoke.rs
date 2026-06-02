@@ -185,6 +185,18 @@ fn data_tools_refuse_without_the_opt_in() {
         "without the opt-in, data tools must refuse and read nothing, got {response}"
     );
     assert_eq!(structured["available"], false);
+    assert_eq!(structured["contract"]["status"], "blocked-on-marrow");
+    assert_eq!(
+        structured["contract"]["description"],
+        "debug/admin prototype"
+    );
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("debug/admin prototype (blocked-on-marrow: "),
+        "summary must name the prototype contract, got {response}"
+    );
 
     let _ = server.0.kill();
 }
@@ -270,6 +282,18 @@ fn mw_data_integrity_flags_an_orphan_with_the_opt_in() {
     assert_eq!(findings.len(), 1, "one orphan finding: {response}");
     assert_eq!(findings[0]["kind"], "orphan");
     assert_eq!(findings[0]["path"], "^books(1).sticker");
+    assert_eq!(structured["contract"]["status"], "presentation-only");
+    assert_eq!(
+        structured["contract"]["description"],
+        "debug/admin advisory"
+    );
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("debug/admin advisory (presentation-only: "),
+        "summary must name the advisory contract, got {response}"
+    );
 
     let _ = server.0.kill();
 }
@@ -310,6 +334,21 @@ fn mw_run_executes_over_a_sandboxed_store() {
     assert_eq!(
         response["result"]["structuredContent"]["value"], 42,
         "double(21) over a fresh MemStore returns 42, got {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["contract"]["status"],
+        "presentation-only"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["contract"]["description"],
+        "debug/admin prototype"
+    );
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("debug/admin prototype (presentation-only: "),
+        "summary must name the run prototype contract, got {response}"
     );
 
     let _ = server.0.kill();

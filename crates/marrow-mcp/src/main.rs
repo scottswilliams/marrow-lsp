@@ -157,80 +157,117 @@ fn tool_result(name: &str, result: &Json) -> Json {
 /// through `.get` with a fallback, and an unrecognized shape lands on `"ok"`.
 fn summarize(name: &str, result: &Json) -> String {
     // A surfaced refusal or fault speaks for itself, regardless of which tool ran.
-    if result.get("dataAccess").and_then(Json::as_str) == Some("disabled") {
-        return "data access disabled".to_string();
-    }
-    if let Some(error) = result.get("error").and_then(Json::as_str) {
-        return format!("error: {}", clip(error));
-    }
+    let base = if result.get("dataAccess").and_then(Json::as_str) == Some("disabled") {
+        "data access disabled".to_string()
+    } else if let Some(error) = result.get("error").and_then(Json::as_str) {
+        format!("error: {}", clip(error))
+    } else {
+        match name {
+            "mw_check" => count_summary(result, "diagnostics", "no diagnostics", "diagnostic"),
+            "mw_type_at" => match result.get("type").and_then(Json::as_str) {
+                Some(ty) => clip(ty),
+                None => "no type".to_string(),
+            },
+            "mw_complete" => count_summary(result, "items", "no completions", "completion"),
+            "mw_resource_schema" => count_summary(result, "resources", "no resources", "resource"),
+            "mw_saved_roots" => {
+                if result.get("available").and_then(Json::as_bool) != Some(true) {
+                    "data unavailable".to_string()
+                } else {
+                    count_summary(result, "roots", "no saved roots", "saved root")
+                }
+            }
+            "mw_saved_get" => {
+                if result.get("available").and_then(Json::as_bool) != Some(true) {
+                    "not present".to_string()
+                } else {
+                    match result.get("value") {
+                        Some(value) => format!("value {}", clip(&compact(value))),
+                        // No value rendered: a record node that is absent or holds only
+                        // children carries its `presence` word, which is the honest line.
+                        None => match result.get("presence").and_then(Json::as_str) {
+                            Some(presence) => clip(presence),
+                            None => "present".to_string(),
+                        },
+                    }
+                }
+            }
+            "mw_saved_children" => {
+                if result.get("available").and_then(Json::as_bool) != Some(true) {
+                    "data unavailable".to_string()
+                } else {
+                    let children = array_len(result, "children");
+                    let base = match children {
+                        0 => "no children".to_string(),
+                        1 => "1 child".to_string(),
+                        n => format!("{n} children"),
+                    };
+                    if result.get("more").and_then(Json::as_bool) == Some(true) {
+                        format!("{base} (more)")
+                    } else {
+                        base
+                    }
+                }
+            }
+            "mw_data_integrity" => {
+                if result.get("available").and_then(Json::as_bool) != Some(true) {
+                    "data unavailable".to_string()
+                } else {
+                    let scanned = result.get("scanned").and_then(Json::as_u64).unwrap_or(0);
+                    let findings = array_len(result, "findings");
+                    let base = if findings == 0 {
+                        format!("clean, {scanned} scanned")
+                    } else {
+                        format!(
+                            "{findings} finding{}, {scanned} scanned",
+                            plural(findings as u64)
+                        )
+                    };
+                    if result.get("truncated").and_then(Json::as_bool) == Some(true) {
+                        format!("{base} (truncated)")
+                    } else {
+                        base
+                    }
+                }
+            }
+            "mw_run" => run_summary(result),
+            _ => "ok".to_string(),
+        }
+    };
+    prefix_contract(result, base)
+}
 
-    match name {
-        "mw_check" => count_summary(result, "diagnostics", "no diagnostics", "diagnostic"),
-        "mw_type_at" => match result.get("type").and_then(Json::as_str) {
-            Some(ty) => clip(ty),
-            None => "no type".to_string(),
-        },
-        "mw_complete" => count_summary(result, "items", "no completions", "completion"),
-        "mw_resource_schema" => count_summary(result, "resources", "no resources", "resource"),
-        "mw_saved_roots" => {
-            if result.get("available").and_then(Json::as_bool) != Some(true) {
-                return "data unavailable".to_string();
-            }
-            count_summary(result, "roots", "no saved roots", "saved root")
-        }
-        "mw_saved_get" => {
-            if result.get("available").and_then(Json::as_bool) != Some(true) {
-                return "not present".to_string();
-            }
-            match result.get("value") {
-                Some(value) => format!("value {}", clip(&compact(value))),
-                // No value rendered: a record node that is absent or holds only
-                // children carries its `presence` word, which is the honest line.
-                None => match result.get("presence").and_then(Json::as_str) {
-                    Some(presence) => clip(presence),
-                    None => "present".to_string(),
-                },
-            }
-        }
-        "mw_saved_children" => {
-            if result.get("available").and_then(Json::as_bool) != Some(true) {
-                return "data unavailable".to_string();
-            }
-            let children = array_len(result, "children");
-            let base = match children {
-                0 => "no children".to_string(),
-                1 => "1 child".to_string(),
-                n => format!("{n} children"),
-            };
-            if result.get("more").and_then(Json::as_bool) == Some(true) {
-                format!("{base} (more)")
-            } else {
-                base
-            }
-        }
-        "mw_data_integrity" => {
-            if result.get("available").and_then(Json::as_bool) != Some(true) {
-                return "data unavailable".to_string();
-            }
-            let scanned = result.get("scanned").and_then(Json::as_u64).unwrap_or(0);
-            let findings = array_len(result, "findings");
-            let base = if findings == 0 {
-                format!("clean, {scanned} scanned")
-            } else {
-                format!(
-                    "{findings} finding{}, {scanned} scanned",
-                    plural(findings as u64)
-                )
-            };
-            if result.get("truncated").and_then(Json::as_bool) == Some(true) {
-                format!("{base} (truncated)")
-            } else {
-                base
-            }
-        }
-        "mw_run" => run_summary(result),
-        _ => "ok".to_string(),
+fn prefix_contract(result: &Json, base: String) -> String {
+    let Some(contract) = result.get("contract") else {
+        return base;
+    };
+    let Some(description) = contract.get("description").and_then(Json::as_str) else {
+        return base;
+    };
+    let Some(status) = contract.get("status").and_then(Json::as_str) else {
+        return format!("{}: {base}", clip(description));
+    };
+    let missing = contract
+        .get("missingFacts")
+        .and_then(Json::as_array)
+        .and_then(|facts| missing_fact_summary(facts));
+    match missing {
+        Some(missing) => format!(
+            "{} ({}: {}): {base}",
+            clip(description),
+            clip(status),
+            missing
+        ),
+        None => format!("{} ({}): {base}", clip(description), clip(status)),
     }
+}
+
+fn missing_fact_summary(facts: &[Json]) -> Option<String> {
+    let first = facts.first()?.as_str()?;
+    if facts.len() == 1 {
+        return Some(clip(first));
+    }
+    Some(format!("{} +{}", clip(first), facts.len() - 1))
 }
 
 /// Summarize `mw_run`: test mode carries a `tests` array (pass/fail counts), run
@@ -533,6 +570,110 @@ mod tests {
             assert_eq!(envelope["structuredContent"], result);
             assert_eq!(envelope["content"][0]["text"], expected);
             assert_eq!(envelope["isError"], false);
+        }
+    }
+
+    #[test]
+    fn summarize_prefixes_contract_bearing_results_and_preserves_contract() {
+        let contract = |status: &str, description: &str, missing_facts: &[&str]| {
+            json!({
+                "status": status,
+                "stableProductionApi": false,
+                "description": description,
+                "missingFacts": missing_facts,
+            })
+        };
+        let cases: Vec<(&str, Json, &str)> = vec![
+            (
+                "mw_complete",
+                json!({
+                    "items": [{}, {}, {}],
+                    "contract": contract(
+                        "blocked-on-marrow",
+                        "development helper",
+                        &["canonical completion-context facts"],
+                    ),
+                }),
+                "development helper (blocked-on-marrow: canonical completion-context facts): 3 completions",
+            ),
+            (
+                "mw_saved_children",
+                json!({
+                    "available": true,
+                    "children": [{}, {}],
+                    "more": false,
+                    "contract": contract(
+                        "blocked-on-marrow",
+                        "debug/admin prototype",
+                        &[
+                            "catalog-bound saved-place identity",
+                            "typed children",
+                            "cursor/page facts",
+                        ],
+                    ),
+                }),
+                "debug/admin prototype (blocked-on-marrow: catalog-bound saved-place identity +2): 2 children",
+            ),
+            (
+                "mw_saved_roots",
+                json!({
+                    "available": false,
+                    "roots": [],
+                    "contract": contract(
+                        "blocked-on-marrow",
+                        "debug/admin prototype",
+                        &["catalog-bound saved-place identity"],
+                    ),
+                }),
+                "debug/admin prototype (blocked-on-marrow: catalog-bound saved-place identity): data unavailable",
+            ),
+            (
+                "mw_data_integrity",
+                json!({
+                    "available": true,
+                    "findings": [],
+                    "scanned": 10,
+                    "truncated": false,
+                    "contract": contract(
+                        "presentation-only",
+                        "debug/admin advisory",
+                        &[
+                            "catalog/store identity",
+                            "store generation",
+                            "catalog epoch/digest",
+                            "typed repair or drift facts",
+                        ],
+                    ),
+                }),
+                "debug/admin advisory (presentation-only: catalog/store identity +3): clean, 10 scanned",
+            ),
+            (
+                "mw_run",
+                json!({
+                    "value": 42,
+                    "output": "",
+                    "diagnostics": [],
+                    "contract": contract(
+                        "presentation-only",
+                        "debug/admin prototype",
+                        &[
+                            "transitive effect facts",
+                            "durable-scope facts",
+                            "transaction facts",
+                        ],
+                    ),
+                }),
+                "debug/admin prototype (presentation-only: transitive effect facts +2): value 42",
+            ),
+        ];
+        for (name, result, expected) in cases {
+            let envelope = tool_result(name, &result);
+            assert_eq!(envelope["content"][0]["text"], expected, "{name}");
+            assert_eq!(envelope["structuredContent"], result, "{name}");
+            assert_eq!(
+                envelope["structuredContent"]["contract"],
+                result["contract"]
+            );
         }
     }
 

@@ -45,6 +45,78 @@ const OUTPUT_CAP: usize = 8 * 1024;
 /// is named here so the MCP contract is explicit.
 const CHILDREN_HINT: &str = "more children remained; narrow the path to page them";
 
+const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
+const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
+    "catalog-bound resource/store/member identity",
+    "presence/default facts",
+    "typed protocol DTOs",
+];
+const SAVED_DATA_MISSING_FACTS: &[&str] = &[
+    "catalog-bound saved-place identity",
+    "typed children",
+    "cursor/page facts",
+    "snapshot/store generation",
+    "stable data DTOs",
+];
+const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
+    "catalog/store identity",
+    "store generation",
+    "catalog epoch/digest",
+    "typed repair or drift facts",
+];
+const RUN_MISSING_FACTS: &[&str] = &[
+    "transitive effect facts",
+    "durable-scope facts",
+    "transaction facts",
+    "runtime generation facts",
+    "typed run protocol DTOs",
+];
+
+fn blocked_contract(description: &str, missing_facts: &[&str]) -> Json {
+    json!({
+        "status": "blocked-on-marrow",
+        "stableProductionApi": false,
+        "description": description,
+        "missingFacts": missing_facts,
+    })
+}
+
+fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
+    json!({
+        "status": "presentation-only",
+        "stableProductionApi": false,
+        "description": description,
+        "missingFacts": missing_facts,
+    })
+}
+
+fn completion_contract() -> Json {
+    blocked_contract("development helper", COMPLETION_MISSING_FACTS)
+}
+
+fn resource_schema_contract() -> Json {
+    blocked_contract("development helper", RESOURCE_SCHEMA_MISSING_FACTS)
+}
+
+fn saved_data_contract() -> Json {
+    blocked_contract("debug/admin prototype", SAVED_DATA_MISSING_FACTS)
+}
+
+fn data_integrity_contract() -> Json {
+    presentation_contract("debug/admin advisory", DATA_INTEGRITY_MISSING_FACTS)
+}
+
+fn run_contract() -> Json {
+    presentation_contract("debug/admin prototype", RUN_MISSING_FACTS)
+}
+
+fn with_contract(mut result: Json, contract: Json) -> Json {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("contract".to_string(), contract);
+    }
+    result
+}
+
 /// Load the project `file` belongs to (walking up to its `marrow.json`), check it,
 /// and return the workspace holding the snapshot plus the file's absolute path.
 /// `source`, when given, overlays the file's on-disk text so analysis reflects an
@@ -186,13 +258,14 @@ pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
 /// is `{ label, kind, detail? }`. The file is checked so the snapshot's program
 /// backs schema- and scope-aware modes.
 pub fn complete(file: &Path, line: u32, character: u32) -> Json {
+    let contract = completion_contract();
     let (workspace, file) = match load_project(file, None) {
         Ok(loaded) => loaded,
-        Err(error) => return json!({ "items": [], "error": error }),
+        Err(error) => return with_contract(json!({ "items": [], "error": error }), contract),
     };
     let snapshot = workspace.latest().expect("recompute stored a snapshot");
     let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return json!({ "items": [] });
+        return with_contract(json!({ "items": [] }), contract);
     };
     // The classifier reads the cached lex's spans against this text, and the parse
     // came from the same on-disk text, so read and index that text.
@@ -217,7 +290,7 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
         })
     })
     .collect();
-    json!({ "items": items })
+    with_contract(json!({ "items": items }), contract)
 }
 
 /// `mw_resource_schema`: a JSON projection of one resource schema (by `name`) or
@@ -226,18 +299,19 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
 /// (root + identity keys), its member tree (fields, keyed leaves, groups, nested),
 /// and its indexes. Built from `ResourceSchema` — no schema logic is reinvented.
 pub fn resource_schema(file: &Path, name: Option<&str>) -> Json {
+    let contract = resource_schema_contract();
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
-        Err(error) => return json!({ "resources": [], "error": error }),
+        Err(error) => return with_contract(json!({ "resources": [], "error": error }), contract),
     };
     let Some(program) = workspace.program() else {
-        return json!({ "resources": [] });
+        return with_contract(json!({ "resources": [] }), contract);
     };
     let resources: Vec<Json> = all_resources(program)
         .filter(|resource| name.is_none_or(|name| resource.name == name))
         .map(schema_to_json)
         .collect();
-    json!({ "resources": resources })
+    with_contract(json!({ "resources": resources }), contract)
 }
 
 /// Project one resource schema to JSON: name, optional saved root, member tree, and
@@ -307,63 +381,83 @@ fn index_to_json(index: &IndexSchema) -> Json {
 /// returns a refusal envelope and never opens the store. A project with no native
 /// store, or a store that cannot be read right now, answers `available: false`.
 pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
+    let contract = saved_data_contract();
     if !allow_data {
-        return data_disabled();
+        return data_disabled(contract);
     }
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
-        Err(error) => return json!({ "available": false, "roots": [], "error": error }),
+        Err(error) => {
+            return with_contract(
+                json!({ "available": false, "roots": [], "error": error }),
+                contract,
+            );
+        }
     };
     let reader = workspace.project().and_then(StoreReader::for_project);
-    serde_json::to_value(crate::data_explorer::saved_roots(reader.as_ref()))
-        .unwrap_or_else(|_| json!({ "available": false, "roots": [] }))
+    let result = serde_json::to_value(crate::data_explorer::saved_roots(reader.as_ref()))
+        .unwrap_or_else(|_| json!({ "available": false, "roots": [] }));
+    with_contract(result, contract)
 }
 
 /// `mw_saved_get`: the presence and schema-typed value at a saved `path`, read
 /// through a [`StoreReader`]. The path mirrors the LSP Data Explorer's segment
 /// encoding (root/key/field/layer/index/index_key). Gated like [`saved_roots`].
 pub fn saved_get(file: &Path, path: Json, allow_data: bool) -> Json {
+    let contract = saved_data_contract();
     if !allow_data {
-        return data_disabled();
+        return data_disabled(contract);
     }
     let params: crate::data_explorer::SavedGetParams =
         match serde_json::from_value(json!({ "path": path })) {
             Ok(params) => params,
             Err(error) => {
-                return json!({ "available": false, "error": format!("invalid path: {error}") });
+                return with_contract(
+                    json!({ "available": false, "error": format!("invalid path: {error}") }),
+                    contract,
+                );
             }
         };
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
-        Err(error) => return json!({ "available": false, "error": error }),
+        Err(error) => {
+            return with_contract(json!({ "available": false, "error": error }), contract);
+        }
     };
     let reader = workspace.project().and_then(StoreReader::for_project);
     let empty = CheckedProgram::default();
     let program = workspace.program().unwrap_or(&empty);
-    serde_json::to_value(crate::data_explorer::saved_get(
+    let result = serde_json::to_value(crate::data_explorer::saved_get(
         params,
         program,
         reader.as_ref(),
     ))
-    .unwrap_or_else(|_| json!({ "available": false }))
+    .unwrap_or_else(|_| json!({ "available": false }));
+    with_contract(result, contract)
 }
 
 /// `mw_saved_children`: the immediate children of a saved `path`, capped, read
 /// through a [`StoreReader`]. Path encoding and gating match [`saved_get`].
 pub fn saved_children(file: &Path, path: Json, allow_data: bool) -> Json {
+    let contract = saved_data_contract();
     if !allow_data {
-        return data_disabled();
+        return data_disabled(contract);
     }
     let params: crate::data_explorer::SavedChildrenParams =
         match serde_json::from_value(json!({ "path": path })) {
             Ok(params) => params,
             Err(error) => {
-                return json!({ "available": false, "error": format!("invalid path: {error}") });
+                return with_contract(
+                    json!({ "available": false, "error": format!("invalid path: {error}") }),
+                    contract,
+                );
             }
         };
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
-        Err(error) => return json!({ "available": false, "error": error }),
+        Err(error) => {
+            return with_contract(json!({ "available": false, "error": error }), contract);
+        }
     };
     let reader = workspace.project().and_then(StoreReader::for_project);
     let result = crate::data_explorer::saved_children(params, reader.as_ref());
@@ -373,7 +467,7 @@ pub fn saved_children(file: &Path, path: Json, allow_data: bool) -> Json {
     {
         object.insert("hint".to_string(), json!(CHILDREN_HINT));
     }
-    value
+    with_contract(value, contract)
 }
 
 /// `mw_data_integrity`: the schema-change-impact advisory — a capped, on-demand
@@ -385,8 +479,9 @@ pub fn saved_children(file: &Path, path: Json, allow_data: bool) -> Json {
 /// never opens the store. A project with no native store, or a store that cannot
 /// be read right now, answers `available: false`.
 pub fn data_integrity(file: &Path, allow_data: bool) -> Json {
+    let contract = data_integrity_contract();
     if !allow_data {
-        return data_disabled();
+        return data_disabled(contract);
     }
     let unavailable =
         json!({ "available": false, "findings": [], "scanned": 0, "truncated": false });
@@ -395,29 +490,33 @@ pub fn data_integrity(file: &Path, allow_data: bool) -> Json {
         Err(error) => {
             let mut value = unavailable.clone();
             value["error"] = json!(error);
-            return value;
+            return with_contract(value, contract);
         }
     };
     let reader = workspace.project().and_then(StoreReader::for_project);
     let empty = CheckedProgram::default();
     let program = workspace.program().unwrap_or(&empty);
-    serde_json::to_value(crate::data_integrity::data_integrity(
+    let result = serde_json::to_value(crate::data_integrity::data_integrity(
         reader.as_ref(),
         program,
     ))
-    .unwrap_or(unavailable)
+    .unwrap_or(unavailable);
+    with_contract(result, contract)
 }
 
 /// The refusal a data tool returns when data access is not enabled: a clear,
 /// machine-readable envelope that carries no stored data. The transport sets the
 /// opt-in (an env var / launch flag); the boundary itself lives here so a missing
 /// opt-in can never leak a byte regardless of transport.
-fn data_disabled() -> Json {
-    json!({
-        "available": false,
-        "dataAccess": "disabled",
-        "message": "data access not enabled; relaunch marrow-mcp with MARROW_MCP_ALLOW_DATA=1 (or --allow-data) to read stored data",
-    })
+fn data_disabled(contract: Json) -> Json {
+    with_contract(
+        json!({
+            "available": false,
+            "dataAccess": "disabled",
+            "message": "data access not enabled; relaunch marrow-mcp with MARROW_MCP_ALLOW_DATA=1 (or --allow-data) to read stored data",
+        }),
+        contract,
+    )
 }
 
 /// How a `mw_run` request runs `entry`: as a normal entry, or as the project's
@@ -456,6 +555,19 @@ pub enum RunArgsPolicy {
 /// The project's real store is never opened in either mode, so an agent can run
 /// code with no risk to managed data.
 pub fn run(
+    file: &Path,
+    entry: Option<&str>,
+    args: &[Json],
+    mode: RunMode,
+    args_policy: RunArgsPolicy,
+) -> Json {
+    with_contract(
+        run_result(file, entry, args, mode, args_policy),
+        run_contract(),
+    )
+}
+
+fn run_result(
     file: &Path,
     entry: Option<&str>,
     args: &[Json],
@@ -776,6 +888,26 @@ mod tests {
     use marrow_store::path::{PathSegment, SavedKey, encode_path};
     use marrow_store::redb::RedbStore;
 
+    fn assert_contract(result: &Json, status: &str, description: &str, missing_facts: &[&str]) {
+        let contract = &result["contract"];
+        assert_eq!(contract["status"], status, "contract status for {result}");
+        assert_eq!(
+            contract["stableProductionApi"], false,
+            "stableProductionApi must be false for {result}"
+        );
+        assert_eq!(
+            contract["description"], description,
+            "contract description for {result}"
+        );
+        let actual: Vec<&str> = contract["missingFacts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("contract missingFacts must be an array: {result}"))
+            .iter()
+            .map(|fact| fact.as_str().expect("missing fact string"))
+            .collect();
+        assert_eq!(actual, missing_facts, "missing facts for {result}");
+    }
+
     /// Write a clean two-resource project to a temp dir and return its root and a
     /// file inside it. The project declares a saved `Book` resource and a couple of
     /// functions an `mw_run`/`mw_type_at` test can target.
@@ -882,6 +1014,12 @@ pub fn shout()
             items.iter().any(|item| item["kind"] == "keyword"),
             "a bare position should offer keywords, got {result}"
         );
+        assert_contract(
+            &result,
+            "blocked-on-marrow",
+            "development helper",
+            &["canonical completion-context facts"],
+        );
     }
 
     #[test]
@@ -914,6 +1052,16 @@ pub fn shout()
                 .iter()
                 .any(|i| i["name"] == "byTitle")
         );
+        assert_contract(
+            &result,
+            "blocked-on-marrow",
+            "development helper",
+            &[
+                "catalog-bound resource/store/member identity",
+                "presence/default facts",
+                "typed protocol DTOs",
+            ],
+        );
     }
 
     #[test]
@@ -935,6 +1083,18 @@ pub fn shout()
         );
         assert_eq!(result["value"], 42, "double(21) == 42: {result}");
         assert_eq!(result["diagnostics"].as_array().unwrap().len(), 0);
+        assert_contract(
+            &result,
+            "presentation-only",
+            "debug/admin prototype",
+            &[
+                "transitive effect facts",
+                "durable-scope facts",
+                "transaction facts",
+                "runtime generation facts",
+                "typed run protocol DTOs",
+            ],
+        );
     }
 
     #[test]
@@ -952,6 +1112,18 @@ pub fn shout()
             "non-empty run args should be blocked before project loading: {result}"
         );
         assert_eq!(result["output"], "");
+        assert_contract(
+            &result,
+            "presentation-only",
+            "debug/admin prototype",
+            &[
+                "transitive effect facts",
+                "durable-scope facts",
+                "transaction facts",
+                "runtime generation facts",
+                "typed run protocol DTOs",
+            ],
+        );
     }
 
     #[test]
@@ -1078,6 +1250,18 @@ pub fn fails()
             fails["outcome"], "failed",
             "an assertion failure is a failed test: {fails}"
         );
+        assert_contract(
+            &result,
+            "presentation-only",
+            "debug/admin prototype",
+            &[
+                "transitive effect facts",
+                "durable-scope facts",
+                "transaction facts",
+                "runtime generation facts",
+                "typed run protocol DTOs",
+            ],
+        );
     }
 
     #[test]
@@ -1103,12 +1287,59 @@ pub fn fails()
         let roots = saved_roots(&file, false);
         assert_eq!(roots["available"], false);
         assert_eq!(roots["dataAccess"], "disabled");
+        assert_contract(
+            &roots,
+            "blocked-on-marrow",
+            "debug/admin prototype",
+            &[
+                "catalog-bound saved-place identity",
+                "typed children",
+                "cursor/page facts",
+                "snapshot/store generation",
+                "stable data DTOs",
+            ],
+        );
         let got = saved_get(&file, json!([{ "root": "books" }]), false);
         assert_eq!(got["dataAccess"], "disabled");
+        assert_contract(
+            &got,
+            "blocked-on-marrow",
+            "debug/admin prototype",
+            &[
+                "catalog-bound saved-place identity",
+                "typed children",
+                "cursor/page facts",
+                "snapshot/store generation",
+                "stable data DTOs",
+            ],
+        );
         let children = saved_children(&file, json!([]), false);
         assert_eq!(children["dataAccess"], "disabled");
+        assert_contract(
+            &children,
+            "blocked-on-marrow",
+            "debug/admin prototype",
+            &[
+                "catalog-bound saved-place identity",
+                "typed children",
+                "cursor/page facts",
+                "snapshot/store generation",
+                "stable data DTOs",
+            ],
+        );
         let integrity = data_integrity(&file, false);
         assert_eq!(integrity["dataAccess"], "disabled");
+        assert_contract(
+            &integrity,
+            "presentation-only",
+            "debug/admin advisory",
+            &[
+                "catalog/store identity",
+                "store generation",
+                "catalog epoch/digest",
+                "typed repair or drift facts",
+            ],
+        );
     }
 
     #[test]
