@@ -645,7 +645,12 @@ fn load_project_for_run(
 /// brand new for this call and dropped when it returns; nothing persists.
 fn run_entry(program: &CheckedProgram, entry: Option<&str>, args: &[Json]) -> Json {
     let Some(entry) = entry else {
-        return json!({ "diagnostics": [{ "message": "run mode needs an `entry` of the form `module::fn`" }], "output": "" });
+        return json!({
+            "diagnostics": [{
+                "message": "run mode needs `entry` (`module::fn`) as a debug/admin prototype entry string blocked on canonical function-entry facts, not a stable production entry API"
+            }],
+            "output": ""
+        });
     };
     let arguments = match args
         .iter()
@@ -1112,6 +1117,45 @@ pub fn shout()
         assert!(
             message.contains("typed run argument facts from Marrow"),
             "non-empty run args should be blocked before project loading: {result}"
+        );
+        assert_eq!(result["output"], "");
+        assert_contract(
+            &result,
+            "presentation-only",
+            "debug/admin prototype",
+            &[
+                "canonical function-entry facts",
+                "transitive effect facts",
+                "durable-scope facts",
+                "transaction facts",
+                "runtime generation facts",
+                "typed run protocol DTOs",
+            ],
+        );
+    }
+
+    #[test]
+    fn run_without_entry_frames_the_prototype_entry_contract() {
+        let (_dir, file) = project();
+        let result = run(
+            &file,
+            None,
+            &[],
+            RunMode::Run,
+            RunArgsPolicy::StableTypedFactsOnly,
+        );
+        let message = result["diagnostics"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("debug/admin prototype entry string"),
+            "missing entry should frame entry as a prototype string: {result}"
+        );
+        assert!(
+            message.contains("canonical function-entry facts"),
+            "missing entry should name the blocking facts: {result}"
+        );
+        assert!(
+            message.contains("not a stable production entry API"),
+            "missing entry should not imply a stable entry API: {result}"
         );
         assert_eq!(result["output"], "");
         assert_contract(

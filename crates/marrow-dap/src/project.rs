@@ -59,7 +59,7 @@ impl std::fmt::Display for LaunchError {
             Self::Analyze(message) => write!(f, "could not analyze the project: {message}"),
             Self::NoEntry => write!(
                 f,
-                "no entry to run: pass `entry` (\"module::fn\") or set a default in {CONFIG_FILE}"
+                "no entry to run: pass `entry` (\"module::fn\") or configure `defaultEntry` in {CONFIG_FILE}; this debug/admin prototype entry string is blocked on canonical function-entry facts, not a stable production entry API"
             ),
             Self::Store(message) => write!(f, "could not open the store: {message}"),
             Self::CheckErrors(errors) => {
@@ -188,13 +188,34 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_entry_is_an_error() {
+    fn missing_entry_error_frames_the_prototype_entry_contract() {
         let dir = write_project(
             "module m\n\npub fn main(): int\n    return 1\n",
             "{ \"sourceRoots\": [\"src\"] }",
         );
         let error = expect_error(prepare(dir.path(), None));
         assert!(matches!(error, LaunchError::NoEntry), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.contains("debug/admin prototype entry string"),
+            "missing entry should frame entry as a prototype string: {message}"
+        );
+        assert!(
+            message.contains("canonical function-entry facts"),
+            "missing entry should name the blocking facts: {message}"
+        );
+        assert!(
+            message.contains("not a stable production entry API"),
+            "missing entry should not imply a stable entry API: {message}"
+        );
+        assert!(
+            message.contains("pass `entry`"),
+            "missing entry should preserve explicit entry guidance: {message}"
+        );
+        assert!(
+            message.contains("defaultEntry"),
+            "missing entry should preserve defaultEntry guidance: {message}"
+        );
     }
 
     #[test]
