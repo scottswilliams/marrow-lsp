@@ -53,7 +53,7 @@
       },
       {
         "command": "marrow.checkDataIntegrity",
-        "title": "Marrow: Check Stored Data Integrity",
+        "title": "Marrow: Check Stored Data Integrity (Advisory)",
         "category": "Marrow"
       }
     ],
@@ -295,7 +295,7 @@
         "marrow.liveData": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Enable read-only native dev-store reads for hover, CodeLens, the Data Explorer, and stored-data integrity checks. Leave disabled to prevent editor-triggered reads of real stored data."
+          "markdownDescription": "Opt in to debug/admin read-only native dev-store reads for hover, presentation-only CodeLens and Data Explorer surfaces, and advisory stored-data integrity checks. Leave disabled to prevent editor-triggered reads of local stored data."
         }
       }
     }
@@ -304,8 +304,9 @@
     "compile": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "compile:release": "esbuild ./src/extension.ts --bundle --minify --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "vscode:prepublish": "npm run compile:release",
-    "check": "node ./scripts/checkGrammar.mjs && tsc --noEmit && npm run check:dataExplorer",
+    "check": "node ./scripts/checkGrammar.mjs && tsc --noEmit && npm run check:dataExplorer && npm run check:copy",
     "check:dataExplorer": "node ./scripts/checkDataExplorer.mjs",
+    "check:copy": "node ./scripts/checkCopy.mjs",
     "bundle": "node ./scripts/bundle.mjs",
     "package": "npm run compile:release && npm run bundle && npx @vscode/vsce package --no-dependencies --target $(node -e \"console.log({darwin:{arm64:'darwin-arm64',x64:'darwin-x64'},linux:{arm64:'linux-arm64',x64:'linux-x64'},win32:{x64:'win32-x64'}}[process.platform][process.arch])\")"
   },

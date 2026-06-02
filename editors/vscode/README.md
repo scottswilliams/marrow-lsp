@@ -16,8 +16,8 @@ Rust binaries. No parsing or position math runs in TypeScript.
   whole project.
 - **Go to definition** — jump from a use to its binding.
 - **Find references** — list every use of a symbol.
-- **Rename** — data-safe rename that refuses edits that would diverge from the persisted store
-  schema, so renames never silently break durable data.
+- **Rename** — data-safe rename that refuses saved-data-backed edits until Marrow exposes
+  catalog-backed evolution facts.
 - **Semantic tokens** — semantic highlighting layered over the TextMate grammar.
 - **Formatting** — format a `.mw` document.
 - **CodeLens** — a **record-count** lens above declarations when `marrow.liveData` is enabled.
@@ -56,9 +56,9 @@ same way, in order:
   dev locations when the file exists.
 - `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
   bundled and dev locations when the file exists.
-- `marrow.liveData` — opt in to read-only native dev-store reads for hover, CodeLens, the Data
-  Explorer, and data-integrity checks. Leave disabled to prevent editor-triggered reads of local
-  stored data.
+- `marrow.liveData` — opt in to debug/admin read-only native dev-store reads for hover,
+  presentation-only CodeLens and Data Explorer surfaces, and advisory data-integrity checks.
+  Leave disabled to prevent editor-triggered reads of local stored data.
 
 ## Known limitations
 

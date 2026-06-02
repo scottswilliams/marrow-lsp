@@ -65,7 +65,7 @@ export class MarrowDataIntegrity {
 
   private showUnavailable(): void {
     void vscode.window.showInformationMessage(
-      "Stored-data integrity check needs a readable dev store " +
+      "Advisory data-integrity check needs opt-in live data and a readable native dev-store " +
         "(enable marrow.liveData / ensure marrow.json points at a native store)",
     );
   }
@@ -90,11 +90,11 @@ export class MarrowDataIntegrity {
     const count = result.findings.length;
     if (count === 0) {
       void vscode.window.showInformationMessage(
-        "No issues: stored data matches the schema",
+        "Advisory scan found no issues in the opt-in native dev-store read",
       );
     } else {
       void vscode.window.showInformationMessage(
-        `${count} issue(s) found`,
+        `${count} advisory issue(s) found`,
       );
     }
   }

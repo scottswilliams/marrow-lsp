@@ -12,15 +12,17 @@ Initial release.
 ### Added
 
 - Diagnostics (parse, type, and schema errors) for `.mw` files.
-- Hover with type and documentation, including live data values read from the durable store.
+- Hover with type and documentation, plus opt-in debug/admin live data presentation from the
+  native dev store while typed/catalog-bound facts are pending.
 - Context-aware completion.
 - Document and workspace symbols.
 - Go to definition and find references.
-- Data-safe rename that refuses edits diverging from the persisted store schema.
+- Data-safe rename that refuses saved-data-backed edits.
 - Semantic tokens for semantic highlighting over the TextMate grammar.
 - Document formatting.
-- Record-count CodeLens backed by stored data.
-- The Marrow Data Explorer view for browsing the project's durable data.
+- Presentation-only record-count CodeLens when opt-in live data is enabled.
+- The Marrow Data Explorer view for opt-in debug/admin inspection of the native dev store while
+  typed/catalog-bound store facts are pending.
 - F5 debugging via the `marrow-dap` adapter, with statement stepping, breakpoints, and a live
   `^` durable-data scope.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
