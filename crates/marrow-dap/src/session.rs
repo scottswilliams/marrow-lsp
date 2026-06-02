@@ -39,6 +39,8 @@ const PROTOTYPE_ARGS_BLOCKED: &str =
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
 const BREAKPOINT_PLACEMENT_PENDING: &str = "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow; local syntax-walk placement is pending until launch/program analysis";
+const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
+const DURABLE_VALUE_BLOCKER: &str = "typed durable watch/path facts";
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread: a
 /// local value is expanded in memory, a durable path is read from the live store.
@@ -505,7 +507,7 @@ impl<W: Write> Session<W> {
                     .expand
                     .map(|value| self.alloc_ref(Expandable::Local(value)))
                     .unwrap_or(0);
-                variable_json(&local.name, &local.value, reference)
+                variable_json(&local.name, &local.value, reference, LOCAL_VALUE_BLOCKER)
             })
             .collect()
     }
@@ -522,7 +524,7 @@ impl<W: Write> Session<W> {
                     .expand
                     .map(|value| self.alloc_ref(Expandable::Local(value)))
                     .unwrap_or(0);
-                variable_json(&child.name, &child.value, reference)
+                variable_json(&child.name, &child.value, reference, LOCAL_VALUE_BLOCKER)
             })
             .collect()
     }
@@ -544,7 +546,7 @@ impl<W: Write> Session<W> {
                 } else {
                     0
                 };
-                variable_json(&node.name, &node.value, reference)
+                variable_json(&node.name, &node.value, reference, DURABLE_VALUE_BLOCKER)
             })
             .collect()
     }
@@ -640,7 +642,12 @@ impl<W: Write> Session<W> {
             Ok(value) => self.respond(
                 request,
                 true,
-                json!({ "result": value, "variablesReference": 0 }),
+                json!({
+                    "result": value,
+                    "variablesReference": 0,
+                    "presentationHint": debug_admin_presentation_hint(),
+                    "marrowContract": debug_admin_contract(DURABLE_VALUE_BLOCKER),
+                }),
             ),
             Err(message) => self.respond(request, false, json!(message)),
         }
@@ -782,11 +789,27 @@ enum StepKind {
 
 /// Build a DAP `Variable` object. A zero reference marks a leaf; a non-zero one
 /// lets the client expand it.
-fn variable_json(name: &str, value: &str, reference: i64) -> Json {
+fn variable_json(name: &str, value: &str, reference: i64, blocked_on: &str) -> Json {
     json!({
         "name": name,
         "value": value,
+        "presentationHint": debug_admin_presentation_hint(),
+        "marrowContract": debug_admin_contract(blocked_on),
         "variablesReference": reference,
+    })
+}
+
+fn debug_admin_contract(blocked_on: &str) -> Json {
+    json!({
+        "status": "debug/admin prototype",
+        "blockedOn": blocked_on,
+    })
+}
+
+fn debug_admin_presentation_hint() -> Json {
+    json!({
+        "kind": "data",
+        "attributes": ["readOnly"],
     })
 }
 

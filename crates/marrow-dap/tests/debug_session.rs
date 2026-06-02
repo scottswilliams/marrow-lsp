@@ -153,6 +153,63 @@ fn write_arg_fixture(dir: &Path) {
     .unwrap();
 }
 
+/// Write a fixture with an expandable local sequence and raw durable data so
+/// DAP value responses exercise every prototype value surface.
+fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  resource Book at ^books(id: int)\n\
+                  \x20   required title: string\n\
+                  \x20   tags: sequence[string]\n\
+                  \n\
+                  pub fn main()\n\
+                  \x20   const id: int = 1\n\
+                  \x20   const title: string = \"Dune\"\n\
+                  \x20   ^books(id).title = title\n\
+                  \x20   const tagPos: int = append(^books(id).tags, \"classic\")\n\
+                  \x20   var tags = values(^books(id).tags)\n\
+                  \x20   print(title)\n";
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+    )
+    .unwrap();
+    file
+}
+
+fn assert_debug_admin_value_contract(value: &Json, missing_fact: &str) {
+    assert!(
+        value.get("type").is_none(),
+        "DAP contract metadata should not masquerade as a value type: {value}"
+    );
+
+    let attributes = value["presentationHint"]["attributes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("DAP value should include presentation attributes: {value}"));
+    assert!(
+        attributes.iter().any(|attribute| attribute == "readOnly"),
+        "DAP value presentation should be read-only: {value}"
+    );
+
+    let contract = value["marrowContract"]
+        .as_object()
+        .unwrap_or_else(|| panic!("DAP value should include Marrow contract metadata: {value}"));
+    assert_eq!(
+        contract.get("status").and_then(Json::as_str),
+        Some("debug/admin prototype"),
+        "DAP value contract should mark prototype status: {value}"
+    );
+    assert_eq!(
+        contract.get("blockedOn").and_then(Json::as_str),
+        Some(missing_fact),
+        "DAP value contract should name `{missing_fact}`: {value}"
+    );
+}
+
 #[test]
 fn launch_blocks_non_empty_args_by_default_until_typed_facts_exist() {
     let dir = tempfile::tempdir().unwrap();
@@ -339,6 +396,7 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
         .find(|variable| variable["name"] == "title")
         .expect("a `title` local");
     assert_eq!(title["value"], "Dune", "{locals}");
+    assert_debug_admin_value_contract(title, "canonical runtime value expansion facts");
 
     // Locals remain available through the Locals scope, but watch/REPL
     // expression evaluation waits for canonical Marrow evaluate facts.
@@ -388,6 +446,7 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
         .find(|variable| variable["name"] == "title")
         .expect("a durable title field");
     assert_eq!(durable_title["value"], "\"Dune\"", "{fields}");
+    assert_debug_admin_value_contract(durable_title, "typed durable watch/path facts");
 
     // A watch on a ^ path resolves through the live store.
     let watch = client.request(
@@ -397,6 +456,7 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
     let watch = client.response_for(watch);
     assert_eq!(watch["success"], true, "{watch}");
     assert_eq!(watch["body"]["result"], "\"Dune\"", "{watch}");
+    assert_debug_admin_value_contract(&watch["body"], "typed durable watch/path facts");
 
     // A non-^ expression is refused at the session boundary, even when raw
     // durable-data inspection is enabled.
@@ -424,6 +484,131 @@ fn a_breakpoint_exposes_a_local_and_a_durable_value_then_continues() {
         "{output}"
     );
     client.event("terminated");
+}
+
+#[test]
+fn dap_value_surfaces_mark_debug_admin_prototype_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_value_contract_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({ "supportsVariableType": true }));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+            "allowRawDataInspection": true,
+        }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 13 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+
+    let threads = client.request("threads", json!({}));
+    let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let stack = client.request("stackTrace", json!({ "threadId": thread_id }));
+    let frames = client.response_for(stack);
+    let frame_id = frames["body"]["stackFrames"][0]["id"].as_i64().unwrap();
+
+    let scopes = client.request("scopes", json!({ "frameId": frame_id }));
+    let scopes = client.response_for(scopes);
+    let scope_list = scopes["body"]["scopes"].as_array().unwrap();
+    let locals_ref = scope_list
+        .iter()
+        .find(|scope| scope["name"] == "Locals")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a Locals scope");
+    let durable_ref = scope_list
+        .iter()
+        .find(|scope| scope["name"] == "^ Durable Data (debug/admin prototype)")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a durable scope");
+
+    let locals = client.request("variables", json!({ "variablesReference": locals_ref }));
+    let locals = client.response_for(locals);
+    let local_vars = locals["body"]["variables"].as_array().unwrap();
+    let title = local_vars
+        .iter()
+        .find(|variable| variable["name"] == "title")
+        .expect("a `title` local");
+    assert_eq!(title["value"], "Dune", "{locals}");
+    assert_debug_admin_value_contract(title, "canonical runtime value expansion facts");
+
+    let tags = local_vars
+        .iter()
+        .find(|variable| variable["name"] == "tags")
+        .expect("a `tags` local");
+    assert_eq!(tags["value"], "sequence[1]", "{locals}");
+    assert_debug_admin_value_contract(tags, "canonical runtime value expansion facts");
+    let tags_ref = tags["variablesReference"].as_i64().unwrap();
+    assert!(tags_ref > 0, "tags should be expandable: {locals}");
+
+    let expanded = client.request("variables", json!({ "variablesReference": tags_ref }));
+    let expanded = client.response_for(expanded);
+    let tag_child = &expanded["body"]["variables"][0];
+    assert_eq!(tag_child["name"], "[0]", "{expanded}");
+    assert_eq!(tag_child["value"], "classic", "{expanded}");
+    assert_debug_admin_value_contract(tag_child, "canonical runtime value expansion facts");
+
+    let roots = client.request("variables", json!({ "variablesReference": durable_ref }));
+    let roots = client.response_for(roots);
+    let books = roots["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "^books")
+        .expect("the ^books root");
+    assert_debug_admin_value_contract(books, "typed durable watch/path facts");
+
+    let records = client.request(
+        "variables",
+        json!({ "variablesReference": books["variablesReference"] }),
+    );
+    let records = client.response_for(records);
+    let record = records["body"]["variables"][0].clone();
+    assert_debug_admin_value_contract(&record, "typed durable watch/path facts");
+
+    let fields = client.request(
+        "variables",
+        json!({ "variablesReference": record["variablesReference"] }),
+    );
+    let fields = client.response_for(fields);
+    let durable_title = fields["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "title")
+        .expect("a durable title field");
+    assert_eq!(durable_title["value"], "\"Dune\"", "{fields}");
+    assert_debug_admin_value_contract(durable_title, "typed durable watch/path facts");
+
+    let watch = client.request(
+        "evaluate",
+        json!({ "expression": "^books(1).title", "context": "watch" }),
+    );
+    let watch = client.response_for(watch);
+    assert_eq!(watch["success"], true, "{watch}");
+    assert_eq!(watch["body"]["result"], "\"Dune\"", "{watch}");
+    assert_debug_admin_value_contract(&watch["body"], "typed durable watch/path facts");
 }
 
 #[test]
