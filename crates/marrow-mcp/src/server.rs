@@ -202,12 +202,12 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
         }
         "mw_saved_get" => {
             let file = required_path(arguments, "file")?;
-            let path = arguments.get("path").cloned().unwrap_or_else(|| json!([]));
+            let path = required_array(arguments, "path")?;
             Ok(mcp::saved_get(&file, path, policy.allow_data))
         }
         "mw_saved_children" => {
             let file = required_path(arguments, "file")?;
-            let path = arguments.get("path").cloned().unwrap_or_else(|| json!([]));
+            let path = required_array(arguments, "path")?;
             Ok(mcp::saved_children(&file, path, policy.allow_data))
         }
         "mw_data_integrity" => {
@@ -217,11 +217,7 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
         "mw_run" => {
             let file = required_path(arguments, "file")?;
             let entry = optional_str(arguments, "entry");
-            let args: Vec<Json> = arguments
-                .get("args")
-                .and_then(Json::as_array)
-                .cloned()
-                .unwrap_or_default();
+            let args = optional_array(arguments, "args")?;
             let mode = match optional_str(arguments, "mode") {
                 Some("test") => RunMode::Test,
                 Some("run") | None => RunMode::Run,
@@ -256,6 +252,26 @@ fn optional_str<'a>(arguments: &'a Json, key: &str) -> Option<&'a str> {
 /// An optional boolean argument, or `None` when absent or not a boolean.
 fn optional_bool(arguments: &Json, key: &str) -> Option<bool> {
     arguments.get(key).and_then(Json::as_bool)
+}
+
+/// A required array argument.
+fn required_array(arguments: &Json, key: &str) -> Result<Json, String> {
+    arguments
+        .get(key)
+        .filter(|value| value.is_array())
+        .cloned()
+        .ok_or_else(|| format!("missing or non-array argument `{key}`"))
+}
+
+/// An optional array argument, empty when absent.
+fn optional_array(arguments: &Json, key: &str) -> Result<Vec<Json>, String> {
+    match arguments.get(key) {
+        Some(value) => value
+            .as_array()
+            .cloned()
+            .ok_or_else(|| format!("missing or non-array argument `{key}`")),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// A required path argument as a `PathBuf`.
@@ -582,6 +598,62 @@ mod tests {
     fn a_missing_required_argument_is_an_error() {
         let policy = Policy { allow_data: false };
         assert!(call("mw_type_at", &json!({ "file": "/x.mw", "line": 0 }), policy).is_err());
+    }
+
+    #[test]
+    fn raw_tool_arguments_reject_missing_saved_paths() {
+        let policy = Policy { allow_data: false };
+        for tool in ["mw_saved_get", "mw_saved_children"] {
+            let error = call(
+                tool,
+                &json!({ "file": "/nope/project/src/main.mw" }),
+                policy,
+            )
+            .expect_err("missing saved-data path must be a protocol argument error");
+            assert!(
+                error.contains("path"),
+                "{tool} should report the missing path argument: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_tool_arguments_reject_non_array_saved_paths() {
+        let policy = Policy { allow_data: false };
+        for tool in ["mw_saved_get", "mw_saved_children"] {
+            let error = call(
+                tool,
+                &json!({
+                    "file": "/nope/project/src/main.mw",
+                    "path": "root",
+                }),
+                policy,
+            )
+            .expect_err("non-array saved-data path must be a protocol argument error");
+            assert!(
+                error.contains("path"),
+                "{tool} should report the non-array path argument: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_tool_arguments_reject_non_array_run_args() {
+        let policy = Policy { allow_data: false };
+        let error = call(
+            "mw_run",
+            &json!({
+                "file": "/nope/project/src/main.mw",
+                "entry": "app::main",
+                "args": 1,
+            }),
+            policy,
+        )
+        .expect_err("non-array run args must be a protocol argument error");
+        assert!(
+            error.contains("args"),
+            "mw_run should report the non-array args argument: {error}"
+        );
     }
 
     #[test]
