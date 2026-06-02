@@ -633,7 +633,567 @@ fn goto_definition_jumps_from_a_use_to_its_binding() {
 }
 
 #[test]
-fn completion_after_caret_lists_saved_roots() {
+fn definition_returns_null_when_open_buffer_is_newer_than_cached_snapshot() {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let clean = "module shelf::sample\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    let edited = "module shelf::sample\n\npub fn f(): int\n    const m: int = 1\n    return 1\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": edited } ]
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 4, "character": 11 }
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert_eq!(
+        response["result"],
+        Value::Null,
+        "definition must not return facts from the pre-edit snapshot: {response}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn definition_returns_null_when_open_source_overlay_closes_before_recompute() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let defs_file = src.join("defs.mw");
+    let app_file = src.join("app.mw");
+    std::fs::write(
+        &defs_file,
+        "module defs\n\npub fn answer(): int\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &app_file,
+        "module app\nuse defs\n\npub fn call(): int\n    return defs::answer()\n",
+    )
+    .unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let defs_uri = url::Url::from_file_path(&defs_file).unwrap().to_string();
+    let defs_overlay = "module defs\n\npub fn renamed(): int\n    return 1\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": defs_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": defs_overlay
+                }
+            }
+        }),
+    );
+    let app_uri = url::Url::from_file_path(&app_file).unwrap().to_string();
+    let app_overlay = "\
+module app
+use defs
+
+pub fn call(): int
+    return defs::renamed()
+";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": app_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": app_overlay
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &app_uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": app_uri },
+                "position": { "line": 4, "character": "    return defs::".len() }
+            }
+        }),
+    );
+    let before_close = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert_eq!(
+        before_close["result"]["uri"], defs_uri,
+        "the overlay function should be resolvable before the overlay closes"
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {
+                "textDocument": { "uri": defs_uri }
+            }
+        }),
+    );
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": app_uri },
+                "position": { "line": 4, "character": "    return defs::".len() }
+            }
+        }),
+    );
+    let after_close = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
+    assert_eq!(
+        after_close["result"],
+        Value::Null,
+        "closed overlay contributors must invalidate binding facts before the debounced recompute: {after_close}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn symbols_do_not_return_stale_snapshot_names_after_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("app.mw");
+    let clean = "module app\n\npub fn old_name(): int\n    return 1\n";
+    std::fs::write(&file, clean).unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    let edited = "module app\n\npub fn new_name(): int\n    return 1\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": edited } ]
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/documentSymbol",
+            "params": { "textDocument": { "uri": uri } }
+        }),
+    );
+    let document_symbols = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let names: Vec<&str> = document_symbols["result"]
+        .as_array()
+        .expect("document symbols result")
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"new_name"),
+        "document symbols should read the open parser, got {document_symbols}"
+    );
+    assert!(
+        !names.contains(&"old_name"),
+        "document symbols must not expose stale snapshot names, got {document_symbols}"
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "workspace/symbol",
+            "params": { "query": "name" }
+        }),
+    );
+    let workspace_symbols = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
+    assert_eq!(
+        workspace_symbols["result"],
+        Value::Null,
+        "workspace symbols must not expose project facts from text older than the open buffer: {workspace_symbols}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn completion_drops_project_roots_when_checked_program_is_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("app.mw");
+    let clean = "\
+module app
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+pub fn call(): int
+    return 1
+";
+    std::fs::write(&file, clean).unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    let edited = "module app\n\npub fn call(): int\n    return ^\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": edited } ]
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 3, "character": "    return ^".len() }
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let labels: Vec<&str> = response["result"]
+        .as_array()
+        .expect("completion result")
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    assert!(
+        !labels.contains(&"books"),
+        "completion must not list saved roots from stale checked facts: {response}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn semantic_tokens_drop_binding_facts_when_open_sibling_is_newer_than_cached_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let defs_file = src.join("defs.mw");
+    let app_file = src.join("app.mw");
+    let defs = "module defs\n\npub fn answer(): int\n    return 1\n";
+    let app = "\
+module app
+use defs
+
+pub fn call(): int
+    return defs::answer()
+";
+    std::fs::write(&defs_file, defs).unwrap();
+    std::fs::write(&app_file, app).unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let initialize = recv(&mut stdout);
+    let function_type = semantic_token_type_index(&initialize, "function");
+    let variable_type = semantic_token_type_index(&initialize, "variable");
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let defs_uri = url::Url::from_file_path(&defs_file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": defs_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": defs
+                }
+            }
+        }),
+    );
+    let app_uri = url::Url::from_file_path(&app_file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": app_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": app
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &app_uri, Duration::from_secs(10));
+
+    let renamed = "module defs\n\npub fn renamed(): int\n    return 1\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": defs_uri, "version": 2 },
+                "contentChanges": [ { "text": renamed } ]
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/semanticTokens/full",
+            "params": {
+                "textDocument": { "uri": app_uri }
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let answer_type = semantic_token_type_at(&response, 4, "    return defs::".len() as u64)
+        .expect("semantic token for answer call leaf");
+
+    assert_eq!(
+        answer_type, variable_type,
+        "stale sibling snapshots must not color the call leaf as a binding-backed function: {response}"
+    );
+    assert_ne!(
+        answer_type, function_type,
+        "stale project BindingIndex facts must not be applied to semantic tokens: {response}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn completion_after_caret_drops_saved_roots_without_fresh_checked_facts() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
             .stdin(Stdio::piped())
@@ -687,8 +1247,8 @@ fn completion_after_caret_lists_saved_roots() {
     let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
 
     // Now the user types a `delete ^` — the file no longer parses cleanly, which
-    // drops its module from a fresh analysis. Completion must still list the saved
-    // root, drawn from the last clean program.
+    // drops its module from a fresh analysis. Completion stays lexical, but must
+    // not list saved roots from the previous checked program.
     let erroring = "module shelf::sample\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn drop()\n    delete ^\n";
     send(
         &mut stdin,
@@ -725,8 +1285,8 @@ fn completion_after_caret_lists_saved_roots() {
         .map(|item| item["label"].as_str().unwrap_or_default().to_string())
         .collect();
     assert!(
-        labels.contains(&"books".to_string()),
-        "completion after `^` should list the saved root `books`, got {labels:?}"
+        !labels.contains(&"books".to_string()),
+        "completion after `^` must not list stale saved roots, got {labels:?}"
     );
 
     let _ = server.0.kill();
@@ -1242,4 +1802,34 @@ fn wait_for_response(reader: &mut impl BufRead, id: i64, timeout: Duration) -> V
         }
     }
     panic!("no response for request {id} within the timeout");
+}
+
+fn semantic_token_type_index(initialize: &Value, name: &str) -> u64 {
+    initialize["result"]["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+        .as_array()
+        .expect("semantic token legend")
+        .iter()
+        .position(|token_type| token_type.as_str() == Some(name))
+        .unwrap_or_else(|| panic!("semantic token type {name:?} should be advertised")) as u64
+}
+
+fn semantic_token_type_at(response: &Value, target_line: u64, target_start: u64) -> Option<u64> {
+    let data = response["result"]["data"].as_array()?;
+    let mut line = 0u64;
+    let mut start = 0u64;
+    for chunk in data.chunks_exact(5) {
+        let delta_line = chunk[0].as_u64()?;
+        let delta_start = chunk[1].as_u64()?;
+        let token_type = chunk[3].as_u64()?;
+        if delta_line == 0 {
+            start += delta_start;
+        } else {
+            line += delta_line;
+            start = delta_start;
+        }
+        if line == target_line && start == target_start {
+            return Some(token_type);
+        }
+    }
+    None
 }

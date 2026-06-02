@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
 use marrow_check::{ProjectSources, analyze_project, build_binding_index};
-use marrow_project::{ProjectConfig, parse_config};
+use marrow_project::{ProjectConfig, parse_config, test_module_file};
 
 pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
 
@@ -23,6 +23,23 @@ const CONFIG_FILE: &str = "marrow.json";
 pub struct Project {
     pub root: PathBuf,
     pub config: ProjectConfig,
+}
+
+impl Project {
+    /// Whether `path` can contribute a file to Marrow project analysis.
+    pub fn analyzes_file(&self, path: &Path) -> bool {
+        self.source_module_file(path) || test_module_file(&self.root, &self.config, path).is_some()
+    }
+
+    fn source_module_file(&self, path: &Path) -> bool {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("mw") {
+            return false;
+        }
+        self.config.source_roots.iter().any(|source_root| {
+            let root = self.root.join(source_root);
+            path.strip_prefix(root).is_ok()
+        })
+    }
 }
 
 /// Why a file could not be resolved to a checkable project.
@@ -63,6 +80,10 @@ pub struct Workspace {
     /// rename. A recompute replaces the snapshot and clears this, so it is rebuilt
     /// at most once per recompute and never on a request that only reads it.
     binding_index: Option<BindingIndex>,
+    /// Open analysis files that overlaid the latest snapshot. If the editor's
+    /// open project-file set changes, the cached snapshot no longer names the
+    /// same source world even when the remaining open buffers still match.
+    latest_open_analysis_paths: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -83,11 +104,10 @@ impl Workspace {
         self.project.as_ref()
     }
 
-    /// The program to drive schema- and scope-aware requests (completion) from:
-    /// the latest snapshot's program when it has modules, otherwise the last
-    /// recompute that did. While the active buffer carries a parse error — which
-    /// drops its module — this keeps the resources and signatures the editor was
-    /// just completing against, instead of an empty list.
+    /// The latest non-empty program, falling back to the previous non-empty one.
+    /// LSP request paths that expose project facts use the fresh accessors below
+    /// instead; this fallback is for callers that explicitly choose last-good
+    /// behavior after establishing their own recompute boundary.
     pub fn program(&self) -> Option<&CheckedProgram> {
         match self.latest.as_ref() {
             Some(snapshot) if !snapshot.program.modules.is_empty() => Some(&snapshot.program),
@@ -116,6 +136,48 @@ impl Workspace {
         self.binding_index.as_ref()
     }
 
+    /// Whether the latest snapshot still matches the editor's open analysis files.
+    pub fn latest_matches_open_documents(&self, documents: &Documents) -> bool {
+        let (Some(snapshot), Some(project)) = (self.latest.as_ref(), self.project.as_ref()) else {
+            return false;
+        };
+        if open_analysis_paths(project, documents) != self.latest_open_analysis_paths {
+            return false;
+        }
+        documents.iter().all(|(url, document)| {
+            let Some(path) = url_to_path(url) else {
+                return true;
+            };
+            if !project.analyzes_file(&path) {
+                return true;
+            }
+            snapshot
+                .files
+                .iter()
+                .find(|analyzed| analyzed.path == path)
+                .is_some_and(|analyzed| analyzed.source == document.text)
+        })
+    }
+
+    /// The latest snapshot only when it still matches the editor-visible sources.
+    pub fn fresh_latest(&self, documents: &Documents) -> Option<&AnalysisSnapshot> {
+        self.latest_matches_open_documents(documents)
+            .then_some(self.latest.as_ref()?)
+    }
+
+    /// The current checked program only when it belongs to the fresh snapshot.
+    pub fn fresh_program(&self, documents: &Documents) -> Option<&CheckedProgram> {
+        self.fresh_latest(documents)
+            .map(|snapshot| &snapshot.program)
+            .filter(|program| !program.modules.is_empty())
+    }
+
+    /// The latest snapshot's program, even when empty, when the snapshot is fresh.
+    pub fn fresh_program_or_empty(&self, documents: &Documents) -> Option<&CheckedProgram> {
+        self.fresh_latest(documents)
+            .map(|snapshot| &snapshot.program)
+    }
+
     /// Resolve the project for `file`, overlay every open buffer under that root,
     /// run the checker, cache the snapshot, and return a reference to it.
     ///
@@ -138,6 +200,7 @@ impl Workspace {
         }
         let project = self.project.as_ref().expect("project resolved just above");
 
+        let latest_open_analysis_paths = open_analysis_paths(project, documents);
         let sources = overlay(&project.root, documents);
         let snapshot = analyze_project(&project.root, &project.config, &sources)
             .map_err(WorkspaceError::Discover)?;
@@ -152,6 +215,7 @@ impl Workspace {
         // The cached index belongs to the snapshot just replaced; drop it so the
         // next navigation request rebuilds it against the fresh analysis.
         self.binding_index = None;
+        self.latest_open_analysis_paths = latest_open_analysis_paths;
         Ok(self.latest.as_ref().expect("just stored a snapshot"))
     }
 }
@@ -192,6 +256,17 @@ fn overlay(root: &Path, documents: &Documents) -> ProjectSources {
         }
     }
     sources
+}
+
+fn open_analysis_paths(project: &Project, documents: &Documents) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = documents
+        .iter()
+        .filter_map(|(url, _)| url_to_path(url))
+        .filter(|path| project.analyzes_file(path))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// The filesystem path of a `file://` URL, or `None` for any other scheme.
@@ -254,6 +329,62 @@ mod tests {
                 Some(lsp_types::NumberOrString::String(code)) if code == "check.return_type"
             )),
             "expected a check.return_type diagnostic, got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn project_analysis_membership_includes_source_roots_and_configured_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = Project {
+            root: root.to_path_buf(),
+            config: parse_config(r#"{ "sourceRoots": ["src"], "tests": ["tests/**/*.mw"] }"#)
+                .unwrap(),
+        };
+
+        assert!(project.analyzes_file(&root.join("src/app.mw")));
+        assert!(project.analyzes_file(&root.join("src/a.b.mw")));
+        assert!(project.analyzes_file(&root.join("tests/deep/app_test.mw")));
+        assert!(!project.analyzes_file(&root.join("notes/app.mw")));
+        assert!(!project.analyzes_file(&root.join("src/app.txt")));
+    }
+
+    #[test]
+    fn latest_open_document_match_rejects_a_closed_analysis_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let defs = src.join("defs.mw");
+        let app = src.join("app.mw");
+        std::fs::write(&defs, "module defs\n\npub fn answer(): int\n    return 1\n").unwrap();
+        std::fs::write(
+            &app,
+            "module app\nuse defs\n\npub fn call(): int\n    return defs::answer()\n",
+        )
+        .unwrap();
+
+        let defs_url = path_to_url(&defs).unwrap();
+        let app_url = path_to_url(&app).unwrap();
+        let mut documents = Documents::new();
+        documents.open(
+            defs_url.clone(),
+            "module defs\n\npub fn renamed(): int\n    return 1\n".to_string(),
+        );
+        documents.open(
+            app_url,
+            "module app\nuse defs\n\npub fn call(): int\n    return defs::renamed()\n".to_string(),
+        );
+
+        let mut workspace = Workspace::new();
+        workspace.recompute(&app, &documents).unwrap();
+        assert!(workspace.latest_matches_open_documents(&documents));
+
+        documents.close(&defs_url);
+        assert!(
+            !workspace.latest_matches_open_documents(&documents),
+            "closing an analyzed overlay changes the source set backing the snapshot"
         );
     }
 

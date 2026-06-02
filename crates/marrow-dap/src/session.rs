@@ -883,6 +883,7 @@ mod tests {
             default_entry: None,
             store: None,
             tests: Vec::new(),
+            accepted_catalog: "marrow.catalog.json".to_string(),
         };
         let snapshot = analyze_project(&root, &config, &ProjectSources::new()).unwrap();
         (snapshot.program, file, dir)

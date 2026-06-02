@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use marrow_lsp_core::data_explorer::{
     SavedChildrenParams, SavedChildrenResult, SavedGetParams, SavedGetResult, SavedRootsResult,
-    saved_children_with_schema, saved_get, saved_roots,
+    saved_children, saved_children_with_schema, saved_get, saved_roots,
 };
 use marrow_lsp_core::data_integrity::{DataIntegrityParams, DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
@@ -83,18 +83,22 @@ impl Backend {
     ) -> jsonrpc::Result<SavedChildrenResult> {
         let state = self.state.lock().await;
         let reader = self.reader(&state.workspace);
-        let empty = EMPTY_PROGRAM.get_or_init(Default::default);
-        let program = state.workspace.program().unwrap_or(empty);
-        Ok(saved_children_with_schema(params, program, reader.as_ref()))
+        Ok(match state.workspace.fresh_program(&state.documents) {
+            Some(program) => saved_children_with_schema(params, program, reader.as_ref()),
+            None => saved_children(params, reader.as_ref()),
+        })
     }
 
     /// `marrow/savedGet`: the presence and schema-typed value at a saved path. The
-    /// path is typed against the cached snapshot's program; no recompute.
+    /// path is typed only against a fresh checked program; no recompute.
     pub async fn saved_get(&self, params: SavedGetParams) -> jsonrpc::Result<SavedGetResult> {
         let state = self.state.lock().await;
         let reader = self.reader(&state.workspace);
         let empty = EMPTY_PROGRAM.get_or_init(Default::default);
-        let program = state.workspace.program().unwrap_or(empty);
+        let program = state
+            .workspace
+            .fresh_program(&state.documents)
+            .unwrap_or(empty);
         Ok(saved_get(params, program, reader.as_ref()))
     }
 
@@ -103,10 +107,9 @@ impl Backend {
     /// current schema can no longer account for. Reads through the same
     /// `marrow.liveData`-gated reader as hover live values and the Data Explorer,
     /// so it never opens the store when live data is off, and it is invoked only on
-    /// explicit request — never on save or edit. A `None` reader (live data off, no
-    /// project, or no native store) or an unreadable store answers
-    /// `available: false`. The path is typed against the cached snapshot's program;
-    /// no recompute.
+    /// explicit request — never on save or edit. A missing fresh checked program,
+    /// a `None` reader (live data off, no project, or no native store), or an
+    /// unreadable store answers `available: false`. No recompute.
     pub async fn data_integrity(
         &self,
         _params: DataIntegrityParams,
@@ -114,7 +117,9 @@ impl Backend {
         let state = self.state.lock().await;
         let reader = self.reader(&state.workspace);
         let empty = EMPTY_PROGRAM.get_or_init(Default::default);
-        let program = state.workspace.program().unwrap_or(empty);
+        let Some(program) = state.workspace.fresh_program(&state.documents) else {
+            return Ok(data_integrity(None, empty));
+        };
         Ok(data_integrity(reader.as_ref(), program))
     }
 
@@ -310,10 +315,12 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
+        let Some(document) = documents.get(&url) else {
+            return Ok(None);
+        };
         // Build and cache the binding index (once per recompute) so the docs
-        // lookup reuses it exactly like definition and references do — never
-        // rebuilding resolution per hover. This also ensures the snapshot.
-        if ensure_index(workspace, documents, &path).is_none() {
+        // lookup reuses it exactly like definition and references do.
+        if ensure_fresh_index(workspace, documents, &path, &document.text).is_none() {
             return Ok(None);
         }
         // The reader borrows the project from the workspace; resolve it before
@@ -352,7 +359,10 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
-        if ensure_index(workspace, documents, &path).is_none() {
+        let Some(document) = documents.get(&url) else {
+            return Ok(None);
+        };
+        if ensure_fresh_index(workspace, documents, &path, &document.text).is_none() {
             return Ok(None);
         }
         let indices = snapshot_indices(workspace, documents);
@@ -384,7 +394,10 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
-        if ensure_index(workspace, documents, &path).is_none() {
+        let Some(document) = documents.get(&url) else {
+            return Ok(None);
+        };
+        if ensure_fresh_index(workspace, documents, &path, &document.text).is_none() {
             return Ok(None);
         }
         let indices = snapshot_indices(workspace, documents);
@@ -419,7 +432,10 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
-        if ensure_index(workspace, documents, &path).is_none() {
+        let Some(document) = documents.get(&url) else {
+            return Ok(None);
+        };
+        if ensure_fresh_index(workspace, documents, &path, &document.text).is_none() {
             return Ok(None);
         }
         let indices = snapshot_indices(workspace, documents);
@@ -449,7 +465,10 @@ impl LanguageServer for Backend {
             documents,
             workspace,
         } = &mut *state;
-        if ensure_index(workspace, documents, &path).is_none() {
+        let Some(document) = documents.get(&url) else {
+            return Ok(None);
+        };
+        if ensure_fresh_index(workspace, documents, &path, &document.text).is_none() {
             return Ok(None);
         }
         let indices = snapshot_indices(workspace, documents);
@@ -497,34 +516,15 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> jsonrpc::Result<Option<DocumentSymbolResponse>> {
         let url = params.text_document.uri;
-        let Some(path) = url_to_path(&url) else {
-            return Ok(None);
-        };
 
-        let mut state = self.state.lock().await;
-        let State {
-            documents,
-            workspace,
-        } = &mut *state;
+        let state = self.state.lock().await;
         // documentSymbol is only sent for an open document, so a missing buffer is
         // a request the client should not have made; outline nothing rather than
         // reach to disk for text the editor already holds.
-        if documents.get(&url).is_none() {
-            return Ok(None);
-        }
-        let Some(snapshot) = ensure_snapshot(workspace, documents, &path) else {
+        let Some(document) = state.documents.get(&url) else {
             return Ok(None);
         };
-        let Some(analyzed) = snapshot.files.iter().find(|file| file.path == path) else {
-            return Ok(None);
-        };
-
-        // Outline against the open buffer's index so selection ranges land on the
-        // unsaved text the user sees.
-        let Some(document) = documents.get(&url) else {
-            return Ok(None);
-        };
-        let outline = symbols::document_symbols(&analyzed.parsed.file, &document.index);
+        let outline = symbols::document_symbols(&document.parsed.file, &document.index);
         Ok(Some(DocumentSymbolResponse::Nested(outline)))
     }
 
@@ -541,21 +541,23 @@ impl LanguageServer for Backend {
         // resolve one, then flatten its modules.
         let Some(file) = documents.urls().filter_map(url_to_path).next() else {
             return Ok(workspace
-                .latest()
+                .fresh_latest(documents)
                 .map(|snapshot| symbols::workspace_symbols(&snapshot.program)));
         };
-        let Some(snapshot) = ensure_snapshot(workspace, documents, &file) else {
+        if workspace.latest().is_none() {
+            let _ = workspace.recompute(&file, documents);
+        }
+        let Some(snapshot) = workspace.fresh_latest(documents) else {
             return Ok(None);
         };
         Ok(Some(symbols::workspace_symbols(&snapshot.program)))
     }
 
     /// Complete at the cursor. Reads only the document's cached lex/parse and the
-    /// last cached snapshot's program — it never re-lexes, re-parses, or
+    /// fresh checked program — it never re-lexes, re-parses, or
     /// recomputes the project, so it answers instantly and even while the project
-    /// has not yet been (re)checked. With no snapshot yet, an empty program backs
-    /// the context-only modes (keywords, builtins) so the first keystroke still
-    /// completes.
+    /// has not yet been (re)checked. With no fresh checked facts, an empty program
+    /// backs the context-only modes (keywords, builtins).
     async fn completion(
         &self,
         params: CompletionParams,
@@ -573,7 +575,10 @@ impl LanguageServer for Backend {
         let offset = document.index.offset(to_core_position(position.position));
 
         let empty = EMPTY_PROGRAM.get_or_init(Default::default);
-        let program = state.workspace.program().unwrap_or(empty);
+        let program = state
+            .workspace
+            .fresh_program_or_empty(&state.documents)
+            .unwrap_or(empty);
 
         let items = completion::completion(
             program,
@@ -587,9 +592,8 @@ impl LanguageServer for Backend {
     }
 
     /// Show the single callable signature for the innermost call at the cursor.
-    /// Reads the open document's cached lex/source, the last checked program for
-    /// callable shape, and the latest snapshot only for optional documentation.
-    /// This keeps in-progress argument lists useful before they parse.
+    /// Reads the open document's cached lex/source and a fresh checked program for
+    /// callable shape. No recompute.
     async fn signature_help(
         &self,
         params: SignatureHelpParams,
@@ -606,12 +610,16 @@ impl LanguageServer for Backend {
         };
         let offset = document.index.offset(to_core_position(position.position));
 
-        let Some(program) = state.workspace.program() else {
+        let Some(snapshot) = state.workspace.fresh_latest(&state.documents) else {
             return Ok(None);
         };
+        let program = &snapshot.program;
+        if program.modules.is_empty() {
+            return Ok(None);
+        }
         Ok(signature_help::signature_help(
             program,
-            state.workspace.latest(),
+            Some(snapshot),
             &path,
             &document.text,
             &document.lexed,
@@ -639,6 +647,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let binding_index = if snapshot_has_document_text(workspace.latest(), &path, &document.text)
+            && workspace.latest_matches_open_documents(documents)
         {
             workspace.binding_index()
         } else {
@@ -689,31 +698,23 @@ fn to_core_position(position: Position) -> CorePosition {
     }
 }
 
-/// The cached analysis, recomputing it once against `file` if none exists yet, so
-/// a request that arrives before any debounced recompute still has a snapshot. A
-/// file outside any project yields `None`.
-fn ensure_snapshot<'a>(
+/// Ensure a snapshot exists, then build and cache its binding index only when
+/// the target file and every open snapshot file still match their buffers.
+/// Returns `None` for stale text or for a file outside any project.
+fn ensure_fresh_index<'a>(
     workspace: &'a mut Workspace,
     documents: &Documents,
     file: &std::path::Path,
-) -> Option<&'a AnalysisSnapshot> {
-    if workspace.latest().is_none() {
-        let _ = workspace.recompute(file, documents);
-    }
-    workspace.latest()
-}
-
-/// Ensure a snapshot exists, then build and cache its binding index, so a later
-/// immutable borrow can read it alongside the snapshot. Returns `None` for a file
-/// outside any project. The index is built at most once per recompute; subsequent
-/// navigation requests reuse the cache and this is a no-op.
-fn ensure_index<'a>(
-    workspace: &'a mut Workspace,
-    documents: &Documents,
-    file: &std::path::Path,
+    text: &str,
 ) -> Option<&'a marrow_lsp_core::workspace::BindingIndex> {
     if workspace.latest().is_none() {
         let _ = workspace.recompute(file, documents);
+    }
+    if !snapshot_has_document_text(workspace.latest(), file, text) {
+        return None;
+    }
+    if !workspace.latest_matches_open_documents(documents) {
+        return None;
     }
     workspace.binding_index()
 }
@@ -784,6 +785,75 @@ mod tests {
         assert!(
             !snapshot_has_document_text(workspace.latest(), &file, &document.text),
             "semantic tokens should not apply binding facts to text newer than the snapshot"
+        );
+    }
+
+    #[test]
+    fn snapshot_open_document_match_rejects_a_stale_sibling_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let a = src.join("a.mw");
+        let b = src.join("b.mw");
+        let a_source = "module a\n\nfn f(): int\n    return 1\n";
+        let b_source = "module b\n\nfn g(): int\n    return 2\n";
+        std::fs::write(&a, a_source).unwrap();
+        std::fs::write(&b, b_source).unwrap();
+
+        let a_url = Url::from_file_path(&a).unwrap();
+        let b_url = Url::from_file_path(&b).unwrap();
+        let mut documents = Documents::new();
+        documents.open(a_url, a_source.to_string());
+        documents.open(b_url.clone(), b_source.to_string());
+        let mut workspace = Workspace::new();
+        workspace.recompute(&a, &documents).unwrap();
+
+        assert!(workspace.latest_matches_open_documents(&documents));
+
+        documents.change(
+            &b_url,
+            "module b\n\nfn g(): int\n    return 3\n".to_string(),
+        );
+
+        assert!(
+            !workspace.latest_matches_open_documents(&documents),
+            "a project-wide binding index must not be exposed when another open snapshot file is stale"
+        );
+    }
+
+    #[test]
+    fn snapshot_open_document_match_rejects_a_new_source_file_absent_from_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["a", "z"] }"#).unwrap();
+        let a_src = root.join("a");
+        let z_src = root.join("z");
+        std::fs::create_dir_all(&a_src).unwrap();
+        std::fs::create_dir_all(&z_src).unwrap();
+        let app = z_src.join("app.mw");
+        let app_source = "module app\n\nfn f(): int\n    return 1\n";
+        std::fs::write(&app, app_source).unwrap();
+
+        let app_url = Url::from_file_path(&app).unwrap();
+        let mut documents = Documents::new();
+        documents.open(app_url, app_source.to_string());
+        let mut workspace = Workspace::new();
+        workspace.recompute(&app, &documents).unwrap();
+
+        assert!(workspace.latest_matches_open_documents(&documents));
+
+        let new_defs = a_src.join("defs.mw");
+        let defs_url = Url::from_file_path(&new_defs).unwrap();
+        documents.open(
+            defs_url,
+            "module defs\n\npub fn answer(): int\n    return 1\n".to_string(),
+        );
+
+        assert!(
+            !workspace.latest_matches_open_documents(&documents),
+            "a new open source-root file absent from the cached snapshot can change project bindings"
         );
     }
 }
