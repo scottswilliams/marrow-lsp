@@ -36,7 +36,7 @@ pub struct Backend {
     edit_seq: Arc<AtomicU64>,
     /// Whether to read real stored data for hover live values, the record-count
     /// lens, and the Data Explorer. Mirrors the `marrow.liveData` setting, default
-    /// on; turning it off keeps the server from ever opening the store.
+    /// off; enabling it permits the server to open the native dev store read-only.
     live_data: Arc<AtomicBool>,
 }
 
@@ -54,7 +54,7 @@ impl Backend {
                 workspace: Workspace::new(),
             })),
             edit_seq: Arc::new(AtomicU64::new(0)),
-            live_data: Arc::new(AtomicBool::new(true)),
+            live_data: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -182,13 +182,13 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
-        // `marrow.liveData` (default true) gates reading real stored data. The
-        // client passes it under `initializationOptions`; only an explicit `false`
-        // turns it off, so a missing or malformed option keeps the default on.
+        // `marrow.liveData` (default false) gates reading real stored data. The
+        // client passes it under `initializationOptions`; only an explicit `true`
+        // enables opening the native dev store.
         if let Some(options) = &params.initialization_options
-            && options.get("marrow.liveData") == Some(&serde_json::Value::Bool(false))
+            && options.get("marrow.liveData") == Some(&serde_json::Value::Bool(true))
         {
-            self.live_data.store(false, Ordering::Relaxed);
+            self.live_data.store(true, Ordering::Relaxed);
         }
         Ok(InitializeResult {
             server_info: Some(ServerInfo {

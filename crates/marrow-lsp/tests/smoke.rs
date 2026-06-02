@@ -926,7 +926,15 @@ fn custom_saved_get_returns_a_typed_value_from_a_seeded_store() {
 
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+                "initializationOptions": { "marrow.liveData": true }
+            }
+        }),
     );
     let _ = recv(&mut stdout);
     send(
@@ -1059,7 +1067,15 @@ fn custom_data_integrity_flags_an_orphan_from_a_seeded_store() {
 
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+                "initializationOptions": { "marrow.liveData": true }
+            }
+        }),
     );
     let _ = recv(&mut stdout);
     send(
@@ -1095,6 +1111,86 @@ fn custom_data_integrity_flags_an_orphan_from_a_seeded_store() {
     assert_eq!(findings.len(), 1, "one orphan finding: {result}");
     assert_eq!(findings[0]["kind"], "orphan");
     assert_eq!(findings[0]["path"], "^books(1).sticker");
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
+    use marrow_store::backend::Backend;
+    use marrow_store::path::{PathSegment, SavedKey, encode_path};
+    use marrow_store::redb::RedbStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    let source = "module shelf\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn f()\n    return\n";
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    {
+        let mut store = RedbStore::open(&root.join("data").join("marrow.redb")).unwrap();
+        let orphan = encode_path(&[
+            PathSegment::Root("books".to_string()),
+            PathSegment::RecordKey(SavedKey::Int(1)),
+            PathSegment::Field("sticker".to_string()),
+        ]);
+        store.write(&orphan, b"gold".to_vec()).unwrap();
+    }
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": source }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/dataIntegrity", "params": {} }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    let result = &response["result"];
+    assert_eq!(
+        result["available"], false,
+        "missing marrow.liveData opt-in should not read the seeded store"
+    );
+    assert_eq!(result["scanned"], 0, "no store entries should be scanned");
+    assert_eq!(result["findings"], json!([]));
 
     let _ = server.0.kill();
 }

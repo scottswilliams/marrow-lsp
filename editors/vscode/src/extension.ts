@@ -67,7 +67,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     initializationOptions: {
       "marrow.liveData": vscode.workspace
         .getConfiguration("marrow")
-        .get<boolean>("liveData", true),
+        .get<boolean>("liveData", false),
     },
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher("**/marrow.json"),

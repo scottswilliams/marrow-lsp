@@ -9,8 +9,8 @@ Rust binaries. No parsing or position math runs in TypeScript.
 ## Features
 
 - **Diagnostics** — parse, type, and schema errors reported as you edit.
-- **Hover** — type and documentation on hover, including **live data values** read from the
-  project's durable store when one is available.
+- **Hover** — type and documentation on hover. Live data values are available only when
+  `marrow.liveData` is enabled.
 - **Completion** — context-aware completion of names in scope.
 - **Document & workspace symbols** — outline a single `.mw` file and search symbols across the
   whole project.
@@ -20,10 +20,11 @@ Rust binaries. No parsing or position math runs in TypeScript.
   schema, so renames never silently break durable data.
 - **Semantic tokens** — semantic highlighting layered over the TextMate grammar.
 - **Formatting** — format a `.mw` document.
-- **CodeLens** — a live **record-count** lens above declarations backed by stored data.
-- **Marrow Data Explorer** — a dedicated view (Activity Bar) that browses the project's durable
-  data, with values and types resolved lazily as rows become visible. Refreshes automatically
-  when `marrow.json` is saved, and on demand from the view title.
+- **CodeLens** — a **record-count** lens above declarations when `marrow.liveData` is enabled.
+- **Marrow Data Explorer** — an opt-in debug/admin view (Activity Bar) for inspecting the native
+  dev store when `marrow.liveData` is enabled. It is not a production catalog view yet; rows use
+  the current raw saved-data protocol while Marrow's typed store DTOs are still pending.
+  Refreshes automatically when `marrow.json` is saved, and on demand from the view title.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch an
   entry function, step, set breakpoints, inspect variables, and read a live `^` durable-data
   scope that surfaces the project's persisted values alongside ordinary locals.
@@ -55,18 +56,20 @@ same way, in order:
   dev locations when the file exists.
 - `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
   bundled and dev locations when the file exists.
-- `marrow.liveData` — allow hover, CodeLens, the Data Explorer, and data-integrity checks to
-  read the project's durable store. Disable it when editor-triggered reads of local stored data
-  are not appropriate.
+- `marrow.liveData` — opt in to read-only native dev-store reads for hover, CodeLens, the Data
+  Explorer, and data-integrity checks. Leave disabled to prevent editor-triggered reads of local
+  stored data.
 
 ## Known limitations
 
 - The bundled binaries are **platform-specific**. Each release `.vsix` targets one platform
   (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`); install the one that
   matches your machine, or point `marrow.server.path` / `marrow.dap.path` at your own build.
-- Live data values, the record-count CodeLens, and the Data Explorer require a readable durable
-  store. A busy or missing store is treated as "unavailable" and simply omits live values rather
-  than reporting an error.
+- Live data values, the record-count CodeLens, and the Data Explorer are opt-in debug/admin
+  surfaces. They require `marrow.liveData` and a readable native dev store, and remain
+  presentation-only until Marrow exposes catalog-bound typed data facts. A disabled, busy, or
+  missing store is treated as "unavailable" and simply omits live values rather than reporting an
+  error.
 - Debugging is **statement-level** (not expression-level stepping).
 
 ## Development

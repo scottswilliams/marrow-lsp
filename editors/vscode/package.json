@@ -294,8 +294,8 @@
         },
         "marrow.liveData": {
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "Allow hover, CodeLens, the Data Explorer, and stored-data integrity checks to open the project's native dev store read-only. Disable this to prevent editor-triggered reads of real stored data."
+          "default": false,
+          "markdownDescription": "Enable read-only native dev-store reads for hover, CodeLens, the Data Explorer, and stored-data integrity checks. Leave disabled to prevent editor-triggered reads of real stored data."
         }
       }
     }
