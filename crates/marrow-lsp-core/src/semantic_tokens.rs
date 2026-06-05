@@ -19,8 +19,8 @@ use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, Semanti
 use marrow_check::{BindingIndex, SymbolKind, SymbolRef};
 use marrow_schema::stdlib;
 use marrow_syntax::{
-    Block, Declaration, EnumMember, FieldDecl, GroupDecl, IndexDecl, Keyword, LexedSource,
-    ResourceMember, SourceFile, SourceSpan, Statement, Token, TokenKind, TypeRef,
+    Block, Declaration, EnumMember, EvolveStep, FieldDecl, GroupDecl, IndexDecl, Keyword,
+    LexedSource, ResourceMember, SourceFile, SourceSpan, Statement, Token, TokenKind, TypeRef,
 };
 
 use crate::{
@@ -352,11 +352,30 @@ fn declaration_overrides(
                     add_enum_member_overrides(&mut overrides, lexed, source, member);
                 }
             }
-            Declaration::Evolve(_) => {}
+            Declaration::Evolve(evolve) => {
+                for step in &evolve.steps {
+                    add_evolve_step_overrides(&mut overrides, lexed, source, step);
+                }
+            }
         }
     }
 
     overrides
+}
+
+fn add_evolve_step_overrides(
+    overrides: &mut HashMap<ByteSpan, u32>,
+    lexed: &LexedSource,
+    source: &str,
+    step: &EvolveStep,
+) {
+    let name = match step {
+        EvolveStep::Rename { .. } => "rename",
+        EvolveStep::Default { .. } => "default",
+        EvolveStep::Retire { .. } => "retire",
+        EvolveStep::Transform { .. } => "transform",
+    };
+    add_first_identifier_override(overrides, lexed, source, step.span(), name, TYPE_KEYWORD);
 }
 
 fn add_resource_member_overrides(
@@ -907,10 +926,29 @@ fn type_annotation_overrides(
                     add_type_annotation_overrides(&mut overrides, lexed, source, &key.ty);
                 }
             }
-            Declaration::Enum(_) | Declaration::Evolve(_) => {}
+            Declaration::Evolve(evolve) => {
+                for step in &evolve.steps {
+                    add_evolve_step_type_annotation_overrides(&mut overrides, lexed, source, step);
+                }
+            }
+            Declaration::Enum(_) => {}
         }
     }
     overrides
+}
+
+fn add_evolve_step_type_annotation_overrides(
+    overrides: &mut HashMap<ByteSpan, TokenStyle>,
+    lexed: &LexedSource,
+    source: &str,
+    step: &EvolveStep,
+) {
+    match step {
+        EvolveStep::Transform { body, .. } => {
+            add_block_type_annotation_overrides(overrides, lexed, source, body);
+        }
+        EvolveStep::Rename { .. } | EvolveStep::Default { .. } | EvolveStep::Retire { .. } => {}
+    }
 }
 
 fn add_block_type_annotation_overrides(
@@ -2565,6 +2603,53 @@ pub fn f(
             legend_index(&SemanticTokenType::STRUCT),
             0,
         );
+    }
+
+    #[test]
+    fn evolve_transform_type_annotations_color_identity_id_as_struct() {
+        let source = "\
+module m
+
+evolve
+    transform ^books
+        const id: Id(^books) = 1
+";
+        let (index, decoded) = decoded_for(source);
+
+        assert_token(
+            source,
+            &index,
+            &decoded,
+            "        const id: Id(^books) = 1",
+            "Id",
+            legend_index(&SemanticTokenType::STRUCT),
+            0,
+        );
+    }
+
+    #[test]
+    fn evolve_step_words_color_as_keywords_inside_evolve_blocks() {
+        let source = "\
+module m
+
+evolve
+    rename Book.title -> Book.name
+    default Book.name = \"untitled\"
+    retire Book.title
+    transform ^books
+        const id: Id(^books) = 1
+";
+        let (index, decoded) = decoded_for(source);
+        let keyword = legend_index(&SemanticTokenType::KEYWORD);
+
+        for (line, word) in [
+            ("    rename Book.title -> Book.name", "rename"),
+            ("    default Book.name = \"untitled\"", "default"),
+            ("    retire Book.title", "retire"),
+            ("    transform ^books", "transform"),
+        ] {
+            assert_token_type(source, &index, &decoded, line, word, keyword);
+        }
     }
 
     #[test]

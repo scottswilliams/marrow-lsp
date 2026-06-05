@@ -19,8 +19,8 @@ use marrow_check::{
     BindingIndex, DefItem, RenameSafety, Resolution, ResolvableKind, SymbolKind, SymbolRef, resolve,
 };
 use marrow_syntax::{
-    Declaration, Keyword, ResourceMember, SourceFile, SourceSpan, Statement, Token, TokenKind,
-    TypeRef, lex_source,
+    Declaration, EvolveStep, Keyword, ResourceMember, SourceFile, SourceSpan, Statement, Token,
+    TokenKind, TypeRef, lex_source,
 };
 
 use crate::positions::LineIndex;
@@ -501,7 +501,18 @@ fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> b
                     .is_some_and(|ty| type_ref_covers(ty, offset))
                 || block_type_annotation_at(&function.body, offset)
         }
-        Declaration::Enum(_) | Declaration::Evolve(_) => false,
+        Declaration::Evolve(evolve) => evolve
+            .steps
+            .iter()
+            .any(|step| evolve_step_type_annotation_at(step, offset)),
+        Declaration::Enum(_) => false,
+    }
+}
+
+fn evolve_step_type_annotation_at(step: &EvolveStep, offset: usize) -> bool {
+    match step {
+        EvolveStep::Transform { body, .. } => block_type_annotation_at(body, offset),
+        EvolveStep::Rename { .. } | EvolveStep::Default { .. } | EvolveStep::Retire { .. } => false,
     }
 }
 
@@ -1223,6 +1234,32 @@ fn f(): b::Status
         let (line, character) = line_col(status_source, enum_name);
         assert_eq!(location.range.start.line, line);
         assert_eq!(location.range.start.character, character);
+    }
+
+    #[test]
+    fn definition_from_evolve_transform_type_annotation_is_blocked_without_binding_fact() {
+        let source = "\
+module a
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+evolve
+    transform ^books
+        const draft: Book = Book(title: \"x\")
+";
+        let (snapshot, file, indices) = analyze(source);
+        let index = build_binding_index(&snapshot);
+
+        let annotation = offset_of(source, "draft: Book") + "draft: ".len();
+        let location = definition(&snapshot, &index, &indices, &file, annotation + 1);
+
+        assert!(
+            location.is_none(),
+            "evolve transform navigation needs Marrow binding facts, got {location:?}"
+        );
     }
 
     #[test]

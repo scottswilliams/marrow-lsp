@@ -16,8 +16,9 @@ use marrow_check::{
 };
 use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema, stdlib};
 use marrow_syntax::{
-    Block, Declaration, EnumDecl, EnumMember, FunctionDecl, IndexDecl, KeyParam, Keyword,
-    ResourceDecl, ResourceMember, SourceSpan, Statement, StoreDecl, TokenKind, TypeRef, lex_source,
+    Block, Declaration, EnumDecl, EnumMember, EvolveStep, FunctionDecl, IndexDecl, KeyParam,
+    Keyword, ResourceDecl, ResourceMember, SourceSpan, Statement, StoreDecl, TokenKind, TypeRef,
+    lex_source,
 };
 
 use crate::language_facts;
@@ -1383,7 +1384,18 @@ fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> b
                     .is_some_and(|ty| type_ref_covers(ty, offset))
                 || block_type_annotation_at(&function.body, offset)
         }
-        Declaration::Enum(_) | Declaration::Evolve(_) => false,
+        Declaration::Evolve(evolve) => evolve
+            .steps
+            .iter()
+            .any(|step| evolve_step_type_annotation_at(step, offset)),
+        Declaration::Enum(_) => false,
+    }
+}
+
+fn evolve_step_type_annotation_at(step: &EvolveStep, offset: usize) -> bool {
+    match step {
+        EvolveStep::Transform { body, .. } => block_type_annotation_at(body, offset),
+        EvolveStep::Rename { .. } | EvolveStep::Default { .. } | EvolveStep::Retire { .. } => false,
     }
 }
 
@@ -3544,6 +3556,41 @@ pub fn echo(book: Book): Book
                 "resource annotation hover should include member summary: {value}"
             );
         }
+    }
+
+    #[test]
+    fn hover_over_evolve_transform_type_annotation_shows_resource_hover() {
+        let source = "\
+module a
+
+;; Books saved by id.
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+evolve
+    transform ^books
+        const draft: Book = Book(title: \"x\")
+";
+        let (snapshot, file) = analyze(source);
+        let index = index_for(&snapshot);
+
+        let offset = offset_of(source, "draft: Book") + "draft: ".len();
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup");
+        };
+        let value = markup.value;
+
+        assert!(
+            value.starts_with("```marrow\nresource Book\n```"),
+            "evolve transform type annotation should show resource hover: {value}"
+        );
+        assert!(
+            value.contains("Books saved by id."),
+            "resource docs should be included: {value}"
+        );
     }
 
     #[test]

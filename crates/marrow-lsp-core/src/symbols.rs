@@ -10,8 +10,8 @@
 use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
 use marrow_check::CheckedProgram;
 use marrow_syntax::{
-    Declaration, EnumDecl, EnumMember, FieldDecl, FunctionDecl, GroupDecl, IndexDecl, ResourceDecl,
-    ResourceMember, SourceFile, SourceSpan, StoreDecl,
+    Declaration, EnumDecl, EnumMember, EvolveDecl, EvolveStep, FieldDecl, FunctionDecl, GroupDecl,
+    IndexDecl, ResourceDecl, ResourceMember, SourceFile, SourceSpan, StoreDecl,
 };
 
 use crate::positions::LineIndex;
@@ -49,15 +49,34 @@ fn declaration_symbol(declaration: &Declaration, index: &LineIndex) -> DocumentS
         Declaration::Enum(enum_decl) => enum_symbol(enum_decl, index),
         Declaration::Resource(resource) => resource_symbol(resource, index),
         Declaration::Store(store) => store_symbol(store, index),
-        Declaration::Evolve(evolve) => symbol(
-            "evolve",
-            None,
-            SymbolKind::NAMESPACE,
-            evolve.span,
-            index,
-            None,
-        ),
+        Declaration::Evolve(evolve) => evolve_symbol(evolve, index),
     }
+}
+
+fn evolve_symbol(evolve: &EvolveDecl, index: &LineIndex) -> DocumentSymbol {
+    let children = evolve
+        .steps
+        .iter()
+        .map(|step| evolve_step_symbol(step, index))
+        .collect();
+    symbol(
+        "evolve",
+        None,
+        SymbolKind::NAMESPACE,
+        evolve.span,
+        index,
+        Some(children),
+    )
+}
+
+fn evolve_step_symbol(step: &EvolveStep, index: &LineIndex) -> DocumentSymbol {
+    let name = match step {
+        EvolveStep::Rename { .. } => "rename",
+        EvolveStep::Default { .. } => "default",
+        EvolveStep::Retire { .. } => "retire",
+        EvolveStep::Transform { .. } => "transform",
+    };
+    symbol(name, None, SymbolKind::EVENT, step.span(), index, None)
 }
 
 fn enum_symbol(enum_decl: &EnumDecl, index: &LineIndex) -> DocumentSymbol {
@@ -421,6 +440,38 @@ enum Status
                 .iter()
                 .all(|child| child.kind == SymbolKind::ENUM_MEMBER)
         );
+    }
+
+    #[test]
+    fn document_symbols_list_evolve_steps_as_source_outline_children() {
+        let source = "\
+module a
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+evolve
+    rename Book.title -> Book.name
+    default Book.name = \"untitled\"
+    retire Book.title
+    transform ^books
+        const id: Id(^books) = 1
+";
+        let index = LineIndex::new(source);
+        let symbols = document_symbols(&parse(source), &index);
+
+        let evolve = symbols
+            .iter()
+            .find(|symbol| symbol.name == "evolve")
+            .expect("evolve block is listed");
+        assert_eq!(evolve.kind, SymbolKind::NAMESPACE);
+
+        let children = evolve.children.as_ref().expect("evolve lists steps");
+        let names: Vec<&str> = children.iter().map(|child| child.name.as_str()).collect();
+        assert_eq!(names, ["rename", "default", "retire", "transform"]);
+        assert!(children.iter().all(|child| child.kind == SymbolKind::EVENT));
     }
 
     /// Analyze a one-file project on disk so the checked program has a module with
