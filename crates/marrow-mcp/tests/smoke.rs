@@ -185,14 +185,17 @@ fn data_tools_refuse_without_the_opt_in() {
         "without the opt-in, data tools must refuse and read nothing, got {response}"
     );
     assert_eq!(structured["available"], false);
-    assert_eq!(structured["contract"]["status"], "blocked-on-marrow");
-    assert_eq!(structured["contract"]["description"], "blocked-on-marrow");
+    assert_eq!(structured["contract"]["status"], "presentation-only");
+    assert_eq!(
+        structured["contract"]["description"],
+        "root-only data helper"
+    );
     assert!(
         response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .starts_with("blocked-on-marrow (blocked-on-marrow: "),
-        "summary must name the blocked contract, got {response}"
+            .starts_with("root-only data helper (presentation-only: "),
+        "summary must name the root-only contract, got {response}"
     );
 
     let _ = server.0.kill();
@@ -241,13 +244,13 @@ fn mw_run_executes_over_a_sandboxed_store() {
     );
     assert_eq!(
         response["result"]["structuredContent"]["contract"]["description"],
-        "blocked-on-marrow"
+        "sandboxed execution helper"
     );
     assert!(
         response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .starts_with("blocked-on-marrow (presentation-only: "),
+            .starts_with("sandboxed execution helper (presentation-only: "),
         "summary must name the run contract, got {response}"
     );
 

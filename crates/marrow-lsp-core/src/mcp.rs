@@ -16,8 +16,8 @@
 //! - **Execution** ([`run`]) evaluates a function over a *fresh* [`TreeStore`] —
 //!   never the project's real store — under a locked-down [`Host`] that grants
 //!   only a deterministic clock and a captured log: no filesystem, no environment,
-//!   no maintenance. It asks Marrow to establish baseline catalog identity the
-//!   same way a real run does, then keeps managed data writes in memory.
+//!   no maintenance. Projects that still need a baseline catalog identity return a
+//!   blocker instead of letting this tool write durable state.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -69,15 +69,6 @@ const RUN_MISSING_FACTS: &[&str] = &[
     "typed run protocol DTOs",
 ];
 
-fn blocked_contract(description: &str, missing_facts: &[&str]) -> Json {
-    json!({
-        "status": "blocked-on-marrow",
-        "stableProductionApi": false,
-        "description": description,
-        "missingFacts": missing_facts,
-    })
-}
-
 fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
     json!({
         "status": "presentation-only",
@@ -96,7 +87,7 @@ fn resource_schema_contract() -> Json {
 }
 
 fn saved_data_contract() -> Json {
-    blocked_contract("blocked-on-marrow", SAVED_DATA_MISSING_FACTS)
+    presentation_contract("root-only data helper", SAVED_DATA_MISSING_FACTS)
 }
 
 fn data_integrity_contract() -> Json {
@@ -104,7 +95,7 @@ fn data_integrity_contract() -> Json {
 }
 
 fn run_contract() -> Json {
-    presentation_contract("blocked-on-marrow", RUN_MISSING_FACTS)
+    presentation_contract("sandboxed execution helper", RUN_MISSING_FACTS)
 }
 
 fn with_contract(mut result: Json, contract: Json) -> Json {
@@ -290,12 +281,11 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     with_contract(json!({ "items": items }), contract)
 }
 
-/// `mw_resource_schema`: a JSON projection of one resource schema (by `name`) or
-/// every resource in the project when `name` is omitted. The shape renders current
-/// checked schema facts for inspection only: resource name, stores, identity-key
-/// declarations, indexes, and member tree. It is not a typed saved-path or durable
-/// data DTO.
-pub fn resource_schema(file: &Path, name: Option<&str>) -> Json {
+/// `mw_resource_schema`: a JSON projection of one unambiguous named resource schema. The
+/// shape renders current checked schema facts for inspection only: resource name,
+/// stores, identity-key declarations, indexes, and member tree. It is not a typed
+/// saved-path, durable data DTO, or paged catalog API.
+pub fn resource_schema(file: &Path, name: &str) -> Json {
     let contract = resource_schema_contract();
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
@@ -304,22 +294,41 @@ pub fn resource_schema(file: &Path, name: Option<&str>) -> Json {
     let Some(program) = workspace.program() else {
         return with_contract(json!({ "resources": [] }), contract);
     };
-    let resources: Vec<Json> = program
+    let matches: Vec<(&ResourceSchema, Vec<&StoreSchema>)> = program
         .modules
         .iter()
         .flat_map(|module| {
             module
                 .resources
                 .iter()
-                .filter(|resource| name.is_none_or(|name| resource.name == name))
+                .filter(|resource| resource.name == name)
                 .map(move |resource| {
                     let stores = module
                         .stores
                         .iter()
-                        .filter(|store| store.resource == resource.name);
-                    schema_to_json(resource, stores)
+                        .filter(|store| store.resource == resource.name)
+                        .collect();
+                    (resource, stores)
                 })
         })
+        .collect();
+
+    if matches.len() > 1 {
+        return with_contract(
+            json!({
+                "resources": [],
+                "diagnostics": [{
+                    "code": "mcp.resourceSchema.identity",
+                    "message": "resource schema lookup is ambiguous until Marrow exposes catalog-bound resource identity facts"
+                }],
+            }),
+            contract,
+        );
+    }
+
+    let resources: Vec<Json> = matches
+        .into_iter()
+        .map(|(resource, stores)| schema_to_json(resource, stores.into_iter()))
         .collect();
     with_contract(json!({ "resources": resources }), contract)
 }
@@ -487,7 +496,8 @@ pub enum RunMode {
 ///
 /// **Test mode** runs `check_tests` then, for every public zero-parameter test
 /// function, runs it over its *own* fresh [`TreeStore`] under the same locked host,
-/// reporting per-test pass/fail/error. `entry`/`args` are ignored.
+/// reporting per-test pass/fail/error. `entry` is ignored; non-empty `args` are
+/// blocked for both modes until Marrow owns typed run arguments.
 ///
 /// The project's real store is never opened in either mode, so an agent can run
 /// code with no risk to managed data.
@@ -496,7 +506,7 @@ pub fn run(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Js
 }
 
 fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
-    if matches!(mode, RunMode::Run) && !args.is_empty() {
+    if !args.is_empty() {
         return run_args_refusal();
     }
 
@@ -527,14 +537,14 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
         return json!({ "diagnostics": diagnostics, "output": "" });
     }
 
-    let program = match establish_run_identity(&root, &config, &snapshot.program) {
-        Ok(program) => program,
-        Err(result) => return result,
-    };
+    let program = &snapshot.program;
+    if crate::catalog_admission::requires_accepted_catalog_identity(program) {
+        return run_catalog_refusal();
+    }
 
     match mode {
-        RunMode::Run => run_entry(&program, entry),
-        RunMode::Test => run_tests(&root, &config, &program),
+        RunMode::Run => run_entry(program, entry),
+        RunMode::Test => run_tests(&root, &config, program),
     }
 }
 
@@ -543,6 +553,16 @@ fn run_args_refusal() -> Json {
         "diagnostics": [{
             "code": "mcp.run.args",
             "message": "mw_run args are blocked until typed run argument facts from Marrow are available"
+        }],
+        "output": "",
+    })
+}
+
+fn run_catalog_refusal() -> Json {
+    json!({
+        "diagnostics": [{
+            "code": "mcp.run.catalog",
+            "message": "blocked-on-marrow: mw_run will not establish accepted catalog identity; use Marrow's production catalog flow or wait for read-only run admission facts"
         }],
         "output": "",
     })
@@ -561,58 +581,6 @@ fn load_project_for_run(
     let root = project.root.clone();
     let config = project.config.clone();
     Ok((workspace, root, config))
-}
-
-fn establish_run_identity(
-    root: &Path,
-    config: &marrow_project::ProjectConfig,
-    program: &CheckedProgram,
-) -> Result<CheckedProgram, Json> {
-    match marrow_check::commit_pending_identity(root, config, program) {
-        Ok(None) => Ok(program.clone()),
-        Ok(Some((report, committed))) => {
-            let diagnostics = check_error_json(&report);
-            if diagnostics.is_empty() {
-                Ok(committed)
-            } else {
-                Err(json!({ "diagnostics": diagnostics, "output": "" }))
-            }
-        }
-        Err(error) => Err(json!({
-            "diagnostics": [commit_identity_error_json(error)],
-            "output": "",
-        })),
-    }
-}
-
-fn check_error_json(report: &marrow_check::CheckReport) -> Vec<Json> {
-    report
-        .diagnostics
-        .iter()
-        .filter(|d| d.severity == marrow_syntax::Severity::Error)
-        .map(|d| {
-            json!({
-                "code": d.code,
-                "message": d.message,
-                "file": d.file.display().to_string(),
-                "line": d.span.line,
-                "character": d.span.column,
-            })
-        })
-        .collect()
-}
-
-fn commit_identity_error_json(error: marrow_check::CommitIdentityError) -> Json {
-    match error {
-        marrow_check::CommitIdentityError::Io { path, error } => json!({
-            "code": "mcp.run.catalog",
-            "message": format!("could not establish catalog identity at {}: {error}", path.display()),
-        }),
-        marrow_check::CommitIdentityError::Discover(error) => json!({
-            "code": error.code,
-            "message": format!("{}: {}", error.path.display(), error.message),
-        }),
-    }
 }
 
 /// Evaluate one `entry` over a fresh [`TreeStore`] under the locked host, returning
@@ -896,6 +864,36 @@ pub fn shout()
         (dir, file)
     }
 
+    fn pure_project() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "tests": ["tests/**/*.mw"] }"#,
+        )
+        .unwrap();
+        let src = root.join("src/shelf");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("books.mw"),
+            "\
+module shelf::books
+
+pub fn double(n: int): int
+    return n * 2
+
+pub fn greet(name: string): string
+    return $\"hi {name}\"
+
+pub fn shout()
+    print(\"loud\")
+",
+        )
+        .unwrap();
+        let file = src.join("books.mw");
+        (dir, file)
+    }
+
     #[test]
     fn check_reports_a_return_type_error_for_a_project_overlay() {
         let (_dir, file) = project();
@@ -974,7 +972,7 @@ pub fn shout()
     #[test]
     fn resource_schema_shapes_the_book_resource() {
         let (_dir, file) = project();
-        let result = resource_schema(&file, Some("Book"));
+        let result = resource_schema(&file, "Book");
         let resources = result["resources"].as_array().unwrap();
         assert_eq!(resources.len(), 1, "one Book resource: {result}");
         let book = &resources[0];
@@ -1018,15 +1016,42 @@ pub fn shout()
     }
 
     #[test]
-    fn resource_schema_without_a_name_lists_every_resource() {
-        let (_dir, file) = project();
-        let result = resource_schema(&file, None);
-        assert_eq!(result["resources"].as_array().unwrap().len(), 1);
+    fn resource_schema_refuses_ambiguous_resource_names() {
+        let (dir, file) = project();
+        let other = dir.path().join("src/other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("books.mw"),
+            "\
+module other::books
+
+resource Book
+    required code: string
+",
+        )
+        .unwrap();
+
+        let result = resource_schema(&file, "Book");
+        assert_eq!(result["resources"], json!([]), "{result}");
+        assert_eq!(
+            result["diagnostics"][0]["code"], "mcp.resourceSchema.identity",
+            "{result}"
+        );
+        assert_contract(
+            &result,
+            "presentation-only",
+            "development helper",
+            &[
+                "catalog-bound resource/store/member identity",
+                "presence/default facts",
+                "typed protocol DTOs",
+            ],
+        );
     }
 
     #[test]
     fn run_executes_a_pure_function_and_returns_its_value() {
-        let (_dir, file) = project();
+        let (_dir, file) = pure_project();
         let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
         assert_eq!(result["diagnostics"].as_array().unwrap().len(), 0);
         assert!(
@@ -1036,7 +1061,7 @@ pub fn shout()
         assert_contract(
             &result,
             "presentation-only",
-            "blocked-on-marrow",
+            "sandboxed execution helper",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1065,7 +1090,7 @@ pub fn shout()
         assert_contract(
             &result,
             "presentation-only",
-            "blocked-on-marrow",
+            "sandboxed execution helper",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1079,7 +1104,7 @@ pub fn shout()
 
     #[test]
     fn run_without_entry_frames_the_blocked_entry_contract() {
-        let (_dir, file) = project();
+        let (_dir, file) = pure_project();
         let result = run(&file, None, &[], RunMode::Run);
         let message = result["diagnostics"][0]["message"].as_str().unwrap();
         assert!(
@@ -1098,7 +1123,7 @@ pub fn shout()
         assert_contract(
             &result,
             "presentation-only",
-            "blocked-on-marrow",
+            "sandboxed execution helper",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1119,8 +1144,8 @@ pub fn shout()
     }
 
     #[test]
-    fn run_contract_marks_entry_string_as_blocked_without_gating_run() {
-        let (_dir, file) = project();
+    fn run_contract_marks_entry_string_as_presentation_only() {
+        let (_dir, file) = pure_project();
         let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
         assert_eq!(result["diagnostics"], json!([]), "{result}");
         assert!(
@@ -1130,7 +1155,7 @@ pub fn shout()
         assert_contract(
             &result,
             "presentation-only",
-            "blocked-on-marrow",
+            "sandboxed execution helper",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1143,7 +1168,7 @@ pub fn shout()
     }
 
     #[test]
-    fn run_executes_shelf_fixture_main() {
+    fn run_blocks_shelf_fixture_until_catalog_identity_is_established() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/shelf")
             .canonicalize()
@@ -1155,10 +1180,20 @@ pub fn shout()
         std::fs::copy(fixture.join("src/shelf/sample.mw"), src.join("sample.mw")).unwrap();
         let file = src.join("sample.mw");
         let result = run(&file, Some("shelf::sample::main"), &[], RunMode::Run);
-        assert_eq!(result["diagnostics"], json!([]), "{result}");
+        assert_eq!(
+            result["diagnostics"][0]["code"], "mcp.run.catalog",
+            "{result}"
+        );
         assert!(
-            result["output"].as_str().unwrap().contains("Small Gods"),
-            "the shelf fixture should print its seeded fiction book, got {result}"
+            result["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("accepted catalog identity"),
+            "durable fixture should block on catalog identity, got {result}"
+        );
+        assert!(
+            !dir.path().join("marrow.catalog.json").exists(),
+            "mw_run must not establish the fixture's accepted catalog"
         );
     }
 
@@ -1172,7 +1207,7 @@ pub fn shout()
 
     #[test]
     fn run_blocks_string_arguments() {
-        let (_dir, file) = project();
+        let (_dir, file) = pure_project();
         let result = run(
             &file,
             Some("shelf::books::greet"),
@@ -1188,20 +1223,29 @@ pub fn shout()
 
     #[test]
     fn run_does_not_touch_the_real_store() {
-        // The project pins a native store; a run that would write must use a fresh
-        // TreeStore, so the on-disk store file is never created by a run.
+        // The project pins a native store and has no accepted catalog yet. A
+        // presentation-only MCP run must not establish durable project state.
         let (dir, file) = project();
-        let _ = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
+        let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
+        assert_eq!(
+            result["diagnostics"][0]["code"], "mcp.run.catalog",
+            "{result}"
+        );
         let store_file = dir.path().join("data").join("marrow.redb");
         assert!(
             !store_file.exists(),
             "a sandboxed run must never create or open the project store"
         );
+        let catalog_file = dir.path().join("marrow.catalog.json");
+        assert!(
+            !catalog_file.exists(),
+            "a presentation-only run must not write the accepted catalog"
+        );
     }
 
     #[test]
     fn test_mode_runs_each_test_over_a_fresh_store() {
-        let (dir, file) = project();
+        let (dir, file) = pure_project();
         let tests_dir = dir.path().join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         std::fs::write(
@@ -1236,7 +1280,7 @@ pub fn fails()
         assert_contract(
             &result,
             "presentation-only",
-            "blocked-on-marrow",
+            "sandboxed execution helper",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1249,13 +1293,12 @@ pub fn fails()
     }
 
     #[test]
-    fn run_test_mode_ignores_args() {
-        let (_dir, file) = project();
+    fn run_test_mode_blocks_args() {
+        let (_dir, file) = pure_project();
         let result = run(&file, None, &[json!(1)], RunMode::Test);
-        assert_eq!(result["diagnostics"], json!([]), "{result}");
-        assert!(
-            result["tests"].as_array().is_some(),
-            "test mode should remain on the test path even when args are present: {result}"
+        assert_eq!(
+            result["diagnostics"][0]["code"], "mcp.run.args",
+            "test mode args should be blocked before running tests: {result}"
         );
     }
 
@@ -1267,8 +1310,8 @@ pub fn fails()
         assert_eq!(roots["dataAccess"], "disabled");
         assert_contract(
             &roots,
-            "blocked-on-marrow",
-            "blocked-on-marrow",
+            "presentation-only",
+            "root-only data helper",
             &[
                 "catalog-bound saved-place identity",
                 "typed children",

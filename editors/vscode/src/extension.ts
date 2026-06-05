@@ -7,7 +7,7 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
-import { MarrowDataProvider } from "./dataExplorer";
+import { MarrowDataProvider } from "./dataRoots";
 import { MarrowDataIntegrity } from "./dataIntegrity";
 
 let client: LanguageClient | undefined;
@@ -174,7 +174,7 @@ class MarrowDebugConfigurationProvider implements vscode.DebugConfigurationProvi
     if (!config.type && !config.request && !config.name) {
       config.type = "marrow";
       config.request = "launch";
-      config.name = "Debug Marrow entry";
+      config.name = "Debug default Marrow entry";
     }
 
     const active = vscode.window.activeTextEditor?.document;
@@ -182,6 +182,9 @@ class MarrowDebugConfigurationProvider implements vscode.DebugConfigurationProvi
 
     if (config.project === undefined) {
       config.project = defaultProject(folder, activeMarrowFile);
+    }
+    if (config.stopOnEntry === undefined) {
+      config.stopOnEntry = true;
     }
 
     return config;

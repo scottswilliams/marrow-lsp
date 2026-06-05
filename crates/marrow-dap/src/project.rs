@@ -1,25 +1,23 @@
-//! Load a Marrow project for a debug launch and open its store for writing.
+//! Load a Marrow project for a debug launch.
 //!
 //! A launch points at a project directory (the one holding `marrow.json`). We
-//! parse the config, analyze the sources into a [`CheckedProgram`], pick the entry
-//! function, and open the project's store. This is the one place in all of
-//! marrow-lsp that opens a real store for *writing*: a debug run may write managed
-//! data, and the debugger shows those writes live. The write store is opened only
-//! here, only on an explicit launch.
+//! parse the config, analyze the sources into a [`CheckedProgram`], and pick the
+//! configured default entry. The debugger runs over an in-memory store and refuses
+//! projects that still need accepted catalog identity, because DAP is downstream of
+//! Marrow's production catalog and store admission APIs.
 
 use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckReport, CheckedProgram, ProjectSources, analyze_project};
-use marrow_project::{ProjectConfig, StoreBackend, parse_config};
+use marrow_lsp_core::catalog_admission::requires_accepted_catalog_identity;
+use marrow_project::parse_config;
 use marrow_store::tree::TreeStore;
 
 /// The project config file whose directory is the project root.
 const CONFIG_FILE: &str = "marrow.json";
-/// A native store's file name inside its data directory.
-const STORE_FILE: &str = "marrow.redb";
 
 /// A loaded project ready to debug: its checked program, the resolved entry
-/// function name, and a freshly opened store the run will read and write.
+/// function name, and a fresh in-memory store the run will read and write.
 pub struct Launch {
     pub program: CheckedProgram,
     pub entry: String,
@@ -34,8 +32,8 @@ pub enum LaunchError {
     Config(String),
     Analyze(String),
     NoEntry,
-    Store(String),
-    Catalog(String),
+    ExplicitEntryBlocked,
+    CatalogIdentityBlocked,
     CheckErrors(Vec<String>),
 }
 
@@ -49,12 +47,16 @@ impl std::fmt::Display for LaunchError {
             Self::Analyze(message) => write!(f, "could not analyze the project: {message}"),
             Self::NoEntry => write!(
                 f,
-                "no entry to run: pass `entry` (\"module::fn\") or configure `defaultEntry` in {CONFIG_FILE}; Marrow resolves it through checked entry-call facts"
+                "no entry to run: configure `defaultEntry` in {CONFIG_FILE}; canonical function-entry discovery facts are pending in Marrow"
             ),
-            Self::Store(message) => write!(f, "could not open the store: {message}"),
-            Self::Catalog(message) => {
-                write!(f, "could not establish catalog identity: {message}")
-            }
+            Self::ExplicitEntryBlocked => write!(
+                f,
+                "blocked-on-marrow: explicit DAP entry strings need canonical function-entry facts from Marrow; configure `defaultEntry` in {CONFIG_FILE}"
+            ),
+            Self::CatalogIdentityBlocked => write!(
+                f,
+                "blocked-on-marrow: DAP launch will not establish accepted catalog identity; use Marrow's production catalog flow or wait for read-only debug admission facts"
+            ),
             Self::CheckErrors(errors) => {
                 write!(f, "the project has errors: {}", errors.join("; "))
             }
@@ -63,9 +65,12 @@ impl std::fmt::Display for LaunchError {
 }
 
 /// Prepare a launch: resolve the project at `project_dir`, analyze it, choose the
-/// entry (`entry` argument or the configured default), refuse to run a project
-/// with check errors, and open its store for writing.
+/// configured default entry, refuse to run a project with check errors or pending
+/// catalog identity, and attach a fresh in-memory store.
 pub fn prepare(project_dir: &Path, entry: Option<&str>) -> Result<Launch, LaunchError> {
+    if entry.is_some() {
+        return Err(LaunchError::ExplicitEntryBlocked);
+    }
     let config_path = project_dir.join(CONFIG_FILE);
     if !config_path.is_file() {
         return Err(LaunchError::NoProject(project_dir.to_path_buf()));
@@ -83,28 +88,17 @@ pub fn prepare(project_dir: &Path, entry: Option<&str>) -> Result<Launch, Launch
     if !errors.is_empty() {
         return Err(LaunchError::CheckErrors(errors));
     }
-    let mut program = snapshot.program;
-    if let Some((report, committed)) =
-        marrow_check::commit_pending_identity(project_dir, &config, &program)
-            .map_err(catalog_error)?
-    {
-        let errors = check_errors(&report);
-        if !errors.is_empty() {
-            return Err(LaunchError::CheckErrors(errors));
-        }
-        program = committed;
+    let program = snapshot.program;
+    if requires_accepted_catalog_identity(&program) {
+        return Err(LaunchError::CatalogIdentityBlocked);
     }
 
-    let entry = entry
-        .map(str::to_string)
-        .or_else(|| config.default_entry.clone())
-        .ok_or(LaunchError::NoEntry)?;
+    let entry = config.default_entry.clone().ok_or(LaunchError::NoEntry)?;
 
-    let store = open_store(project_dir, &config)?;
     Ok(Launch {
         program,
         entry,
-        store,
+        store: TreeStore::memory(),
     })
 }
 
@@ -115,42 +109,6 @@ fn check_errors(report: &CheckReport) -> Vec<String> {
         .filter(|diagnostic| diagnostic.severity == marrow_syntax::Severity::Error)
         .map(|diagnostic| diagnostic.message.clone())
         .collect()
-}
-
-fn catalog_error(error: marrow_check::CommitIdentityError) -> LaunchError {
-    match error {
-        marrow_check::CommitIdentityError::Io { path, error } => {
-            LaunchError::Catalog(format!("{}: {error}", path.display()))
-        }
-        marrow_check::CommitIdentityError::Discover(error) => {
-            LaunchError::Catalog(format!("{}: {}", error.path.display(), error.message))
-        }
-    }
-}
-
-/// Open the project's store for writing: the native redb file under its data
-/// directory, or a fresh in-memory store for a memory-backed (or store-less)
-/// project. The redb path is created if absent, so a first debug run of a new
-/// project just works.
-fn open_store(project_dir: &Path, config: &ProjectConfig) -> Result<TreeStore, LaunchError> {
-    let Some(store) = config.store.as_ref() else {
-        return Ok(TreeStore::memory());
-    };
-    match store.backend {
-        StoreBackend::Memory => Ok(TreeStore::memory()),
-        StoreBackend::Native => {
-            let data_dir = store
-                .data_dir
-                .as_deref()
-                .ok_or_else(|| LaunchError::Store("native store has no data directory".into()))?;
-            let dir = project_dir.join(data_dir);
-            std::fs::create_dir_all(&dir).map_err(|error| LaunchError::Store(error.to_string()))?;
-            let path = dir.join(STORE_FILE);
-            let store = TreeStore::open(&path)
-                .map_err(|error| LaunchError::Store(error.code().to_string()))?;
-            Ok(store)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -167,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_resolves_the_default_entry_and_opens_a_memory_store() {
+    fn prepare_resolves_the_default_entry_with_a_memory_store() {
         let dir = write_project(
             "module m\n\npub fn main(): int\n    return 1\n",
             "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" }, \"store\": { \"backend\": \"memory\" } }",
@@ -177,13 +135,52 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_entry_overrides_the_default() {
+    fn prepare_blocks_pending_catalog_identity_without_writing_project_state() {
+        let dir = write_project(
+            "\
+module m
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+pub fn main(): int
+    return 1
+",
+            "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
+        );
+        let error = expect_error(prepare(dir.path(), None));
+        assert!(
+            matches!(error, LaunchError::CatalogIdentityBlocked),
+            "{error}"
+        );
+        assert!(
+            !dir.path().join("marrow.catalog.json").exists(),
+            "a presentation-only debug prepare must not write the accepted catalog"
+        );
+        assert!(
+            !dir.path().join("data").join("marrow.redb").exists(),
+            "a presentation-only debug prepare must not open the native store"
+        );
+    }
+
+    #[test]
+    fn an_explicit_entry_is_blocked_until_marrow_exposes_entry_facts() {
         let dir = write_project(
             "module m\n\npub fn main(): int\n    return 1\n\npub fn other(): int\n    return 2\n",
             "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" } }",
         );
-        let launch = prepare(dir.path(), Some("m::other")).unwrap();
-        assert_eq!(launch.entry, "m::other");
+        let error = expect_error(prepare(dir.path(), Some("m::other")));
+        assert!(
+            matches!(error, LaunchError::ExplicitEntryBlocked),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("canonical function-entry facts"),
+            "explicit entry rejection should name Marrow entry facts: {message}"
+        );
     }
 
     /// The launch error, asserting the call did not unexpectedly succeed without
@@ -215,16 +212,16 @@ mod tests {
         assert!(matches!(error, LaunchError::NoEntry), "{error}");
         let message = error.to_string();
         assert!(
-            message.contains("checked entry-call facts"),
+            message.contains("canonical function-entry discovery facts"),
             "missing entry should name Marrow entry-call facts: {message}"
-        );
-        assert!(
-            message.contains("pass `entry`"),
-            "missing entry should preserve explicit entry guidance: {message}"
         );
         assert!(
             message.contains("defaultEntry"),
             "missing entry should preserve defaultEntry guidance: {message}"
+        );
+        assert!(
+            !message.contains("pass `entry`"),
+            "missing entry must not advertise explicit entry overrides: {message}"
         );
     }
 

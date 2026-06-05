@@ -1341,7 +1341,7 @@ fn custom_saved_roots_request_answers_over_the_transport() {
     );
     let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
 
-    // The custom Data Explorer request answers with a well-formed envelope. The
+    // The custom Data Roots request answers with a well-formed envelope. The
     // fixture has no store file, so the store is unavailable: `available` is false
     // and `roots` is empty — a soft degrade, never a JSON-RPC error.
     send(

@@ -1,7 +1,7 @@
 //! End-to-end debug session over the real `marrow-dap` binary.
 //!
 //! Spawns the built binary, drives the DAP handshake over its stdio with
-//! `Content-Length` framing, launches a fixture entry with a breakpoint, and
+//! `Content-Length` framing, launches a fixture entry with stop-on-entry, and
 //! asserts the run stops, exposes a live local, blocks durable inspection, then
 //! continues to a clean termination. This exercises the whole rendezvous through
 //! the wire protocol, not internal APIs.
@@ -109,26 +109,22 @@ impl Drop for Client {
     }
 }
 
-/// Write a self-contained fixture project with a memory store and an entry that
-/// writes a `^` value and binds a local the debugger can read at a breakpoint.
+/// Write a self-contained fixture project with locals the debugger can inspect
+/// at a stepped stop.
 fn write_fixture(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let source = "module shelf\n\
                   \n\
-                  resource Book at ^books(id: int)\n\
-                  \x20   required title: string\n\
-                  \n\
                   pub fn main()\n\
                   \x20   const id: int = 1\n\
                   \x20   const title: string = \"Dune\"\n\
-                  \x20   ^books(id).title = title\n\
                   \x20   print(title)\n";
     let file = src.join("shelf.mw");
     std::fs::write(&file, source).unwrap();
     std::fs::write(
         dir.join("marrow.json"),
-        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" } }",
     )
     .unwrap();
     file
@@ -151,21 +147,16 @@ fn write_blocked_arg_fixture(dir: &Path) {
     .unwrap();
 }
 
-/// Write a fixture with an expandable local sequence and durable writes so DAP
-/// value responses exercise the local expansion contract while durable surfaces
-/// stay blocked.
+/// Write a fixture with an expandable local sequence so DAP value responses
+/// exercise the local expansion contract while durable surfaces stay blocked.
 fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let source = "module shelf\n\
                   \n\
-                  resource Book at ^books(id: int)\n\
-                  \x20   required title: string\n\
-                  \n\
                   pub fn main()\n\
                   \x20   const id: int = 1\n\
                   \x20   const title: string = \"Dune\"\n\
-                  \x20   ^books(id).title = title\n\
                   \x20   var tags: sequence[string]\n\
                   \x20   tags(1) = \"classic\"\n\
                   \x20   print(title)\n";
@@ -173,7 +164,7 @@ fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
     std::fs::write(&file, source).unwrap();
     std::fs::write(
         dir.join("marrow.json"),
-        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" } }",
     )
     .unwrap();
     file
@@ -271,7 +262,38 @@ fn launch_rejects_non_array_args_as_protocol_validation() {
 }
 
 #[test]
-fn a_breakpoint_exposes_locals_and_blocks_durable_inspection_then_continues() {
+fn launch_rejects_explicit_entry_strings_until_canonical_facts_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "entry": "shelf::main",
+        }),
+    );
+    let blocked = client.response_for(launch);
+    assert_eq!(blocked["success"], false, "{blocked}");
+    let message = blocked["message"].as_str().unwrap();
+    assert!(
+        message.contains("blocked-on-marrow"),
+        "explicit entry rejection should name the Marrow blocker: {blocked}"
+    );
+    assert!(
+        message.contains("canonical function-entry facts"),
+        "explicit entry rejection should name the missing facts: {blocked}"
+    );
+}
+
+#[test]
+fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
 
@@ -292,25 +314,24 @@ fn a_breakpoint_exposes_locals_and_blocks_durable_inspection_then_continues() {
         "launch",
         json!({
             "project": dir.path().display().to_string(),
-            "stopOnEntry": false,
+            "stopOnEntry": true,
         }),
     );
     assert_eq!(client.response_for(launch)["success"], true);
 
-    // Break on the print statement (line 10) — after the ^ write and with both
-    // locals (id, title) in scope.
+    // The print statement is line 6; the breakpoint is advisory only.
     let set = client.request(
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 10 }],
+            "breakpoints": [{ "line": 6 }],
         }),
     );
     let advisory = client.response_for(set);
     let breakpoints = advisory["body"]["breakpoints"].as_array().unwrap();
     assert_eq!(breakpoints.len(), 1, "{advisory}");
     assert_eq!(breakpoints[0]["verified"], false, "{advisory}");
-    assert_eq!(breakpoints[0]["line"], 10, "{advisory}");
+    assert_eq!(breakpoints[0]["line"], 6, "{advisory}");
     let message = breakpoints[0]["message"].as_str().unwrap();
     assert!(
         message.contains("blocked-on-marrow"),
@@ -321,11 +342,12 @@ fn a_breakpoint_exposes_locals_and_blocks_durable_inspection_then_continues() {
         "advisory breakpoint should name the missing facts: {advisory}"
     );
 
-    // configurationDone starts the run; it should hit the breakpoint and stop.
+    // configurationDone starts at the entry stop; stepping reaches the inspection line.
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
     let stopped = client.event("stopped");
-    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 6);
 
     // threads + stackTrace + scopes.
     let threads = client.request("threads", json!({}));
@@ -335,7 +357,7 @@ fn a_breakpoint_exposes_locals_and_blocks_durable_inspection_then_continues() {
     let stack = client.request("stackTrace", json!({ "threadId": thread_id }));
     let frames = client.response_for(stack);
     let frame = &frames["body"]["stackFrames"][0];
-    assert_eq!(frame["line"], 10, "{frames}");
+    assert_eq!(frame["line"], 6, "{frames}");
     assert!(
         frame.get("source").is_none(),
         "stack source stays unavailable until Marrow exposes canonical debugger source facts: {frames}"
@@ -444,14 +466,14 @@ fn a_breakpoint_exposes_locals_and_blocks_durable_inspection_then_continues() {
 }
 
 #[test]
-fn dap_value_surfaces_mark_blocked_contracts() {
+fn advisory_breakpoint_does_not_stop_without_stop_on_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let file = write_value_contract_fixture(dir.path());
+    let file = write_fixture(dir.path());
 
     let mut client = Client::spawn();
 
-    let init = client.request("initialize", json!({ "supportsVariableType": true }));
-    assert_eq!(client.response_for(init)["success"], true);
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
     client.event("initialized");
 
     let launch = client.request(
@@ -467,7 +489,42 @@ fn dap_value_surfaces_mark_blocked_contracts() {
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 12 }],
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let advisory = client.response_for(set);
+    assert_eq!(advisory["body"]["breakpoints"][0]["verified"], false);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn dap_value_surfaces_mark_blocked_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_value_contract_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({ "supportsVariableType": true }));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 8 }],
         }),
     );
     assert_eq!(client.response_for(set)["success"], true);
@@ -475,7 +532,8 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
     let stopped = client.event("stopped");
-    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 8);
 
     let threads = client.request("threads", json!({}));
     let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
@@ -566,7 +624,7 @@ fn durable_data_inspection_is_blocked_by_default() {
 
     let launch = client.request(
         "launch",
-        json!({ "project": dir.path().display().to_string(), "stopOnEntry": false }),
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
     );
     assert_eq!(client.response_for(launch)["success"], true);
 
@@ -574,7 +632,7 @@ fn durable_data_inspection_is_blocked_by_default() {
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 10 }],
+            "breakpoints": [{ "line": 6 }],
         }),
     );
     assert_eq!(client.response_for(set)["success"], true);
@@ -582,7 +640,8 @@ fn durable_data_inspection_is_blocked_by_default() {
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
     let stopped = client.event("stopped");
-    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 6);
 
     let threads = client.request("threads", json!({}));
     let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
@@ -674,7 +733,7 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
 
     let launch = client.request(
         "launch",
-        json!({ "project": dir.path().display().to_string(), "stopOnEntry": false }),
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
     );
     assert_eq!(client.response_for(launch)["success"], true);
 
@@ -682,7 +741,7 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 10 }],
+            "breakpoints": [{ "line": 6 }],
         }),
     );
     assert_eq!(client.response_for(set)["success"], true);
@@ -690,7 +749,8 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
     let stopped = client.event("stopped");
-    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 6);
 
     let hover = client.request(
         "evaluate",
@@ -734,18 +794,18 @@ fn stepping_advances_one_statement_at_a_time() {
     let done = client.request("configurationDone", json!({}));
     client.response_for(done);
 
-    // stopOnEntry stops before the first statement (the `const id` on line 7).
+    // stopOnEntry stops before the first statement (the `const id` on line 4).
     let entry = client.event("stopped");
     assert_eq!(entry["body"]["reason"], "entry", "{entry}");
     let first_line = stop_line(&mut client);
-    assert_eq!(first_line, 7, "first stop on the first statement");
+    assert_eq!(first_line, 4, "first stop on the first statement");
 
-    // stepIn (next statement, any depth) -> the next statement, line 8.
+    // stepIn (next statement, any depth) -> the next statement, line 5.
     let step = client.request("stepIn", json!({ "threadId": 1 }));
     client.response_for(step);
     let stopped = client.event("stopped");
     assert_eq!(stopped["body"]["reason"], "step", "{stopped}");
-    assert_eq!(stop_line(&mut client), 8, "stepped to the next statement");
+    assert_eq!(stop_line(&mut client), 5, "stepped to the next statement");
 
     // Continue to the end.
     let cont = client.request("continue", json!({ "threadId": 1 }));
@@ -754,7 +814,7 @@ fn stepping_advances_one_statement_at_a_time() {
 }
 
 #[test]
-fn terminate_at_a_breakpoint_unwinds_the_run_cleanly() {
+fn terminate_while_stopped_unwinds_the_run_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
     let mut client = Client::spawn();
@@ -800,4 +860,31 @@ fn stop_line(client: &mut Client) -> i64 {
     let stack = client.request("stackTrace", json!({ "threadId": 1 }));
     let stack = client.response_for(stack);
     stack["body"]["stackFrames"][0]["line"].as_i64().unwrap()
+}
+
+fn step_to_line(client: &mut Client, target: i64) {
+    for _ in 0..20 {
+        if stop_line(client) == target {
+            return;
+        }
+        let step = client.request("stepIn", json!({ "threadId": 1 }));
+        assert_eq!(client.response_for(step)["success"], true);
+        let stopped = client.event("stopped");
+        assert_eq!(stopped["body"]["reason"], "step", "{stopped}");
+    }
+    panic!("did not reach line {target}");
+}
+
+fn assert_terminates_without_stopping(client: &mut Client) {
+    for _ in 0..20 {
+        let message = client.read();
+        assert_ne!(
+            message["event"], "stopped",
+            "advisory breakpoints must not arm runtime stops: {message}"
+        );
+        if message["type"] == "event" && message["event"] == "terminated" {
+            return;
+        }
+    }
+    panic!("run did not terminate within the bounded message loop");
 }

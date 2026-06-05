@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const extensionDir = dirname(scriptDir);
-const outDir = mkdtempSync(join(tmpdir(), "marrow-vscode-data-explorer-"));
+const outDir = mkdtempSync(join(tmpdir(), "marrow-vscode-data-roots-"));
 const tsc = join(extensionDir, "node_modules", ".bin", "tsc");
 const restoreLoad = Module._load;
 
@@ -74,7 +74,7 @@ try {
   });
 
   installVscodeStub();
-  const { MarrowDataProvider } = await import(pathToFileURL(join(outDir, "dataExplorer.js")));
+  const { MarrowDataProvider } = await import(pathToFileURL(join(outDir, "dataRoots.js")));
 
   const provider = new MarrowDataProvider();
   provider.setClient(makeClient());

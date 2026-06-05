@@ -32,14 +32,13 @@ pub struct RunHandle {
     pub events: Receiver<RunEvent>,
 }
 
-/// Start the run on a dedicated thread. Project preparation opens the store on
-/// that same thread, so non-send store internals never cross the protocol/run
+/// Start the run on a dedicated thread. Project preparation creates the in-memory
+/// store on that same thread, so store internals never cross the protocol/run
 /// boundary.
 pub fn spawn(
     project_dir: std::path::PathBuf,
     entry: Option<String>,
     args: Vec<Value>,
-    breakpoint_lines: Vec<u32>,
     stop_on_entry: bool,
 ) -> Result<RunHandle, String> {
     let (event_tx, event_rx) = channel::<RunEvent>();
@@ -52,7 +51,6 @@ pub fn spawn(
                 project_dir,
                 entry,
                 args,
-                breakpoint_lines,
                 stop_on_entry,
                 event_tx,
                 control_rx,
@@ -74,7 +72,6 @@ fn run_on_thread(
     project_dir: std::path::PathBuf,
     requested_entry: Option<String>,
     args: Vec<Value>,
-    breakpoint_lines: Vec<u32>,
     stop_on_entry: bool,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
@@ -93,7 +90,7 @@ fn run_on_thread(
         entry,
         store,
     } = launch;
-    let debugger = Debugger::new(breakpoint_lines, stop_on_entry, events, control);
+    let debugger = Debugger::new(stop_on_entry, events, control);
     run_with_store(store, &program, &entry, &args, debugger)
 }
 

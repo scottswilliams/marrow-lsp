@@ -1,10 +1,10 @@
 //! The DAP session: the protocol-thread state machine.
 //!
-//! It owns the sequence counter, the breakpoint table, the variable-reference
-//! registry, and the handle to the run-thread. Each client request is handled
-//! here, on the protocol thread; inspection requests at a stop are forwarded to
-//! the parked run-thread as [`Query`] messages and answered from owned data. The
-//! session never borrows the runtime frame — that lives only on the run-thread.
+//! It owns the sequence counter, the variable-reference registry, and the handle
+//! to the run-thread. Each client request is handled here, on the protocol
+//! thread; inspection requests at a stop are forwarded to the parked run-thread
+//! as [`Query`] messages and answered from owned data. The session never borrows
+//! the runtime frame — that lives only on the run-thread.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -57,13 +57,9 @@ struct Running {
 pub struct Session<W: Write> {
     out: W,
     seq: i64,
-    /// Unverified requested breakpoint lines. They are line-only transport until
-    /// Marrow exposes canonical debugger stop-point and source facts.
-    breakpoints: Vec<u32>,
     /// The run-thread, present once launched and configurationDone-d.
     running: Option<Running>,
-    /// Pending launch arguments captured between `launch` and `configurationDone`
-    /// (DAP defers the actual start until breakpoints are set).
+    /// Pending launch arguments captured between `launch` and `configurationDone`.
     pending: Option<PendingLaunch>,
     /// The dynamic reference registry for the current stop, cleared on resume.
     expandables: HashMap<i64, Expandable>,
@@ -75,7 +71,6 @@ pub struct Session<W: Write> {
 /// Launch arguments held until `configurationDone` starts the run.
 struct PendingLaunch {
     project_dir: PathBuf,
-    entry: Option<String>,
     args: Vec<marrow_run::Value>,
     stop_on_entry: bool,
 }
@@ -85,7 +80,6 @@ impl<W: Write> Session<W> {
         Session {
             out,
             seq: 0,
-            breakpoints: Vec::new(),
             running: None,
             pending: None,
             expandables: HashMap::new(),
@@ -195,7 +189,7 @@ impl<W: Write> Session<W> {
     }
 
     /// `launch`: validate and stash the launch arguments. The run does not start
-    /// until `configurationDone`, so breakpoints set in between take effect.
+    /// until `configurationDone`.
     fn on_launch(&mut self, request: &Json, arguments: &Json) {
         let Some(project) = arguments.get("project").and_then(Json::as_str) else {
             self.respond(request, false, json!("launch needs a `project` directory"));
@@ -217,13 +211,12 @@ impl<W: Write> Session<W> {
             .get("stopOnEntry")
             .and_then(Json::as_bool)
             .unwrap_or(false);
-        // Prepare the project now so a bad project fails the launch with a clear
-        // message, but keep the store/program until configurationDone starts it.
+        // Prepare the project now so a bad project fails launch before the client
+        // sends configurationDone. The run thread prepares again when it starts.
         match crate::project::prepare(&project_dir, entry.as_deref()) {
             Ok(_) => {
                 self.pending = Some(PendingLaunch {
                     project_dir,
-                    entry,
                     args,
                     stop_on_entry,
                 });
@@ -233,8 +226,8 @@ impl<W: Write> Session<W> {
         }
     }
 
-    /// `setBreakpoints`: keep each requested source line as an unverified runtime
-    /// stop until Marrow provides canonical stop-point facts.
+    /// `setBreakpoints`: return unverified advisory breakpoints. Requested lines
+    /// are not armed until Marrow provides canonical stop-point facts.
     fn on_set_breakpoints(&mut self, request: &Json, arguments: &Json) {
         let has_source_path = arguments
             .get("source")
@@ -259,7 +252,6 @@ impl<W: Write> Session<W> {
         }
 
         let advisory = self.resolve_breakpoints(&requested);
-        self.breakpoints = requested;
         self.respond(request, true, json!({ "breakpoints": advisory }));
     }
 
@@ -277,20 +269,18 @@ impl<W: Write> Session<W> {
             .collect()
     }
 
-    /// `configurationDone`: start the run-thread with the captured launch and the
-    /// unverified breakpoint lines. The run begins immediately; the first stop
-    /// arrives as a `stopped` event the dispatcher pumps.
+    /// `configurationDone`: start the run-thread with the captured launch. The
+    /// run begins immediately; the first stop arrives as a `stopped` event the
+    /// dispatcher pumps.
     fn on_configuration_done(&mut self, request: &Json) {
         let Some(pending) = self.pending.take() else {
             self.respond(request, false, json!("configurationDone before a launch"));
             return;
         };
-        let breakpoint_lines = self.unverified_breakpoint_lines();
         match crate::run::spawn(
             pending.project_dir,
-            pending.entry,
+            None,
             pending.args,
-            breakpoint_lines,
             pending.stop_on_entry,
         ) {
             Ok(running) => {
@@ -308,12 +298,6 @@ impl<W: Write> Session<W> {
                 self.terminate_session();
             }
         }
-    }
-
-    /// The requested breakpoint lines, not tied to a source file until Marrow
-    /// exposes canonical debugger source facts.
-    fn unverified_breakpoint_lines(&self) -> Vec<u32> {
-        self.breakpoints.clone()
     }
 
     /// `threads`: the one synthetic thread the single-threaded run presents.
@@ -418,7 +402,7 @@ impl<W: Write> Session<W> {
             .collect()
     }
 
-    /// `continue`: resume until the next breakpoint.
+    /// `continue`: resume until the run finishes or another supported stop occurs.
     fn on_continue(&mut self, request: &Json) {
         if self.running.is_none() {
             self.respond(request, false, json!("not running"));
@@ -678,38 +662,6 @@ fn parse_args(args: Option<&Json>) -> Result<Vec<marrow_run::Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn set_breakpoints_keeps_latest_unverified_lines_without_source_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("m.mw");
-        let other_file = dir.path().join("other.mw");
-        std::fs::write(&file, "module m\n\npub fn f(): int\n    return 1\n").unwrap();
-        std::fs::write(
-            &other_file,
-            "module other\n\npub fn f(): int\n    return 2\n",
-        )
-        .unwrap();
-        let mut session = Session::new(Vec::new());
-        let request = json!({ "seq": 1, "command": "setBreakpoints" });
-
-        session.on_set_breakpoints(
-            &request,
-            &json!({
-                "source": { "path": file.display().to_string() },
-                "breakpoints": [{ "line": 3 }]
-            }),
-        );
-        session.on_set_breakpoints(
-            &request,
-            &json!({
-                "source": { "path": other_file.display().to_string() },
-                "breakpoints": [{ "line": 4 }]
-            }),
-        );
-
-        assert_eq!(session.unverified_breakpoint_lines(), vec![4]);
-    }
 
     #[test]
     fn breakpoint_response_reports_unverified_source_line() {

@@ -12,7 +12,7 @@
 /// expressed relative to that depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resume {
-    /// Run until a breakpoint is hit (`continue`).
+    /// Run until the program finishes (`continue`).
     Continue,
     /// Stop at the next statement at the same or a shallower depth (`next` /
     /// step-over): a call made by this statement runs to completion without
@@ -30,10 +30,9 @@ pub enum Resume {
 
 /// Why the run stopped, reported on the DAP `stopped` event. The reason a client
 /// sees should match the action it took, so `next`/`stepIn`/`stepOut`/`pause`
-/// each map to their own reason and a breakpoint always reports `breakpoint`.
+/// each map to their own reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    Breakpoint,
     Step,
     Pause,
     Entry,
@@ -43,7 +42,6 @@ impl StopReason {
     /// The DAP `reason` string for a `stopped` event.
     pub fn as_str(self) -> &'static str {
         match self {
-            StopReason::Breakpoint => "breakpoint",
             StopReason::Step => "step",
             StopReason::Pause => "pause",
             StopReason::Entry => "entry",
@@ -51,18 +49,13 @@ impl StopReason {
     }
 }
 
-/// Decide whether to stop before the statement at `depth` on `line`, given the
-/// active resume `mode` and whether `line` carries a breakpoint.
+/// Decide whether to stop before the statement at `depth`, given the active
+/// resume `mode`.
 ///
-/// A breakpoint always wins and reports `breakpoint`, even mid-step, so a step
-/// that crosses a breakpoint still honors it. Otherwise the step target governs:
-/// a depth-relative target (`Over`/`Out`) stops once the run is back at or above
+/// A depth-relative target (`Over`/`Out`) stops once the run is back at or above
 /// the issuing depth, and `Into`/`Pause` stop at the very next statement. Plain
-/// `Continue` stops only at breakpoints.
-pub fn decide(mode: Resume, depth: usize, line_has_breakpoint: bool) -> Option<StopReason> {
-    if line_has_breakpoint {
-        return Some(StopReason::Breakpoint);
-    }
+/// `Continue` runs until completion.
+pub fn decide(mode: Resume, depth: usize) -> Option<StopReason> {
     match mode {
         Resume::Continue => None,
         Resume::Over { from_depth } if depth <= from_depth => Some(StopReason::Step),
@@ -79,53 +72,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn continue_stops_only_on_a_breakpoint() {
-        assert_eq!(decide(Resume::Continue, 1, false), None);
-        assert_eq!(decide(Resume::Continue, 3, false), None);
-        assert_eq!(
-            decide(Resume::Continue, 3, true),
-            Some(StopReason::Breakpoint)
-        );
+    fn continue_runs_until_completion() {
+        assert_eq!(decide(Resume::Continue, 1), None);
+        assert_eq!(decide(Resume::Continue, 3), None);
     }
 
     #[test]
     fn step_over_skips_deeper_statements_and_stops_at_same_depth() {
         let mode = Resume::Over { from_depth: 2 };
         // A statement inside a call the line made (depth 3) is stepped over.
-        assert_eq!(decide(mode, 3, false), None);
+        assert_eq!(decide(mode, 3), None);
         // Back at the issuing depth, we stop.
-        assert_eq!(decide(mode, 2, false), Some(StopReason::Step));
+        assert_eq!(decide(mode, 2), Some(StopReason::Step));
         // Returning to a shallower caller also stops (the callee returned).
-        assert_eq!(decide(mode, 1, false), Some(StopReason::Step));
-    }
-
-    #[test]
-    fn step_over_still_honors_a_breakpoint_inside_the_call() {
-        let mode = Resume::Over { from_depth: 1 };
-        assert_eq!(decide(mode, 5, true), Some(StopReason::Breakpoint));
+        assert_eq!(decide(mode, 1), Some(StopReason::Step));
     }
 
     #[test]
     fn step_in_stops_at_the_very_next_statement_any_depth() {
-        assert_eq!(decide(Resume::Into, 1, false), Some(StopReason::Step));
-        assert_eq!(decide(Resume::Into, 9, false), Some(StopReason::Step));
+        assert_eq!(decide(Resume::Into, 1), Some(StopReason::Step));
+        assert_eq!(decide(Resume::Into, 9), Some(StopReason::Step));
     }
 
     #[test]
     fn step_out_stops_only_when_shallower_than_the_issuing_depth() {
         let mode = Resume::Out { from_depth: 3 };
         // Still inside the activation (same depth): keep running.
-        assert_eq!(decide(mode, 3, false), None);
+        assert_eq!(decide(mode, 3), None);
         // A nested call (deeper): keep running.
-        assert_eq!(decide(mode, 4, false), None);
+        assert_eq!(decide(mode, 4), None);
         // Returned to the caller (shallower): stop.
-        assert_eq!(decide(mode, 2, false), Some(StopReason::Step));
+        assert_eq!(decide(mode, 2), Some(StopReason::Step));
     }
 
     #[test]
     fn pause_stops_at_the_next_statement_with_its_own_reason() {
-        assert_eq!(decide(Resume::Pause, 1, false), Some(StopReason::Pause));
-        // A breakpoint coinciding with a pause still reads as a breakpoint.
-        assert_eq!(decide(Resume::Pause, 1, true), Some(StopReason::Breakpoint));
+        assert_eq!(decide(Resume::Pause, 1), Some(StopReason::Pause));
     }
 }

@@ -12,17 +12,15 @@ Initial release.
 ### Added
 
 - Diagnostics (parse, type, and schema errors) for `.mw` files.
-- Hover with type and documentation from canonical analysis facts.
-- Context-aware completion.
-- Document and workspace symbols.
-- Go to definition and find references.
-- Data-safe rename that refuses saved-data-backed edits.
-- Semantic tokens for semantic highlighting over the TextMate grammar.
+- Presentation-only source-intelligence helpers over current Marrow analysis: hover, completion,
+  document and workspace symbols, go-to definition, find references, rename, and semantic tokens.
+  These are editor aids, not stable production semantic contracts.
+- Rename refuses saved-data-backed edits until Marrow exposes catalog-backed evolution facts.
 - Document formatting.
-- The Marrow Data Explorer view for opt-in saved-root listing while typed/catalog-bound store
+- The Marrow Data Roots view for opt-in saved-root listing while typed/catalog-bound store
   facts are pending.
-- F5 debugging via the `marrow-dap` adapter, with statement stepping and breakpoints. The
-  `module::function` entry string is useful while canonical
-  function-entry facts are pending, not a stable production entry API.
+- F5 debugging via the `marrow-dap` adapter, with stop-on-entry, statement stepping, advisory
+  breakpoints, and variables. The project `defaultEntry` is used while canonical function-entry
+  facts are pending; explicit entry strings and line breakpoint arming remain blocked.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
   debug adapter (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`).

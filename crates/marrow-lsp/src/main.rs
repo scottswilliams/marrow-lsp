@@ -27,7 +27,7 @@ async fn main() {
     let stdout = tokio::io::stdout();
 
     // The standard LSP methods come from the `LanguageServer` impl; the root-only
-    // Data Explorer read and schema-change-impact advisory are registered as
+    // Data Roots read and schema-change-impact advisory are registered as
     // custom methods over the same service so one transport serves both.
     let (service, socket) = LspService::build(Backend::new)
         .custom_method("marrow/savedRoots", Backend::saved_roots)

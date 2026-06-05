@@ -82,7 +82,7 @@ impl Backend {
     /// `marrow/dataIntegrity`: the schema-change-impact advisory. A capped,
     /// on-demand scan of the project's saved data that flags every record the
     /// current schema can no longer account for. Reads through the same
-    /// `marrow.liveData`-gated reader as the Data Explorer, so it never opens the
+    /// `marrow.liveData`-gated reader as the Data Roots view, so it never opens the
     /// store when live data is off, and it is invoked only on explicit request. A
     /// missing fresh checked program, a `None` reader (live data off, no project,
     /// or no native store), or an unreadable store answers `available: false`.

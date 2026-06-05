@@ -48,7 +48,7 @@ pub struct DataIntegrityParams {}
 /// `marrow/dataIntegrity` reply: whether the store could be read, plus the scan's
 /// findings, the count scanned, and whether the store held more past the cap. When
 /// `available` is false the findings are empty and the editor shows an unavailable
-/// state rather than an error — the same soft-degrade the Data Explorer uses.
+/// state rather than an error — the same soft-degrade the data-roots view uses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataIntegrityResult {
     pub available: bool,

@@ -40,7 +40,7 @@
       "marrow": [
         {
           "id": "marrowData",
-          "name": "Marrow Data"
+          "name": "Marrow Data Roots"
         }
       ]
     },
@@ -213,10 +213,6 @@
                 "description": "Path to the Marrow project (the directory containing marrow.json).",
                 "default": "${workspaceFolder}"
               },
-              "entry": {
-                "type": "string",
-                "description": "Blocked-on-marrow entry string, such as `module::function`. F5 remains usable for launch and stepping, but this string is not a stable production entry API until Marrow exposes canonical function-entry facts. When omitted, the adapter uses `defaultEntry` from marrow.json."
-              },
               "args": {
                 "type": "array",
                 "description": "Launch arguments for the Marrow entry. Non-empty values are blocked until Marrow exposes typed launch argument facts.",
@@ -226,7 +222,7 @@
               "stopOnEntry": {
                 "type": "boolean",
                 "description": "Break at the first statement of the entry.",
-                "default": false
+                "default": true
               }
             }
           }
@@ -235,24 +231,23 @@
           {
             "type": "marrow",
             "request": "launch",
-            "name": "Debug Marrow entry",
+            "name": "Debug default Marrow entry",
             "project": "${workspaceFolder}",
             "args": [],
-            "stopOnEntry": false
+            "stopOnEntry": true
           }
         ],
         "configurationSnippets": [
           {
-            "label": "Marrow: Debug entry",
-            "description": "Debug a Marrow entry while canonical function-entry facts are pending.",
+            "label": "Marrow: Debug default entry",
+            "description": "Debug the defaultEntry from marrow.json while canonical function-entry facts are pending.",
             "body": {
               "type": "marrow",
               "request": "launch",
-              "name": "Debug Marrow entry",
+              "name": "Debug default Marrow entry",
               "project": "^\"\\${workspaceFolder}\"",
-              "entry": "^\"module::function\"",
               "args": [],
-              "stopOnEntry": false
+              "stopOnEntry": true
             }
           }
         ]
@@ -274,7 +269,7 @@
         "marrow.liveData": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Opt in to read-only native dev-store reads for the Data Explorer and advisory stored-data integrity checks. Leave disabled to prevent editor-triggered reads of local stored data."
+          "markdownDescription": "Opt in to read-only native dev-store reads for the Marrow Data Roots view and advisory stored-data integrity checks. Leave disabled to prevent editor-triggered reads of local stored data."
         }
       }
     }
@@ -283,8 +278,8 @@
     "compile": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "compile:release": "esbuild ./src/extension.ts --bundle --minify --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "vscode:prepublish": "npm run compile:release",
-    "check": "node ./scripts/checkGrammar.mjs && tsc --noEmit && npm run check:dataExplorer && npm run check:copy",
-    "check:dataExplorer": "node ./scripts/checkDataExplorer.mjs",
+    "check": "node ./scripts/checkGrammar.mjs && tsc --noEmit && npm run check:dataRoots && npm run check:copy",
+    "check:dataRoots": "node ./scripts/checkDataRoots.mjs",
     "check:copy": "node ./scripts/checkCopy.mjs",
     "bundle": "node ./scripts/bundle.mjs",
     "package": "npm run compile:release && npm run bundle && npx @vscode/vsce package --no-dependencies --target $(node -e \"console.log({darwin:{arm64:'darwin-arm64',x64:'darwin-x64'},linux:{arm64:'linux-arm64',x64:'linux-x64'},win32:{x64:'win32-x64'}}[process.platform][process.arch])\")"

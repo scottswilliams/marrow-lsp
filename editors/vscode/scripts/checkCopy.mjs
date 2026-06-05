@@ -43,6 +43,14 @@ const forbiddenPhrases = [
     file: "src/dataIntegrity.ts",
     phrase: "No issues: stored data matches the schema",
   },
+  {
+    file: "README.md",
+    phrase: "Hover — type and documentation from canonical analysis facts",
+  },
+  {
+    file: "CHANGELOG.md",
+    phrase: "Hover with type and documentation from canonical analysis facts",
+  },
 ];
 
 for (const { file, phrase } of forbiddenPhrases) {
@@ -82,8 +90,14 @@ const changelogF5 = markdownBullet(changelog, "CHANGELOG.md", "F5 debugging");
 assertMentions(
   changelog,
   "CHANGELOG.md",
-  "Data Explorer framing",
-  /Data Explorer view for opt-in saved-root listing[\s\S]*typed\/catalog-bound store\s+facts/i,
+  "presentation-only source intelligence framing",
+  /Presentation-only source-intelligence helpers[\s\S]*not stable production semantic contracts/i,
+);
+assertMentions(
+  changelog,
+  "CHANGELOG.md",
+  "Data Roots framing",
+  /Data Roots view for opt-in saved-root listing[\s\S]*typed\/catalog-bound store\s+facts/i,
 );
 assertMentions(
   changelog,
@@ -95,13 +109,25 @@ assertMentions(
   changelogF5,
   "CHANGELOG.md F5 bullet",
   "F5 canonical entry facts framing",
-  /canonical\s+function-entry facts/i,
+  /canonical\s+function-entry\s+facts/i,
 );
 assertMentions(
   changelogF5,
   "CHANGELOG.md F5 bullet",
-  "F5 entry string production caveat",
-  /not a stable production entry API/i,
+  "default entry framing",
+  /defaultEntry/i,
+);
+assertMentions(
+  changelogF5,
+  "CHANGELOG.md F5 bullet",
+  "explicit entry blocked framing",
+  /explicit\s+entry\s+strings[\s\S]*blocked/i,
+);
+assertDoesNotMention(
+  changelogF5,
+  "CHANGELOG.md F5 bullet",
+  "entry placeholder",
+  /module::function/i,
 );
 assertDoesNotMention(
   changelogF5,
@@ -119,25 +145,29 @@ assertMentions(liveDataDescription, "marrow.liveData", "native dev-store reads",
 const marrowDebugger = packageJson.contributes.debuggers.find(
   (debuggerContribution) => debuggerContribution.type === "marrow",
 );
+const marrowDataView = packageJson.contributes.views.marrow.find(
+  (view) => view.id === "marrowData",
+);
+assert.equal(
+  marrowDataView.name,
+  "Marrow Data Roots",
+  "Data Roots view title must say it lists roots only",
+);
 const launchProperties = marrowDebugger.configurationAttributes.launch.properties;
-const entryDescription = launchProperties.entry.description;
-assertMentions(
-  entryDescription,
-  "debugger entry",
-  "blocked entry framing",
-  /blocked-on-marrow/i,
+assert.equal(
+  Object.hasOwn(launchProperties, "entry"),
+  false,
+  "debug launch configuration must not expose explicit entry strings",
 );
-assertMentions(
-  entryDescription,
-  "debugger entry",
-  "canonical function-entry facts",
-  /canonical function-entry facts/i,
+assert.equal(
+  launchProperties.stopOnEntry.default,
+  true,
+  "debug launch configuration must default to stop-on-entry while line breakpoints are advisory",
 );
-assertMentions(
-  entryDescription,
-  "debugger entry",
-  "entry API caveat",
-  /not a stable production entry API/i,
+assert.equal(
+  marrowDebugger.initialConfigurations[0].stopOnEntry,
+  true,
+  "generated debug configuration must stop on entry by default",
 );
 
 const debugSnippetDescription = marrowDebugger.configurationSnippets[0].description;
@@ -147,22 +177,64 @@ assertMentions(
   "canonical function-entry facts",
   /canonical function-entry facts/i,
 );
+const debugSnippetBody = marrowDebugger.configurationSnippets[0].body;
+assert.equal(
+  Object.hasOwn(debugSnippetBody, "entry"),
+  false,
+  "debug snippet must not seed a blocked entry string",
+);
+assert.equal(
+  debugSnippetBody.stopOnEntry,
+  true,
+  "debug snippet must stop on entry by default",
+);
+assertMentions(
+  debugSnippetBody.name,
+  "debug snippet name",
+  "default entry framing",
+  /default/i,
+);
 
 const readme = files.get("README.md");
 const readmeF5 = markdownBullet(readme, "README.md", "Debugging (F5)");
+const readmeSourceIntelligence = markdownBullet(readme, "README.md", "Source intelligence");
+assertMentions(
+  readmeSourceIntelligence,
+  "README.md source intelligence bullet",
+  "presentation-only source intelligence framing",
+  /presentation-only[\s\S]*not stable production semantic contracts/i,
+);
+assertMentions(
+  readmeSourceIntelligence,
+  "README.md source intelligence bullet",
+  "Marrow-owned query facts",
+  /query-native hover\/navigation\/completion facts stay owned by Marrow/i,
+);
 assertMentions(readme, "README.md", "rename catalog-evolution caveat", /catalog-backed evolution facts/i);
 assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveData[\s\S]*advisory/i);
 assertMentions(
   readmeF5,
   "README.md F5 bullet",
   "F5 canonical entry facts framing",
-  /canonical\s+function-entry facts/i,
+  /canonical\s+function-entry\s+facts/i,
 );
 assertMentions(
   readmeF5,
   "README.md F5 bullet",
-  "F5 entry string production caveat",
-  /not a stable production entry API/i,
+  "default entry framing",
+  /defaultEntry/i,
+);
+assertMentions(
+  readmeF5,
+  "README.md F5 bullet",
+  "explicit entry blocked framing",
+  /explicit\s+entry\s+strings[\s\S]*blocked/i,
+);
+assertDoesNotMention(
+  readmeF5,
+  "README.md F5 bullet",
+  "entry placeholder",
+  /module::function/i,
 );
 assertDoesNotMention(
   readmeF5,

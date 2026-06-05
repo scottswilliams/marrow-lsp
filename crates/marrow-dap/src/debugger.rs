@@ -99,11 +99,8 @@ pub enum RunEvent {
 }
 
 /// The hook installed on the run-thread. It owns the channel ends to the protocol
-/// thread, the breakpoint line set, and the pending step mode.
+/// thread and the pending step mode.
 pub struct Debugger {
-    /// Unverified client breakpoint lines. A statement whose span starts on one
-    /// of these lines stops until Marrow exposes canonical stop-point facts.
-    breakpoints: Vec<u32>,
     /// The step mode governing the *next* stop, updated each time the run resumes.
     mode: Resume,
     /// Set once at launch to stop before the first statement (`stopOnEntry`).
@@ -115,17 +112,10 @@ pub struct Debugger {
 }
 
 impl Debugger {
-    /// Build the hook for a launch: requested breakpoint lines, whether to stop
-    /// on entry, and the channel ends.
-    pub fn new(
-        breakpoints: Vec<u32>,
-        stop_on_entry: bool,
-        events: Sender<RunEvent>,
-        control: Receiver<Control>,
-    ) -> Self {
+    /// Build the hook for a launch: whether to stop on entry, and the channel ends.
+    pub fn new(stop_on_entry: bool, events: Sender<RunEvent>, control: Receiver<Control>) -> Self {
         Debugger {
-            breakpoints,
-            // Until the client steps, run freely to the first breakpoint.
+            // Until the client steps, run freely unless stop-on-entry fires.
             mode: Resume::Continue,
             stop_on_entry,
             entered: false,
@@ -211,12 +201,10 @@ impl StepHook for Debugger {
         frame: Frame<'_, '_>,
     ) -> Result<(), RuntimeError> {
         let depth = frame.depth();
-        let line_has_breakpoint = self.breakpoints.contains(&span.line);
-
         let reason = if self.is_entry_stop() {
             Some(StopReason::Entry)
         } else {
-            step::decide(self.mode, depth, line_has_breakpoint)
+            step::decide(self.mode, depth)
         };
 
         let Some(reason) = reason else {

@@ -154,7 +154,7 @@ fn tool_result(name: &str, result: &Json) -> Json {
 /// The full result always rides along in `structuredContent`, so this line only
 /// needs to orient the agent — a count, a value, an outcome — at a fraction of the
 /// context cost of the pretty-printed JSON. It is panic-free: every field is read
-/// through `.get` with a fallback, and an unrecognized shape lands on `"ok"`.
+/// through `.get` with a default, and an unrecognized shape lands on `"ok"`.
 fn summarize(name: &str, result: &Json) -> String {
     // A surfaced refusal or fault speaks for itself, regardless of which tool ran.
     let base = if result.get("dataAccess").and_then(Json::as_str) == Some("disabled") {
@@ -552,12 +552,12 @@ mod tests {
                     "available": false,
                     "roots": [],
                     "contract": contract(
-                        "blocked-on-marrow",
-                        "blocked-on-marrow",
+                        "presentation-only",
+                        "root-only data helper",
                         &["catalog-bound saved-place identity"],
                     ),
                 }),
-                "blocked-on-marrow (blocked-on-marrow: catalog-bound saved-place identity): data unavailable",
+                "root-only data helper (presentation-only: catalog-bound saved-place identity): data unavailable",
             ),
             (
                 "mw_data_integrity",
@@ -587,7 +587,7 @@ mod tests {
                     "diagnostics": [],
                     "contract": contract(
                         "presentation-only",
-                        "blocked-on-marrow",
+                        "sandboxed execution helper",
                         &[
                             "transitive effect facts",
                             "durable-scope facts",
@@ -595,7 +595,7 @@ mod tests {
                         ],
                     ),
                 }),
-                "blocked-on-marrow (presentation-only: transitive effect facts +2): value 42",
+                "sandboxed execution helper (presentation-only: transitive effect facts +2): value 42",
             ),
         ];
         for (name, result, expected) in cases {

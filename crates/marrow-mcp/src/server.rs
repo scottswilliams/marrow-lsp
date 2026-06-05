@@ -91,19 +91,19 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_resource_schema",
-            "description": "Presentation-only development inspection helper over current checked schema facts: return one resource schema by source `name`, or every resource in the project when `name` is omitted, including saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes. Missing catalog-bound resource/store/member identity, presence/default facts, and typed protocol DTOs; not a stable production schema API.",
+            "description": "Presentation-only development inspection helper over current checked schema facts: return one named resource schema, including saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes. The resource `name` is required so this tool cannot materialize the whole catalog; paged catalog/schema listing waits for Marrow-owned DTOs. Missing catalog-bound resource/store/member identity, presence/default facts, and typed protocol DTOs; not a stable production schema API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "name": string_prop("Source-level resource name filter for this development inspection helper; omit to list all resources."),
+                    "name": string_prop("Source-level resource name for this development inspection helper; required until Marrow exposes paged catalog/schema DTOs."),
                 },
-                "required": ["file"],
+                "required": ["file", "name"],
             },
         },
         {
             "name": "mw_saved_roots",
-            "description": "Blocked-on-marrow saved-data helper: list saved root names from the project's real store through canonical Marrow tooling facts. Requires data access to be enabled at launch; otherwise returns a refusal envelope and reads nothing. This is not a stable typed production API.",
+            "description": "Presentation-only root-only data helper: list saved root names from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, typed children, cursor/page facts, snapshot/store generation, and stable data DTOs; not a stable typed production API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -125,13 +125,13 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\") as a presentation contract until Marrow exposes canonical function-entry facts; the entry string is not a stable production entry API. Non-empty `args` are blocked until Marrow exposes typed run argument facts. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
+            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. Projects that need accepted catalog identity are refused because this tool will not establish durable catalog state. `mode: \"run\"` evaluates `entry` (\"module::fn\") as a presentation contract until Marrow exposes canonical function-entry facts; the entry string is not a stable production entry API. Non-empty `args` are blocked in every mode until Marrow exposes typed run argument facts. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
                     "entry": string_prop("Entry string such as `module::fn` (run mode); useful until Marrow exposes canonical function-entry facts, but not a stable production entry API."),
-                    "args": { "type": "array", "description": "Positional arguments for run mode; non-empty args are blocked until Marrow exposes typed run argument facts." },
+                    "args": { "type": "array", "description": "Positional arguments are not accepted yet; non-empty args are blocked in every mode until Marrow exposes typed run argument facts." },
                     "mode": { "type": "string", "enum": ["run", "test"], "description": "`run` (default) executes `entry`; `test` runs the project's tests." },
                 },
                 "required": ["file"],
@@ -168,7 +168,7 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
         }
         "mw_resource_schema" => {
             let file = required_path(arguments, "file")?;
-            let name = optional_str(arguments, "name");
+            let name = required_str(arguments, "name")?;
             Ok(mcp::resource_schema(&file, name))
         }
         "mw_saved_roots" => {
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_marks_saved_data_tools_as_blocked_helpers() {
+    fn catalog_marks_saved_roots_as_root_only_presentation_helper() {
         let tools = tools();
         let tools = tools.as_array().unwrap();
         let saved_tool = |name: &str| {
@@ -292,12 +292,16 @@ mod tests {
             .unwrap();
         let lower = description.to_ascii_lowercase();
         assert!(
-            lower.contains("blocked-on-marrow"),
-            "mw_saved_roots must advertise the blocked contract: {description}"
+            lower.contains("presentation-only"),
+            "mw_saved_roots must advertise the presentation-only contract: {description}"
         );
         assert!(
-            lower.contains("saved-data"),
+            lower.contains("root-only data helper"),
             "mw_saved_roots must advertise saved-data access: {description}"
+        );
+        assert!(
+            lower.contains("no child paths") && lower.contains("no editor-authored saved path"),
+            "mw_saved_roots must not imply saved-path traversal: {description}"
         );
         assert!(
             lower.contains("not a stable typed production api"),
@@ -368,6 +372,10 @@ mod tests {
             "mw_resource_schema must say it renders current checked schema facts: {schema}"
         );
         assert!(
+            schema.contains("cannot materialize the whole catalog"),
+            "mw_resource_schema must not expose all-resource materialization: {schema}"
+        );
+        assert!(
             schema.contains("catalog-bound resource/store/member identity"),
             "mw_resource_schema must name the missing catalog-bound identities: {schema}"
         );
@@ -392,6 +400,10 @@ mod tests {
         assert!(
             schema_name.contains("development inspection helper"),
             "mw_resource_schema.name must not imply a stable resource identity protocol: {schema_name}"
+        );
+        assert!(
+            schema_name.contains("required") && schema_name.contains("paged catalog/schema dtos"),
+            "mw_resource_schema.name must require a named query until paged DTOs exist: {schema_name}"
         );
 
         let integrity = description("mw_data_integrity");
@@ -435,12 +447,21 @@ mod tests {
         let description = run_tool["description"].as_str().unwrap();
         let lower = description.to_ascii_lowercase();
         assert!(
-            !lower.contains("allowprototypeargs"),
+            !lower.contains(&["allow", "proto", "type", "args"].concat()),
             "mw_run must not advertise an argument opt-in: {description}"
         );
         assert!(
             lower.contains("typed run argument facts"),
             "mw_run must point argument decoding back to Marrow facts: {description}"
+        );
+        assert!(
+            lower.contains("blocked in every mode"),
+            "mw_run must block non-empty args for test mode as well as run mode: {description}"
+        );
+        assert!(
+            lower.contains("accepted catalog identity")
+                && lower.contains("will not establish durable catalog state"),
+            "mw_run must advertise pending catalog identity refusal: {description}"
         );
 
         let properties = &run_tool["inputSchema"]["properties"];
@@ -452,13 +473,13 @@ mod tests {
         let args_description = properties["args"]["description"].as_str().unwrap();
         let lower = args_description.to_ascii_lowercase();
         assert!(
-            lower.contains("blocked until marrow exposes typed run argument facts"),
+            lower.contains("blocked in every mode") && lower.contains("typed run argument facts"),
             "mw_run.args must name the Marrow blocker: {args_description}"
         );
     }
 
     #[test]
-    fn catalog_marks_mw_run_entry_as_blocked() {
+    fn catalog_marks_mw_run_entry_as_presentation_only() {
         let tools = tools();
         let tools = tools.as_array().unwrap();
         let run_tool = tools
@@ -529,7 +550,18 @@ mod tests {
     }
 
     #[test]
-    fn raw_tool_arguments_reject_non_array_run_args() {
+    fn mw_resource_schema_requires_a_named_resource() {
+        let policy = Policy { allow_data: false };
+        let error = call("mw_resource_schema", &json!({ "file": "/x.mw" }), policy)
+            .expect_err("mw_resource_schema must require a resource name");
+        assert!(
+            error.contains("name"),
+            "missing resource name should be a protocol argument error: {error}"
+        );
+    }
+
+    #[test]
+    fn tool_arguments_reject_non_array_run_args() {
         let policy = Policy { allow_data: false };
         let error = call(
             "mw_run",
@@ -564,6 +596,25 @@ mod tests {
         assert!(
             message.contains("typed run argument facts from Marrow"),
             "mw_run args must be blocked before project loading: {result}"
+        );
+    }
+
+    #[test]
+    fn mw_run_blocks_non_empty_test_mode_args() {
+        let policy = Policy { allow_data: false };
+        let result = call(
+            "mw_run",
+            &json!({
+                "file": "/nope/project/src/main.mw",
+                "mode": "test",
+                "args": [1],
+            }),
+            policy,
+        )
+        .unwrap();
+        assert_eq!(
+            result["diagnostics"][0]["code"], "mcp.run.args",
+            "mw_run test args must be blocked before project loading: {result}"
         );
     }
 
