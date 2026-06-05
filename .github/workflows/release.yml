@@ -80,15 +80,15 @@ jobs:
 
       - name: Build binaries (cross)
         if: matrix.cross
-        run: |
-          cross build --release --target ${{ matrix.rust_target }} \
-            -p marrow-lsp -p marrow-dap
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/marrow-cargo-target
+        run: cross build --manifest-path ${{ github.workspace }}/Cargo.toml --release --target ${{ matrix.rust_target }} -p marrow-lsp -p marrow-dap
 
       - name: Build binaries (cargo)
         if: ${{ !matrix.cross }}
-        run: |
-          cargo build --release --target ${{ matrix.rust_target }} \
-            -p marrow-lsp -p marrow-dap
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/marrow-cargo-target
+        run: cargo build --manifest-path ${{ github.workspace }}/Cargo.toml --release --target ${{ matrix.rust_target }} -p marrow-lsp -p marrow-dap
 
       # --- Node toolchain for the extension build + packaging ---
       - name: Install Node
@@ -110,6 +110,7 @@ jobs:
         working-directory: editors/vscode
         env:
           CARGO_BUILD_TARGET: ${{ matrix.rust_target }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/marrow-cargo-target
         # The Rust steps already built; the script's `cargo build` is then a no-op.
         run: npm run bundle
 

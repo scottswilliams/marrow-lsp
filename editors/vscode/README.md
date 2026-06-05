@@ -73,8 +73,13 @@ same way, in order:
 npm install
 npm run compile   # esbuild bundle to out/extension.js
 npm run check     # tsc --noEmit typecheck
-npm run bundle    # build the two release binaries into ./server/
-npm run package   # minified compile + bundle + vsce package for this platform
+npm run bundle    # requires CARGO_TARGET_DIR in the environment
+npm run package   # requires CARGO_TARGET_DIR in the environment
 ```
+
+Set `CARGO_TARGET_DIR` in your environment before running `npm run bundle` or `npm run package`.
+It must point at a build-output directory outside this repo so package smoke never writes Rust
+build output into the source checkout. `npm run package` computes the VSCode platform target
+with Node and validates unsupported local platforms before invoking `vsce`.
 
 See `CHANGELOG.md` for release notes.
