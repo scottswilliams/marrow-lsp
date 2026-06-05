@@ -3,9 +3,8 @@
 //! Most navigation reads the checker's [`BindingIndex`](marrow_check::BindingIndex)
 //! — the one resolution layer that maps every identifier use to the definition it
 //! names, respecting lexical scope, `use` aliases, and the saved-data schema.
-//! Go-to-definition also has a small syntax-backed fallback for module path
-//! prefixes, since those name namespaces rather than checker symbols. References
-//! and rename stay binding-index driven, and rename
+//! Module and use path segments stay unavailable until Marrow exposes canonical
+//! module-path facts. References and rename stay binding-index driven, and rename
 //! applies the index's safety classification so a rename that would orphan stored
 //! data is refused rather than performed.
 //!
@@ -17,10 +16,8 @@ use std::path::Path;
 
 use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
 use marrow_check::{
-    BindingIndex, DefItem, RenameSafety, Resolution, ResolvableKind, SymbolKind, SymbolRef,
-    build_alias_map, expand_module_alias, resolve,
+    BindingIndex, DefItem, RenameSafety, Resolution, ResolvableKind, SymbolKind, SymbolRef, resolve,
 };
-use marrow_schema::stdlib;
 use marrow_syntax::{
     Declaration, Keyword, ResourceMember, SourceFile, SourceSpan, Statement, Token, TokenKind,
     TypeRef, lex_source,
@@ -298,9 +295,9 @@ fn module_path_definition(
     {
         return None;
     }
-    let module_name = match path.declaration {
+    match path.declaration {
         Some(ModulePathDeclaration::Module | ModulePathDeclaration::Use) => {
-            path.segments[..=path.cursor_segment].join("::")
+            Some(ModulePathDefinition::NoDefinition)
         }
         None => {
             if path.cursor_segment + 1 == path.segments.len() {
@@ -309,25 +306,9 @@ fn module_path_definition(
                 }
                 return None;
             }
-            let prefix = path.segments[..=path.cursor_segment].join("::");
-            let current = snapshot
-                .program
-                .modules
-                .iter()
-                .find(|module| module.source_file == file)?;
-            let aliases = build_alias_map(&current.imports);
-            expand_module_alias(&prefix, &aliases)
+            Some(ModulePathDefinition::NoDefinition)
         }
-    };
-    if is_stdlib_module_name(&module_name) {
-        return Some(ModulePathDefinition::NoDefinition);
     }
-    Some(
-        match module_declaration_location(snapshot, indices, &module_name) {
-            Some(location) => ModulePathDefinition::Location(location),
-            None => ModulePathDefinition::NoDefinition,
-        },
-    )
 }
 
 fn function_path_definition(
@@ -375,11 +356,6 @@ impl QualifiedPath {
     fn binding_index_should_win(&self, kind: SymbolKind) -> bool {
         matches!(kind, SymbolKind::Enum | SymbolKind::EnumMember)
     }
-}
-
-fn is_stdlib_module_name(name: &str) -> bool {
-    name.strip_prefix("std::")
-        .is_some_and(|module| stdlib::all().iter().any(|op| op.module == module))
 }
 
 #[derive(Clone, Copy)]
@@ -525,7 +501,7 @@ fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> b
                     .is_some_and(|ty| type_ref_covers(ty, offset))
                 || block_type_annotation_at(&function.body, offset)
         }
-        Declaration::Enum(_) => false,
+        Declaration::Enum(_) | Declaration::Evolve(_) => false,
     }
 }
 
@@ -581,8 +557,7 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
         }
         Statement::While { body, .. }
         | Statement::For { body, .. }
-        | Statement::Transaction { body, .. }
-        | Statement::Lock { body, .. } => block_type_annotation_at(body, offset),
+        | Statement::Transaction { body, .. } => block_type_annotation_at(body, offset),
         Statement::Try {
             body,
             catch,
@@ -606,7 +581,6 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
             .any(|arm| block_type_annotation_at(&arm.block, offset)),
         Statement::Assign { .. }
         | Statement::Delete { .. }
-        | Statement::Merge { .. }
         | Statement::Return { .. }
         | Statement::Break { .. }
         | Statement::Continue { .. }
@@ -617,30 +591,6 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
 
 fn type_ref_covers(ty: &TypeRef, offset: usize) -> bool {
     span_covers(ty.span, offset)
-}
-
-fn module_declaration_location(
-    snapshot: &marrow_check::AnalysisSnapshot,
-    indices: &impl FileIndex,
-    module_name: &str,
-) -> Option<Location> {
-    let module = snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.name == module_name)?;
-    let line_index = indices.index_for(&module.source_file)?;
-    let url = Url::from_file_path(&module.source_file).ok()?;
-    let leaf = module.name.rsplit("::").next().unwrap_or(&module.name);
-    let range = last_name_in_span(
-        line_index.text(),
-        module.span.start_byte,
-        module.span.end_byte,
-        leaf,
-    )
-    .map(|(start, end)| line_index.range(start, end))
-    .unwrap_or_else(|| line_index.range(module.span.start_byte, module.span.end_byte));
-    Some(Location { uri: url, range })
 }
 
 fn function_location(
@@ -674,28 +624,6 @@ fn function_location(
         });
     }
     None
-}
-
-fn last_name_in_span(text: &str, start: usize, end: usize, name: &str) -> Option<(usize, usize)> {
-    let end = end.min(text.len());
-    if start > end {
-        return None;
-    }
-    let slice = text.get(start..end)?;
-    let mut search_from = 0;
-    let mut found_range = None;
-    while let Some(found) = slice[search_from..].find(name) {
-        let abs_start = start + search_from + found;
-        let abs_end = abs_start + name.len();
-        if is_whole_word(text, abs_start, abs_end) {
-            found_range = Some((abs_start, abs_end));
-        }
-        search_from += found + 1;
-        if search_from >= slice.len() {
-            break;
-        }
-    }
-    found_range
 }
 
 /// The source spelling of a symbol's name: the identifier the checker resolved it
@@ -1298,7 +1226,7 @@ fn f(): b::Status
     }
 
     #[test]
-    fn module_path_prefix_definition_from_imported_call_jumps_to_module_declaration() {
+    fn module_path_prefix_definition_from_imported_call_is_blocked_without_canonical_fact() {
         let books_source = "\
 module shelf::books
 
@@ -1317,24 +1245,14 @@ pub fn run(): string
             ("shelf/books.mw", books_source),
             ("shelf/app.mw", app_source),
         ]);
-        let books_file = &paths[0];
         let app_file = &paths[1];
         let index = build_binding_index(&snapshot);
 
         let prefix = offset_of(app_source, "return books::titleOf") + "return ".len();
-        let location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("module prefix resolves to the imported module declaration");
-        let line_index = indices.0.get(books_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(books_file).unwrap());
         assert_eq!(
-            range_text(books_source, line_index, location.range),
-            "books"
+            definition(&snapshot, &index, &indices, app_file, prefix + 1),
+            None
         );
-        let module_name = offset_of(books_source, "module shelf::books") + "module shelf::".len();
-        let (line, character) = line_col(books_source, module_name);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
     }
 
     #[test]
@@ -1472,7 +1390,7 @@ pub fn make_local()
     }
 
     #[test]
-    fn module_path_definition_from_use_leaf_jumps_to_imported_module_declaration() {
+    fn module_path_definition_from_use_leaf_is_blocked_without_canonical_fact() {
         let books_source = "\
 module shelf::books
 
@@ -1491,24 +1409,15 @@ pub fn run(): string
             ("shelf/books.mw", books_source),
             ("shelf/app.mw", app_source),
         ]);
-        let books_file = &paths[0];
         let app_file = &paths[1];
         let index = build_binding_index(&snapshot);
 
         let imported_leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
-        let location = definition(&snapshot, &index, &indices, app_file, imported_leaf + 1)
-            .expect("use leaf resolves to the imported module declaration");
-        let line_index = indices.0.get(books_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(books_file).unwrap());
         assert_eq!(
-            range_text(books_source, line_index, location.range),
-            "books"
+            definition(&snapshot, &index, &indices, app_file, imported_leaf + 1),
+            None,
+            "module/use path segments stay unavailable until Marrow exposes canonical module-path facts"
         );
-        let module_name = offset_of(books_source, "module shelf::books") + "module shelf::".len();
-        let (line, character) = line_col(books_source, module_name);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
     }
 
     #[test]
@@ -1570,7 +1479,7 @@ pub fn run(): instant
     }
 
     #[test]
-    fn module_path_prefix_definition_allows_project_std_namespace_module() {
+    fn module_path_prefix_definition_blocks_project_std_namespace_module_without_canonical_fact() {
         let custom_source = "\
 module std::custom
 
@@ -1585,19 +1494,13 @@ pub fn run(): int
 ";
         let (snapshot, paths, indices) =
             analyze_files(&[("std/custom.mw", custom_source), ("app.mw", app_source)]);
-        let custom_file = &paths[0];
         let app_file = &paths[1];
         let index = build_binding_index(&snapshot);
 
         let custom = offset_of(app_source, "std::custom::tick") + "std::".len();
-        let location = definition(&snapshot, &index, &indices, app_file, custom + 1)
-            .expect("non-stdlib std:: project module prefix should resolve");
-        let line_index = indices.0.get(custom_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(custom_file).unwrap());
         assert_eq!(
-            range_text(custom_source, line_index, location.range),
-            "custom"
+            definition(&snapshot, &index, &indices, app_file, custom + 1),
+            None
         );
     }
 
@@ -1737,12 +1640,9 @@ pub fn run(): int
         let book_index = indices.0.get(book_file).unwrap();
 
         let prefix = offset_of(app_source, "return book::Id") + "return ".len();
-        let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("aliased module prefix resolves before local resource lookup");
-        assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
-            range_text(book_source, book_index, prefix_location.range),
-            "book"
+            definition(&snapshot, &index, &indices, app_file, prefix + 1),
+            None
         );
 
         let leaf = offset_of(app_source, "return book::Id") + "return book::".len();
@@ -1779,12 +1679,9 @@ pub fn run(): int
         let book_index = indices.0.get(book_file).unwrap();
 
         let prefix = offset_of(app_source, "return book::Id") + "return ".len();
-        let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("module prefix resolves to the imported module");
-        assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
-            range_text(book_source, book_index, prefix_location.range),
-            "book"
+            definition(&snapshot, &index, &indices, app_file, prefix + 1),
+            None
         );
 
         let leaf = offset_of(app_source, "book::Id") + "book::".len();
@@ -1828,12 +1725,9 @@ pub fn run(): int
 
         let prefix =
             offset_of(app_source, "return wrap(value: book::Id") + "return wrap(value: ".len();
-        let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("named argument value stays in expression context for aliased calls");
-        assert_eq!(prefix_location.uri, Url::from_file_path(book_file).unwrap());
         assert_eq!(
-            range_text(book_source, book_index, prefix_location.range),
-            "book"
+            definition(&snapshot, &index, &indices, app_file, prefix + 1),
+            None
         );
 
         let leaf = offset_of(app_source, "return wrap(value: book::Id")
@@ -1848,7 +1742,7 @@ pub fn run(): int
     }
 
     #[test]
-    fn module_path_prefix_definition_repeated_leaf_selects_module_leaf_segment() {
+    fn module_path_prefix_definition_repeated_leaf_is_blocked_without_canonical_fact() {
         let foo_source = "\
 module foo::foo
 
@@ -1863,21 +1757,14 @@ pub fn run(): string
 ";
         let (snapshot, paths, indices) =
             analyze_files(&[("foo/foo.mw", foo_source), ("app.mw", app_source)]);
-        let foo_file = &paths[0];
         let app_file = &paths[1];
         let index = build_binding_index(&snapshot);
 
         let second_prefix = offset_of(app_source, "foo::foo::title") + "foo::".len();
-        let location = definition(&snapshot, &index, &indices, app_file, second_prefix + 1)
-            .expect("repeated leaf module prefix resolves to the module declaration");
-        let line_index = indices.0.get(foo_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(foo_file).unwrap());
-        assert_eq!(range_text(foo_source, line_index, location.range), "foo");
-        let module_leaf = offset_of(foo_source, "module foo::foo") + "module foo::".len();
-        let (line, character) = line_col(foo_source, module_leaf);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
+        assert_eq!(
+            definition(&snapshot, &index, &indices, app_file, second_prefix + 1),
+            None
+        );
     }
 
     #[test]
@@ -1911,7 +1798,7 @@ pub fn run(): string
     }
 
     #[test]
-    fn module_path_prefix_definition_accepts_keyword_like_segments() {
+    fn module_path_prefix_definition_blocks_keyword_like_segments_without_canonical_fact() {
         let bytes_source = "\
 module shelf::bytes
 
@@ -1930,24 +1817,14 @@ pub fn run(): int
             ("shelf/bytes.mw", bytes_source),
             ("shelf/app.mw", app_source),
         ]);
-        let bytes_file = &paths[0];
         let app_file = &paths[1];
         let index = build_binding_index(&snapshot);
 
         let prefix = offset_of(app_source, "return bytes::size") + "return ".len();
-        let location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
-            .expect("keyword-like module prefix resolves to the module declaration");
-        let line_index = indices.0.get(bytes_file).unwrap();
-
-        assert_eq!(location.uri, Url::from_file_path(bytes_file).unwrap());
         assert_eq!(
-            range_text(bytes_source, line_index, location.range),
-            "bytes"
+            definition(&snapshot, &index, &indices, app_file, prefix + 1),
+            None
         );
-        let module_name = offset_of(bytes_source, "module shelf::bytes") + "module shelf::".len();
-        let (line, character) = line_col(bytes_source, module_name);
-        assert_eq!(location.range.start.line, line);
-        assert_eq!(location.range.start.character, character);
     }
 
     #[test]

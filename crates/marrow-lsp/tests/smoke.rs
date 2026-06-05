@@ -91,6 +91,11 @@ fn initialize_then_open_erroring_buffer_publishes_a_diagnostic() {
         json!(["(", ","]),
         "signature help should trigger while starting and continuing calls"
     );
+    let lens_provider_key = ["code", "Lens", "Provider"].concat();
+    assert!(
+        response["result"]["capabilities"][&lens_provider_key].is_null(),
+        "lens support must stay unadvertised until Marrow exposes a canonical per-root count fact: {response}"
+    );
 
     send(
         &mut stdin,
@@ -1293,92 +1298,6 @@ fn completion_after_caret_drops_saved_roots_without_fresh_checked_facts() {
 }
 
 #[test]
-fn code_lens_reports_a_record_count_for_a_saved_resource() {
-    let mut server = Server(
-        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the marrow-lsp binary runs"),
-    );
-    let mut stdin = server.0.stdin.take().unwrap();
-    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
-
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": { "capabilities": {} }
-        }),
-    );
-    let response = recv(&mut stdout);
-    assert_eq!(
-        response["result"]["capabilities"]["codeLensProvider"]["resolveProvider"], true,
-        "the server should advertise a resolving code-lens provider"
-    );
-    send(
-        &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
-    );
-
-    // Open the fixture's module, which declares `resource Book at ^books`.
-    let file = fixture_root().join("src/shelf/sample.mw");
-    let uri = url::Url::from_file_path(&file).unwrap().to_string();
-    let text = std::fs::read_to_string(&file).unwrap();
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didOpen",
-            "params": {
-                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": text }
-            }
-        }),
-    );
-    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
-
-    // Request code lenses: one unresolved lens for the saved `Book` resource.
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "textDocument/codeLens",
-            "params": { "textDocument": { "uri": uri } }
-        }),
-    );
-    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
-    let lenses = response["result"].as_array().expect("an array of lenses");
-    assert_eq!(lenses.len(), 1, "one saved resource, one lens");
-    let lens = lenses[0].clone();
-    assert_eq!(lens["data"]["root"], "books");
-    assert!(lens["command"].is_null(), "the lens is unresolved");
-
-    // Resolve it. The fixture has no store file, so the store is unavailable and
-    // the lens stays quiet (no command) — the soft-degrade path, not an error.
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "codeLens/resolve",
-            "params": lens
-        }),
-    );
-    let resolved = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
-    assert!(
-        resolved["result"]["command"].is_null(),
-        "an unavailable store resolves to a quiet lens, got {:?}",
-        resolved["result"]
-    );
-
-    let _ = server.0.kill();
-}
-
-#[test]
 fn custom_saved_roots_request_answers_over_the_transport() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
@@ -1444,243 +1363,7 @@ fn custom_saved_roots_request_answers_over_the_transport() {
 }
 
 #[test]
-fn custom_saved_get_returns_a_typed_value_from_a_seeded_store() {
-    use marrow_store::backend::Backend;
-    use marrow_store::path::{PathSegment, SavedKey, encode_path};
-    use marrow_store::redb::RedbStore;
-
-    // A temp project pinning a native store, seeded with `^books(1).title="Mort"`.
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    std::fs::write(
-        root.join("marrow.json"),
-        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
-    )
-    .unwrap();
-    let src = root.join("src");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(root.join("data")).unwrap();
-    let source = "module shelf\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn f()\n    return\n";
-    let file = src.join("shelf.mw");
-    std::fs::write(&file, source).unwrap();
-    {
-        let mut store = RedbStore::open(&root.join("data").join("marrow.redb")).unwrap();
-        let title = encode_path(&[
-            PathSegment::Root("books".to_string()),
-            PathSegment::RecordKey(SavedKey::Int(1)),
-            PathSegment::Field("title".to_string()),
-        ]);
-        store.write(&title, b"Mort".to_vec()).unwrap();
-    }
-
-    let mut server = Server(
-        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the marrow-lsp binary runs"),
-    );
-    let mut stdin = server.0.stdin.take().unwrap();
-    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
-
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "capabilities": {},
-                "initializationOptions": { "marrow.liveData": true }
-            }
-        }),
-    );
-    let _ = recv(&mut stdout);
-    send(
-        &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
-    );
-
-    let uri = url::Url::from_file_path(&file).unwrap().to_string();
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didOpen",
-            "params": {
-                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": source }
-            }
-        }),
-    );
-    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
-
-    // List `^books(1)` through the custom request: the backend passes the checked
-    // program to the Data Explorer core, so saved children include schema labels.
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "marrow/savedChildren",
-            "params": {
-                "path": [
-                    { "root": "books" },
-                    { "key": { "int": 1 } }
-                ]
-            }
-        }),
-    );
-    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
-    assert!(response.get("error").is_none(), "no error: {response:?}");
-    let result = &response["result"];
-    assert_eq!(result["available"], true, "the seeded store is readable");
-    assert_eq!(
-        result["children"],
-        json!([
-            {
-                "kind": "name",
-                "name": "title",
-                "role": "field",
-                "detail": "required",
-                "type": "string",
-                "appendSegment": { "field": "title" }
-            }
-        ])
-    );
-
-    // Read `^books(1).title` through the custom request: a typed `string` value.
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "marrow/savedGet",
-            "params": {
-                "path": [
-                    { "root": "books" },
-                    { "key": { "int": 1 } },
-                    { "field": "title" }
-                ]
-            }
-        }),
-    );
-    let response = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
-    assert!(response.get("error").is_none(), "no error: {response:?}");
-    let result = &response["result"];
-    assert_eq!(result["available"], true, "the seeded store is readable");
-    assert_eq!(result["presence"], "value_only");
-    assert_eq!(result["value"], "\"Mort\"");
-    assert_eq!(result["type"], "string");
-
-    let _ = server.0.kill();
-}
-
-#[test]
-fn custom_data_integrity_flags_an_orphan_from_a_seeded_store() {
-    use marrow_store::backend::Backend;
-    use marrow_store::path::{PathSegment, SavedKey, encode_path};
-    use marrow_store::redb::RedbStore;
-
-    // A temp project pinning a native store. The schema declares `^books(id).title`;
-    // the store also holds `^books(1).sticker`, a field the schema does not declare,
-    // so the schema-impact scan must flag it as an orphan.
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    std::fs::write(
-        root.join("marrow.json"),
-        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
-    )
-    .unwrap();
-    let src = root.join("src");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(root.join("data")).unwrap();
-    let source = "module shelf\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn f()\n    return\n";
-    let file = src.join("shelf.mw");
-    std::fs::write(&file, source).unwrap();
-    {
-        let mut store = RedbStore::open(&root.join("data").join("marrow.redb")).unwrap();
-        let title = encode_path(&[
-            PathSegment::Root("books".to_string()),
-            PathSegment::RecordKey(SavedKey::Int(1)),
-            PathSegment::Field("title".to_string()),
-        ]);
-        store.write(&title, b"Mort".to_vec()).unwrap();
-        let orphan = encode_path(&[
-            PathSegment::Root("books".to_string()),
-            PathSegment::RecordKey(SavedKey::Int(1)),
-            PathSegment::Field("sticker".to_string()),
-        ]);
-        store.write(&orphan, b"gold".to_vec()).unwrap();
-    }
-
-    let mut server = Server(
-        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the marrow-lsp binary runs"),
-    );
-    let mut stdin = server.0.stdin.take().unwrap();
-    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
-
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "capabilities": {},
-                "initializationOptions": { "marrow.liveData": true }
-            }
-        }),
-    );
-    let _ = recv(&mut stdout);
-    send(
-        &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
-    );
-
-    let uri = url::Url::from_file_path(&file).unwrap().to_string();
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didOpen",
-            "params": {
-                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": source }
-            }
-        }),
-    );
-    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
-
-    // The on-demand schema-impact advisory over the transport.
-    send(
-        &mut stdin,
-        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/dataIntegrity", "params": {} }),
-    );
-    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
-    assert!(response.get("error").is_none(), "no error: {response:?}");
-    let result = &response["result"];
-    assert_eq!(result["available"], true, "the seeded store is readable");
-    assert_eq!(result["scanned"], 2, "two stored entries scanned: {result}");
-    assert_eq!(result["truncated"], false);
-    let findings = result["findings"].as_array().unwrap();
-    assert_eq!(findings.len(), 1, "one orphan finding: {result}");
-    assert_eq!(findings[0]["kind"], "orphan");
-    assert_eq!(findings[0]["path"], "^books(1).sticker");
-
-    let _ = server.0.kill();
-}
-
-#[test]
 fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
-    use marrow_store::backend::Backend;
-    use marrow_store::path::{PathSegment, SavedKey, encode_path};
-    use marrow_store::redb::RedbStore;
-
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -1694,15 +1377,6 @@ fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
     let source = "module shelf\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn f()\n    return\n";
     let file = src.join("shelf.mw");
     std::fs::write(&file, source).unwrap();
-    {
-        let mut store = RedbStore::open(&root.join("data").join("marrow.redb")).unwrap();
-        let orphan = encode_path(&[
-            PathSegment::Root("books".to_string()),
-            PathSegment::RecordKey(SavedKey::Int(1)),
-            PathSegment::Field("sticker".to_string()),
-        ]);
-        store.write(&orphan, b"gold".to_vec()).unwrap();
-    }
 
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
@@ -1747,7 +1421,7 @@ fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
     let result = &response["result"];
     assert_eq!(
         result["available"], false,
-        "missing marrow.liveData opt-in should not read the seeded store"
+        "missing marrow.liveData opt-in should not read the store"
     );
     assert_eq!(result["scanned"], 0, "no store entries should be scanned");
     assert_eq!(result["findings"], json!([]));

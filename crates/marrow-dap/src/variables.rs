@@ -50,18 +50,14 @@ pub fn children(value: &Value) -> Vec<Child> {
                 expand: is_expandable(field).then(|| field.clone()),
             })
             .collect(),
-        Value::Identity(keys) => keys
+        Value::Identity(identity) => identity
+            .keys()
             .iter()
             .enumerate()
-            .map(|(index, _)| {
-                // The identity preview already renders each segment; reuse it by
-                // building a one-segment identity so the child reads consistently.
-                let one = Value::Identity(vec![keys[index].clone()]);
-                Child {
-                    name: format!("[{index}]"),
-                    value: one.display_debug(),
-                    expand: None,
-                }
+            .map(|(index, key)| Child {
+                name: format!("[{index}]"),
+                value: format!("{key:?}"),
+                expand: None,
             })
             .collect(),
         _ => Vec::new(),
@@ -71,8 +67,6 @@ pub fn children(value: &Value) -> Vec<Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marrow_store::path::SavedKey;
-
     #[test]
     fn a_scalar_is_a_leaf() {
         assert!(!is_expandable(&Value::Int(3)));
@@ -105,14 +99,5 @@ mod tests {
         assert_eq!(kids[1].name, "tags");
         // The nested sequence carries an expandable value forward.
         assert_eq!(kids[1].expand, Some(nested));
-    }
-
-    #[test]
-    fn an_identity_expands_to_its_key_segments() {
-        let identity = Value::Identity(vec![SavedKey::Int(17)]);
-        let kids = children(&identity);
-        assert_eq!(kids.len(), 1);
-        assert_eq!(kids[0].name, "[0]");
-        assert!(kids[0].value.contains("17"));
     }
 }

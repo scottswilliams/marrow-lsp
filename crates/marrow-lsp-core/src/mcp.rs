@@ -9,29 +9,30 @@
 //!
 //! Two boundaries are enforced here, not in the transport:
 //!
-//! - **Data access** ([`saved_roots`], [`saved_get`], [`saved_children`]) reads a
-//!   project's real stored tree, so the transport gates it behind an explicit
-//!   opt-in and passes `allow_data = false` otherwise; these functions then return
-//!   a clear refusal envelope and never touch the store.
-//! - **Execution** ([`run`]) evaluates a function over a *fresh* [`MemStore`] —
+//! - **Data access** ([`saved_roots`]) reads a project's real stored tree, so the
+//!   transport gates it behind an explicit opt-in and passes `allow_data = false`
+//!   otherwise; the function then returns a clear refusal envelope and never
+//!   touches the store.
+//! - **Execution** ([`run`]) evaluates a function over a *fresh* [`TreeStore`] —
 //!   never the project's real store — under a locked-down [`Host`] that grants
 //!   only a deterministic clock and a captured log: no filesystem, no environment,
-//!   no maintenance. An agent can confirm behavior without real side effects.
+//!   no maintenance. It asks Marrow to establish baseline catalog identity the
+//!   same way a real run does, then keeps managed data writes in memory.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckedProgram, type_at};
-use marrow_run::{Host, RunOutput, RuntimeError, Value, run_entry_with_host};
+use marrow_run::{CheckedEntryCall, Host, RunOutput, RuntimeError, Value, run_entry_with_host};
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
-use marrow_store::mem::MemStore;
+use marrow_store::tree::TreeStore;
 use serde_json::{Value as Json, json};
 
 use crate::completion::completion;
 use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
-use crate::store::StoreReader;
+use crate::store::LiveStore;
 use crate::types::render_type;
 use crate::workspace::Workspace;
 
@@ -39,11 +40,6 @@ use crate::workspace::Workspace;
 /// program's own `print`/`write` stream; a runaway loop must not balloon the
 /// reply, so it is truncated with a marker once it crosses this.
 const OUTPUT_CAP: usize = 8 * 1024;
-
-/// A clamp on the children one `saved_children` page returns to the agent, on top
-/// of the [`StoreReader`]'s own cap — the reader already truncates, but the count
-/// is named here so the MCP contract is explicit.
-const CHILDREN_HINT: &str = "more children remained; narrow the path to page them";
 
 const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
 const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
@@ -92,15 +88,15 @@ fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
 }
 
 fn completion_contract() -> Json {
-    blocked_contract("development helper", COMPLETION_MISSING_FACTS)
+    presentation_contract("development helper", COMPLETION_MISSING_FACTS)
 }
 
 fn resource_schema_contract() -> Json {
-    blocked_contract("development helper", RESOURCE_SCHEMA_MISSING_FACTS)
+    presentation_contract("development helper", RESOURCE_SCHEMA_MISSING_FACTS)
 }
 
 fn saved_data_contract() -> Json {
-    blocked_contract("debug/admin prototype", SAVED_DATA_MISSING_FACTS)
+    blocked_contract("blocked-on-marrow", SAVED_DATA_MISSING_FACTS)
 }
 
 fn data_integrity_contract() -> Json {
@@ -108,7 +104,7 @@ fn data_integrity_contract() -> Json {
 }
 
 fn run_contract() -> Json {
-    presentation_contract("debug/admin prototype", RUN_MISSING_FACTS)
+    presentation_contract("blocked-on-marrow", RUN_MISSING_FACTS)
 }
 
 fn with_contract(mut result: Json, contract: Json) -> Json {
@@ -295,11 +291,10 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
 }
 
 /// `mw_resource_schema`: a JSON projection of one resource schema (by `name`) or
-/// every resource in the project when `name` is omitted. The shape mirrors what
-/// an agent needs to write correct saved paths: the resource's name, every store
-/// that persists it (root + identity keys + indexes), and its member tree (fields,
-/// keyed leaves, groups, nested). Built from checked schemas — no schema logic is
-/// reinvented.
+/// every resource in the project when `name` is omitted. The shape renders current
+/// checked schema facts for inspection only: resource name, stores, identity-key
+/// declarations, indexes, and member tree. It is not a typed saved-path or durable
+/// data DTO.
 pub fn resource_schema(file: &Path, name: Option<&str>) -> Json {
     let contract = resource_schema_contract();
     let workspace = match load_project(file, None) {
@@ -330,8 +325,7 @@ pub fn resource_schema(file: &Path, name: Option<&str>) -> Json {
 }
 
 /// Project one resource schema to JSON: name, stores, and member tree. The member
-/// tree is recursive (a group carries its nested members), so an agent can
-/// navigate `^root(key).layer(key).field` from one document.
+/// tree is recursive because groups carry nested members.
 fn schema_to_json<'a>(
     resource: &ResourceSchema,
     stores: impl Iterator<Item = &'a StoreSchema>,
@@ -397,7 +391,7 @@ fn index_to_json(index: &IndexSchema) -> Json {
 }
 
 /// `mw_saved_roots`: the project's durable saved root names, read through a
-/// short-lived [`StoreReader`]. Gated: with `allow_data = false` the function
+/// short-lived [`LiveStore`]. Gated: with `allow_data = false` the function
 /// returns a refusal envelope and never opens the store. A project with no native
 /// store, or a store that cannot be read right now, answers `available: false`.
 pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
@@ -414,87 +408,20 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
             );
         }
     };
-    let reader = workspace.project().and_then(StoreReader::for_project);
-    let result = serde_json::to_value(crate::data_explorer::saved_roots(reader.as_ref()))
+    let reader = workspace.project().and_then(LiveStore::for_project);
+    let Some(program) = workspace.program() else {
+        return with_contract(json!({ "available": false, "roots": [] }), contract);
+    };
+    let result = serde_json::to_value(crate::data_explorer::saved_roots(reader.as_ref(), program))
         .unwrap_or_else(|_| json!({ "available": false, "roots": [] }));
     with_contract(result, contract)
-}
-
-/// `mw_saved_get`: the presence and schema-typed value at a saved `path`, read
-/// through a [`StoreReader`]. The path mirrors the LSP Data Explorer's segment
-/// encoding (root/key/field/layer/index/index_key). Gated like [`saved_roots`].
-pub fn saved_get(file: &Path, path: Json, allow_data: bool) -> Json {
-    let contract = saved_data_contract();
-    if !allow_data {
-        return data_disabled(contract);
-    }
-    let params: crate::data_explorer::SavedGetParams =
-        match serde_json::from_value(json!({ "path": path })) {
-            Ok(params) => params,
-            Err(error) => {
-                return with_contract(
-                    json!({ "available": false, "error": format!("invalid path: {error}") }),
-                    contract,
-                );
-            }
-        };
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            return with_contract(json!({ "available": false, "error": error }), contract);
-        }
-    };
-    let reader = workspace.project().and_then(StoreReader::for_project);
-    let empty = CheckedProgram::default();
-    let program = workspace.program().unwrap_or(&empty);
-    let result = serde_json::to_value(crate::data_explorer::saved_get(
-        params,
-        program,
-        reader.as_ref(),
-    ))
-    .unwrap_or_else(|_| json!({ "available": false }));
-    with_contract(result, contract)
-}
-
-/// `mw_saved_children`: the immediate children of a saved `path`, capped, read
-/// through a [`StoreReader`]. Path encoding and gating match [`saved_get`].
-pub fn saved_children(file: &Path, path: Json, allow_data: bool) -> Json {
-    let contract = saved_data_contract();
-    if !allow_data {
-        return data_disabled(contract);
-    }
-    let params: crate::data_explorer::SavedChildrenParams =
-        match serde_json::from_value(json!({ "path": path })) {
-            Ok(params) => params,
-            Err(error) => {
-                return with_contract(
-                    json!({ "available": false, "error": format!("invalid path: {error}") }),
-                    contract,
-                );
-            }
-        };
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            return with_contract(json!({ "available": false, "error": error }), contract);
-        }
-    };
-    let reader = workspace.project().and_then(StoreReader::for_project);
-    let result = crate::data_explorer::saved_children(params, reader.as_ref());
-    let mut value = serde_json::to_value(&result).unwrap_or_else(|_| json!({ "available": false }));
-    if result.more
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert("hint".to_string(), json!(CHILDREN_HINT));
-    }
-    with_contract(value, contract)
 }
 
 /// `mw_data_integrity`: the schema-change-impact advisory — a capped, on-demand
 /// scan of the project's real stored data that flags every record the *current*
 /// schema can no longer account for (an orphan path, or a value that no longer
 /// decodes as its declared type). Reuses the same classification as
-/// `marrow data integrity`, through a short-lived [`StoreReader`]. Gated like
+/// `marrow data integrity`, through a short-lived [`LiveStore`]. Gated like
 /// [`saved_roots`]: with `allow_data = false` it returns a refusal envelope and
 /// never opens the store. A project with no native store, or a store that cannot
 /// be read right now, answers `available: false`.
@@ -513,9 +440,10 @@ pub fn data_integrity(file: &Path, allow_data: bool) -> Json {
             return with_contract(value, contract);
         }
     };
-    let reader = workspace.project().and_then(StoreReader::for_project);
-    let empty = CheckedProgram::default();
-    let program = workspace.program().unwrap_or(&empty);
+    let reader = workspace.project().and_then(LiveStore::for_project);
+    let Some(program) = workspace.program() else {
+        return with_contract(unavailable, contract);
+    };
     let result = serde_json::to_value(crate::data_integrity::data_integrity(
         reader.as_ref(),
         program,
@@ -548,57 +476,28 @@ pub enum RunMode {
     Test,
 }
 
-/// Whether `mw_run` may decode positional JSON arguments with the debug/admin
-/// scalar prototype.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RunArgsPolicy {
-    /// Reject non-empty run args until Marrow exposes typed run argument facts.
-    StableTypedFactsOnly,
-    /// Preserve the temporary scalar decoder behind an explicit opt-in.
-    AllowPrototypeScalars,
-}
-
 /// `mw_run`: execute Marrow to confirm behavior — always sandboxed.
 ///
 /// **Run mode** checks the project (`analyze_project` via the workspace), then
-/// evaluates `entry` (`"module::fn"`) over a *fresh* [`MemStore`] under a
+/// evaluates `entry` (`"module::fn"`) over a *fresh* [`TreeStore`] under a
 /// locked-down [`Host`]: a fixed clock and a captured log only — no filesystem, no
-/// environment, no maintenance. Non-empty `args` are blocked unless
-/// [`RunArgsPolicy::AllowPrototypeScalars`] is set, because Marrow does not yet
-/// expose stable typed run argument facts. The result carries the returned
+/// environment, no maintenance. Non-empty `args` are blocked because Marrow does
+/// not yet expose stable typed run argument facts. The result carries the returned
 /// `value`, the captured `output`, and any check `diagnostics`.
 ///
 /// **Test mode** runs `check_tests` then, for every public zero-parameter test
-/// function, runs it over its *own* fresh [`MemStore`] under the same locked host,
+/// function, runs it over its *own* fresh [`TreeStore`] under the same locked host,
 /// reporting per-test pass/fail/error. `entry`/`args` are ignored.
 ///
 /// The project's real store is never opened in either mode, so an agent can run
 /// code with no risk to managed data.
-pub fn run(
-    file: &Path,
-    entry: Option<&str>,
-    args: &[Json],
-    mode: RunMode,
-    args_policy: RunArgsPolicy,
-) -> Json {
-    with_contract(
-        run_result(file, entry, args, mode, args_policy),
-        run_contract(),
-    )
+pub fn run(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
+    with_contract(run_result(file, entry, args, mode), run_contract())
 }
 
-fn run_result(
-    file: &Path,
-    entry: Option<&str>,
-    args: &[Json],
-    mode: RunMode,
-    args_policy: RunArgsPolicy,
-) -> Json {
-    if matches!(mode, RunMode::Run)
-        && !args.is_empty()
-        && args_policy == RunArgsPolicy::StableTypedFactsOnly
-    {
-        return prototype_args_refusal();
+fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
+    if matches!(mode, RunMode::Run) && !args.is_empty() {
+        return run_args_refusal();
     }
 
     let (workspace, root, config) = match load_project_for_run(file) {
@@ -628,17 +527,22 @@ fn run_result(
         return json!({ "diagnostics": diagnostics, "output": "" });
     }
 
+    let program = match establish_run_identity(&root, &config, &snapshot.program) {
+        Ok(program) => program,
+        Err(result) => return result,
+    };
+
     match mode {
-        RunMode::Run => run_entry(&snapshot.program, entry, args),
-        RunMode::Test => run_tests(&root, &config, &snapshot.program),
+        RunMode::Run => run_entry(&program, entry),
+        RunMode::Test => run_tests(&root, &config, &program),
     }
 }
 
-fn prototype_args_refusal() -> Json {
+fn run_args_refusal() -> Json {
     json!({
         "diagnostics": [{
-            "code": "mcp.run.prototype_args",
-            "message": "mw_run args are blocked until typed run argument facts from Marrow are available; pass allowPrototypeArgs: true only for the debug/admin prototype scalar decoder"
+            "code": "mcp.run.args",
+            "message": "mw_run args are blocked until typed run argument facts from Marrow are available"
         }],
         "output": "",
     })
@@ -659,35 +563,84 @@ fn load_project_for_run(
     Ok((workspace, root, config))
 }
 
-/// Evaluate one `entry` over a fresh [`MemStore`] under the locked host, returning
+fn establish_run_identity(
+    root: &Path,
+    config: &marrow_project::ProjectConfig,
+    program: &CheckedProgram,
+) -> Result<CheckedProgram, Json> {
+    match marrow_check::commit_pending_identity(root, config, program) {
+        Ok(None) => Ok(program.clone()),
+        Ok(Some((report, committed))) => {
+            let diagnostics = check_error_json(&report);
+            if diagnostics.is_empty() {
+                Ok(committed)
+            } else {
+                Err(json!({ "diagnostics": diagnostics, "output": "" }))
+            }
+        }
+        Err(error) => Err(json!({
+            "diagnostics": [commit_identity_error_json(error)],
+            "output": "",
+        })),
+    }
+}
+
+fn check_error_json(report: &marrow_check::CheckReport) -> Vec<Json> {
+    report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == marrow_syntax::Severity::Error)
+        .map(|d| {
+            json!({
+                "code": d.code,
+                "message": d.message,
+                "file": d.file.display().to_string(),
+                "line": d.span.line,
+                "character": d.span.column,
+            })
+        })
+        .collect()
+}
+
+fn commit_identity_error_json(error: marrow_check::CommitIdentityError) -> Json {
+    match error {
+        marrow_check::CommitIdentityError::Io { path, error } => json!({
+            "code": "mcp.run.catalog",
+            "message": format!("could not establish catalog identity at {}: {error}", path.display()),
+        }),
+        marrow_check::CommitIdentityError::Discover(error) => json!({
+            "code": error.code,
+            "message": format!("{}: {}", error.path.display(), error.message),
+        }),
+    }
+}
+
+/// Evaluate one `entry` over a fresh [`TreeStore`] under the locked host, returning
 /// `{ value?, output, diagnostics: [] }` or a runtime-fault envelope. The store is
 /// brand new for this call and dropped when it returns; nothing persists.
-fn run_entry(program: &CheckedProgram, entry: Option<&str>, args: &[Json]) -> Json {
+fn run_entry(program: &CheckedProgram, entry: Option<&str>) -> Json {
     let Some(entry) = entry else {
         return json!({
             "diagnostics": [{
-                "message": "run mode needs `entry` (`module::fn`) as a debug/admin prototype entry string blocked on canonical function-entry facts, not a stable production entry API"
+                "message": "blocked-on-marrow entry string: run mode needs `entry`; Marrow resolves it through canonical function-entry facts, and this is not a stable production entry API"
             }],
             "output": ""
         });
     };
-    let arguments = match args
-        .iter()
-        .map(json_to_value)
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(arguments) => arguments,
-        Err(error) => return json!({ "diagnostics": [{ "message": error }], "output": "" }),
-    };
-    let store = RefCell::new(MemStore::new());
+    let store = TreeStore::memory();
     let host = locked_host();
-    match run_entry_with_host(program, &store, &host, entry, &arguments) {
+    let runtime = program.runtime();
+    let call = match CheckedEntryCall::new(&runtime, entry, Vec::new()) {
+        Ok(call) => call,
+        Err(error) => return runtime_error_json(&error),
+    };
+    match run_entry_with_host(&store, &host, &call) {
         Ok(output) => run_output_json(output),
         Err(error) => runtime_error_json(&error),
     }
 }
 
-/// Discover and run the project's tests, each over its own fresh [`MemStore`] under
+/// Discover and run the project's tests, each over its own fresh [`TreeStore`] under
 /// the locked host, returning `{ output, diagnostics, tests: [...] }`. A test is a
 /// public zero-parameter function in a test file; a `std::assert::*` failure is a
 /// `failed` test, any other fault an `errored` test, mirroring `marrow test`.
@@ -696,7 +649,8 @@ fn run_tests(
     config: &marrow_project::ProjectConfig,
     program: &CheckedProgram,
 ) -> Json {
-    let (report, test_modules) = match marrow_check::check_tests(root, config, program) {
+    let source_module_count = program.modules.len();
+    let (report, combined) = match marrow_check::check_tests_program(root, config, program) {
         Ok(result) => result,
         Err(error) => {
             return json!({ "diagnostics": [{ "code": error.code, "message": error.message }], "output": "", "tests": [] });
@@ -712,7 +666,7 @@ fn run_tests(
         return json!({ "diagnostics": check_errors, "output": "", "tests": [] });
     }
 
-    let names: Vec<(String, PathBuf)> = test_modules
+    let names: Vec<(String, PathBuf)> = combined.modules[source_module_count..]
         .iter()
         .flat_map(|module| {
             module
@@ -728,19 +682,17 @@ fn run_tests(
         })
         .collect();
 
-    // Resolve test names against the project plus the test modules, exactly as
-    // `marrow test` does, so cross-module calls and resource constructors resolve.
-    let mut combined = program.clone();
-    combined.modules.extend(test_modules);
-
+    let runtime = combined.runtime();
     let host = locked_host();
     let mut tests = Vec::new();
     for (name, source_file) in &names {
         // Every test gets its own brand-new in-memory store, so one test cannot see
         // another's writes and none touches the project's real store.
-        let store = RefCell::new(MemStore::new());
+        let store = TreeStore::memory();
         let entry = json!({ "name": name, "file": source_file.display().to_string() });
-        let result = match run_entry_with_host(&combined, &store, &host, name, &[]) {
+        let result = match CheckedEntryCall::new(&runtime, name, Vec::new())
+            .and_then(|call| run_entry_with_host(&store, &host, &call))
+        {
             Ok(_) => merge(entry, json!({ "outcome": "passed" })),
             Err(error) if error.code == marrow_run::RUN_ASSERT => merge(
                 entry,
@@ -811,29 +763,6 @@ fn truncate(mut output: String) -> String {
     output
 }
 
-/// A JSON scalar as a runtime [`Value`] for a positional `mw_run` argument. Only
-/// the scalars an entry's parameters take are accepted — int, bool, string,
-/// decimal-as-string — since a run argument is a scalar; anything else is rejected
-/// with a message rather than coerced.
-fn json_to_value(arg: &Json) -> Result<Value, String> {
-    match arg {
-        Json::Bool(value) => Ok(Value::Bool(*value)),
-        Json::String(text) => Ok(Value::Str(text.clone())),
-        Json::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                Ok(Value::Int(int))
-            } else {
-                Err(format!(
-                    "the run argument `{number}` is not an integer; pass a decimal as a string"
-                ))
-            }
-        }
-        other => Err(format!(
-            "a run argument must be an int, bool, or string scalar, not `{other}`"
-        )),
-    }
-}
-
 /// A runtime [`Value`] as JSON for a run's returned value. The scalars render to
 /// their JSON forms; the wide and structural values (instant, duration, sequence,
 /// resource, identity) render to a tagged string so the result stays inspectable
@@ -847,6 +776,9 @@ fn value_to_json(value: Value) -> Json {
         Value::Date(days) => json!({ "date": days }),
         Value::Instant(nanos) => json!({ "instant": nanos.to_string() }),
         Value::Duration(nanos) => json!({ "duration": nanos.to_string() }),
+        Value::Enum(value) => {
+            json!({ "enum": { "id": value.enum_id().0, "member": value.member_id().0 } })
+        }
         Value::Bytes(bytes) => json!({ "bytes": bytes.len() }),
         Value::Sequence(items) => json!(items.into_iter().map(value_to_json).collect::<Vec<_>>()),
         Value::LocalTree(entries) => json!({ "tree": entries.len() }),
@@ -856,7 +788,9 @@ fn value_to_json(value: Value) -> Json {
                 .map(|(name, value)| (name, value_to_json(value)))
                 .collect(),
         ),
-        Value::Identity(segments) => json!({ "identity": segments.len() }),
+        Value::Identity(identity) => {
+            json!({ "identity": { "root": identity.root(), "keyCount": identity.keys().len() } })
+        }
     }
 }
 
@@ -901,9 +835,6 @@ fn read_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marrow_store::backend::Backend;
-    use marrow_store::path::{PathSegment, SavedKey, encode_path};
-    use marrow_store::redb::RedbStore;
 
     fn assert_contract(result: &Json, status: &str, description: &str, missing_facts: &[&str]) {
         let contract = &result["contract"];
@@ -1034,7 +965,7 @@ pub fn shout()
         );
         assert_contract(
             &result,
-            "blocked-on-marrow",
+            "presentation-only",
             "development helper",
             &["canonical completion-context facts"],
         );
@@ -1076,7 +1007,7 @@ pub fn shout()
         );
         assert_contract(
             &result,
-            "blocked-on-marrow",
+            "presentation-only",
             "development helper",
             &[
                 "catalog-bound resource/store/member identity",
@@ -1096,19 +1027,16 @@ pub fn shout()
     #[test]
     fn run_executes_a_pure_function_and_returns_its_value() {
         let (_dir, file) = project();
-        let result = run(
-            &file,
-            Some("shelf::books::double"),
-            &[json!(21)],
-            RunMode::Run,
-            RunArgsPolicy::AllowPrototypeScalars,
-        );
-        assert_eq!(result["value"], 42, "double(21) == 42: {result}");
+        let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
         assert_eq!(result["diagnostics"].as_array().unwrap().len(), 0);
+        assert!(
+            result["output"].as_str().unwrap().contains("loud"),
+            "zero-argument run should execute: {result}"
+        );
         assert_contract(
             &result,
             "presentation-only",
-            "debug/admin prototype",
+            "blocked-on-marrow",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1121,13 +1049,12 @@ pub fn shout()
     }
 
     #[test]
-    fn run_blocks_non_empty_args_without_prototype_policy_before_loading() {
+    fn run_blocks_non_empty_args_before_loading() {
         let result = run(
             Path::new("/nope/project/src/main.mw"),
             Some("app::main"),
             &[json!(1)],
             RunMode::Run,
-            RunArgsPolicy::StableTypedFactsOnly,
         );
         let message = result["diagnostics"][0]["message"].as_str().unwrap();
         assert!(
@@ -1138,7 +1065,7 @@ pub fn shout()
         assert_contract(
             &result,
             "presentation-only",
-            "debug/admin prototype",
+            "blocked-on-marrow",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1151,19 +1078,13 @@ pub fn shout()
     }
 
     #[test]
-    fn run_without_entry_frames_the_prototype_entry_contract() {
+    fn run_without_entry_frames_the_blocked_entry_contract() {
         let (_dir, file) = project();
-        let result = run(
-            &file,
-            None,
-            &[],
-            RunMode::Run,
-            RunArgsPolicy::StableTypedFactsOnly,
-        );
+        let result = run(&file, None, &[], RunMode::Run);
         let message = result["diagnostics"][0]["message"].as_str().unwrap();
         assert!(
-            message.contains("debug/admin prototype entry string"),
-            "missing entry should frame entry as a prototype string: {result}"
+            message.contains("blocked-on-marrow entry string"),
+            "missing entry should frame entry as blocked: {result}"
         );
         assert!(
             message.contains("canonical function-entry facts"),
@@ -1177,7 +1098,7 @@ pub fn shout()
         assert_contract(
             &result,
             "presentation-only",
-            "debug/admin prototype",
+            "blocked-on-marrow",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1198,15 +1119,9 @@ pub fn shout()
     }
 
     #[test]
-    fn run_contract_marks_entry_string_as_prototype_without_gating_run() {
+    fn run_contract_marks_entry_string_as_blocked_without_gating_run() {
         let (_dir, file) = project();
-        let result = run(
-            &file,
-            Some("shelf::books::shout"),
-            &[],
-            RunMode::Run,
-            RunArgsPolicy::StableTypedFactsOnly,
-        );
+        let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
         assert_eq!(result["diagnostics"], json!([]), "{result}");
         assert!(
             result["output"].as_str().unwrap().contains("loud"),
@@ -1215,7 +1130,7 @@ pub fn shout()
         assert_contract(
             &result,
             "presentation-only",
-            "debug/admin prototype",
+            "blocked-on-marrow",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1229,17 +1144,17 @@ pub fn shout()
 
     #[test]
     fn run_executes_shelf_fixture_main() {
-        let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/shelf/src/shelf/sample.mw")
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/shelf")
             .canonicalize()
             .expect("the shelf fixture exists");
-        let result = run(
-            &file,
-            Some("shelf::sample::main"),
-            &[],
-            RunMode::Run,
-            RunArgsPolicy::StableTypedFactsOnly,
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src/shelf");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::copy(fixture.join("marrow.json"), dir.path().join("marrow.json")).unwrap();
+        std::fs::copy(fixture.join("src/shelf/sample.mw"), src.join("sample.mw")).unwrap();
+        let file = src.join("sample.mw");
+        let result = run(&file, Some("shelf::sample::main"), &[], RunMode::Run);
         assert_eq!(result["diagnostics"], json!([]), "{result}");
         assert!(
             result["output"].as_str().unwrap().contains("Small Gods"),
@@ -1256,30 +1171,27 @@ pub fn shout()
     }
 
     #[test]
-    fn run_passes_a_string_argument() {
+    fn run_blocks_string_arguments() {
         let (_dir, file) = project();
         let result = run(
             &file,
             Some("shelf::books::greet"),
             &[json!("Ada")],
             RunMode::Run,
-            RunArgsPolicy::AllowPrototypeScalars,
         );
-        assert_eq!(result["value"], "hi Ada", "{result}");
+        let message = result["diagnostics"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("typed run argument facts from Marrow"),
+            "string args should be blocked: {result}"
+        );
     }
 
     #[test]
     fn run_does_not_touch_the_real_store() {
         // The project pins a native store; a run that would write must use a fresh
-        // MemStore, so the on-disk store file is never created by a run.
+        // TreeStore, so the on-disk store file is never created by a run.
         let (dir, file) = project();
-        let _ = run(
-            &file,
-            Some("shelf::books::double"),
-            &[json!(1)],
-            RunMode::Run,
-            RunArgsPolicy::AllowPrototypeScalars,
-        );
+        let _ = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
         let store_file = dir.path().join("data").join("marrow.redb");
         assert!(
             !store_file.exists(),
@@ -1305,13 +1217,7 @@ pub fn fails()
 ",
         )
         .unwrap();
-        let result = run(
-            &file,
-            None,
-            &[],
-            RunMode::Test,
-            RunArgsPolicy::StableTypedFactsOnly,
-        );
+        let result = run(&file, None, &[], RunMode::Test);
         let tests = result["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 2, "two test functions discovered: {result}");
         let doubles = tests
@@ -1330,7 +1236,7 @@ pub fn fails()
         assert_contract(
             &result,
             "presentation-only",
-            "debug/admin prototype",
+            "blocked-on-marrow",
             &[
                 "canonical function-entry facts",
                 "transitive effect facts",
@@ -1343,15 +1249,9 @@ pub fn fails()
     }
 
     #[test]
-    fn run_test_mode_ignores_args_without_prototype_policy() {
+    fn run_test_mode_ignores_args() {
         let (_dir, file) = project();
-        let result = run(
-            &file,
-            None,
-            &[json!(1)],
-            RunMode::Test,
-            RunArgsPolicy::StableTypedFactsOnly,
-        );
+        let result = run(&file, None, &[json!(1)], RunMode::Test);
         assert_eq!(result["diagnostics"], json!([]), "{result}");
         assert!(
             result["tests"].as_array().is_some(),
@@ -1368,35 +1268,7 @@ pub fn fails()
         assert_contract(
             &roots,
             "blocked-on-marrow",
-            "debug/admin prototype",
-            &[
-                "catalog-bound saved-place identity",
-                "typed children",
-                "cursor/page facts",
-                "snapshot/store generation",
-                "stable data DTOs",
-            ],
-        );
-        let got = saved_get(&file, json!([{ "root": "books" }]), false);
-        assert_eq!(got["dataAccess"], "disabled");
-        assert_contract(
-            &got,
             "blocked-on-marrow",
-            "debug/admin prototype",
-            &[
-                "catalog-bound saved-place identity",
-                "typed children",
-                "cursor/page facts",
-                "snapshot/store generation",
-                "stable data DTOs",
-            ],
-        );
-        let children = saved_children(&file, json!([]), false);
-        assert_eq!(children["dataAccess"], "disabled");
-        assert_contract(
-            &children,
-            "blocked-on-marrow",
-            "debug/admin prototype",
             &[
                 "catalog-bound saved-place identity",
                 "typed children",
@@ -1418,101 +1290,5 @@ pub fn fails()
                 "typed repair or drift facts",
             ],
         );
-    }
-
-    #[test]
-    fn data_integrity_flags_an_orphan_under_an_undeclared_field() {
-        let (dir, file) = project();
-        // The project declares `^books(id).title`; seed an extra `^books(1).sticker`
-        // the schema does not declare, so the scan flags it as an orphan.
-        let store_path = dir.path().join("data").join("marrow.redb");
-        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
-        {
-            let mut store = RedbStore::open(&store_path).unwrap();
-            let title = encode_path(&[
-                PathSegment::Root("books".to_string()),
-                PathSegment::RecordKey(SavedKey::Int(1)),
-                PathSegment::Field("title".to_string()),
-            ]);
-            store.write(&title, b"Mort".to_vec()).unwrap();
-            let orphan = encode_path(&[
-                PathSegment::Root("books".to_string()),
-                PathSegment::RecordKey(SavedKey::Int(1)),
-                PathSegment::Field("sticker".to_string()),
-            ]);
-            store.write(&orphan, b"gold".to_vec()).unwrap();
-        }
-        let result = data_integrity(&file, true);
-        assert_eq!(result["available"], true, "{result}");
-        let findings = result["findings"].as_array().unwrap();
-        assert_eq!(findings.len(), 1, "one orphan finding: {result}");
-        assert_eq!(findings[0]["kind"], "orphan");
-        assert_eq!(findings[0]["path"], "^books(1).sticker");
-        assert_eq!(result["truncated"], false);
-    }
-
-    #[test]
-    fn data_integrity_is_clean_on_a_matching_store() {
-        let (dir, file) = project();
-        let store_path = dir.path().join("data").join("marrow.redb");
-        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
-        {
-            let mut store = RedbStore::open(&store_path).unwrap();
-            let title = encode_path(&[
-                PathSegment::Root("books".to_string()),
-                PathSegment::RecordKey(SavedKey::Int(1)),
-                PathSegment::Field("title".to_string()),
-            ]);
-            store.write(&title, b"Mort".to_vec()).unwrap();
-        }
-        let result = data_integrity(&file, true);
-        assert_eq!(result["available"], true, "{result}");
-        assert!(
-            result["findings"].as_array().unwrap().is_empty(),
-            "{result}"
-        );
-    }
-
-    #[test]
-    fn data_tools_answer_when_enabled_against_a_seeded_store() {
-        let (dir, file) = project();
-        // Seed `^books(1).title = "Mort"` into the native store the project pins.
-        let store_path = dir.path().join("data").join("marrow.redb");
-        std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
-        {
-            let mut store = RedbStore::open(&store_path).unwrap();
-            let title = encode_path(&[
-                PathSegment::Root("books".to_string()),
-                PathSegment::RecordKey(SavedKey::Int(1)),
-                PathSegment::Field("title".to_string()),
-            ]);
-            store.write(&title, b"Mort".to_vec()).unwrap();
-        }
-
-        let roots = saved_roots(&file, true);
-        assert_eq!(
-            roots["available"], true,
-            "seeded store is readable: {roots}"
-        );
-        assert!(
-            roots["roots"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|r| r == "books")
-        );
-
-        let got = saved_get(
-            &file,
-            json!([{ "root": "books" }, { "key": { "int": 1 } }, { "field": "title" }]),
-            true,
-        );
-        assert_eq!(got["available"], true, "{got}");
-        assert_eq!(got["value"], "\"Mort\"");
-        assert_eq!(got["type"], "string");
-
-        let children = saved_children(&file, json!([{ "root": "books" }]), true);
-        assert_eq!(children["available"], true, "{children}");
-        assert_eq!(children["children"][0]["key"]["int"], 1);
     }
 }

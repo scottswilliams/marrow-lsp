@@ -1,31 +1,26 @@
-//! Hover: the checked fact under the cursor, as a `marrow` code block.
+//! Hover: presentation over checked facts, as a `marrow` code block.
 //!
 //! An editor sends a byte offset (already converted from an LSP position by the
-//! document's [`LineIndex`](crate::positions::LineIndex)); this renders resolved
-//! function symbols from the binding index, or asks the checker for the expression
-//! type there with [`marrow_check::type_at`]. The rendered code is fenced as
-//! `marrow` so the client shows it with `.mw` syntax highlighting. The facts come
-//! only from the checker — this module never re-infers anything.
+//! document's [`LineIndex`](crate::positions::LineIndex)). Positive semantic hovers
+//! render checker facts such as binding-index symbols and expression types. Local
+//! token and parse inspection only decides presentation targets or suppresses
+//! surfaces whose canonical Marrow facts are not exposed yet.
 
 use std::path::Path;
 
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedConst, CheckedFacts, CheckedFunction, CheckedModule,
-    CheckedParam, DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution, ResolvableKind,
-    SavedPlaceEffect, SymbolKind, SymbolRef, build_alias_map, build_binding_index,
-    expand_module_alias, resolve, type_at,
+    AnalysisSnapshot, BindingIndex, CheckedConst, CheckedFacts, CheckedFunction, CheckedParam,
+    CheckedParamMode, DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution,
+    ResolvableKind, SavedPlaceEffect, SymbolKind, SymbolRef, build_binding_index, resolve, type_at,
 };
 use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema, stdlib};
-use marrow_store::backend::Presence;
 use marrow_syntax::{
     Block, Declaration, EnumDecl, EnumMember, FunctionDecl, IndexDecl, KeyParam, Keyword,
-    ParamMode, ResourceDecl, ResourceMember, SourceSpan, Statement, StoreDecl, TokenKind, TypeRef,
-    lex_source,
+    ResourceDecl, ResourceMember, SourceSpan, Statement, StoreDecl, TokenKind, TypeRef, lex_source,
 };
 
 use crate::language_facts;
-use crate::store::{Availability, StoreReader, StoredValue, saved_path_at};
 use crate::types::render_type;
 
 /// The hover for byte `offset` in `file`, or `None` when no known symbol or type
@@ -35,17 +30,15 @@ use crate::types::render_type;
 /// offset no expression covers) yields `None`, so the editor shows nothing.
 pub fn hover(snapshot: &AnalysisSnapshot, file: &Path, offset: usize) -> Option<Hover> {
     let index = build_binding_index(snapshot);
-    hover_with_index(snapshot, &index, file, offset, None)
+    hover_with_index(snapshot, &index, file, offset)
 }
 
-/// The hover for byte `offset`, using `index` for resolved symbol facts and
-/// `reader` for optional live stored data.
+/// The hover for byte `offset`, using `index` for resolved symbol facts.
 pub fn hover_with_index(
     snapshot: &AnalysisSnapshot,
     index: &BindingIndex,
     file: &Path,
     offset: usize,
-    reader: Option<&StoreReader>,
 ) -> Option<Hover> {
     if let Some(value) = default_library_call_hover(snapshot, file, offset) {
         return Some(markdown_hover(default_library_hover_markdown(&value)));
@@ -53,7 +46,7 @@ pub fn hover_with_index(
     if let Some(value) = operator_hover(snapshot, file, offset) {
         return Some(markdown_hover(default_library_hover_markdown(&value)));
     }
-    if let Some(value) = function_hover(snapshot, index, file, offset, reader) {
+    if let Some(value) = function_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
     if let Some(value) = parameter_hover(snapshot, index, file, offset) {
@@ -62,106 +55,51 @@ pub fn hover_with_index(
     if let Some(value) = module_const_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
-    if let Some(value) = project_module_hover(snapshot, index, file, offset) {
+    if blocked_module_prefix_hover(snapshot, index, file, offset) {
+        return None;
+    }
+    if let Some(value) = store_root_declaration_hover(snapshot, file, offset) {
         return Some(markdown_hover(value));
     }
-    if let Some(value) = saved_root_hover(snapshot, file, offset, reader) {
+    if let Some(value) = rich_symbol_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
-    if let Some(value) = store_root_declaration_hover(snapshot, file, offset, reader) {
+    if let Some(value) = resource_member_hover(snapshot, index, file, offset) {
         return Some(markdown_hover(value));
     }
-    if let Some(value) = rich_symbol_hover(snapshot, index, file, offset, reader) {
+    if let Some(value) = resource_constructor_hover(snapshot, file, offset) {
         return Some(markdown_hover(value));
     }
-    if let Some(value) = resource_member_hover(snapshot, index, file, offset, reader) {
-        return Some(markdown_hover(value));
-    }
-    if let Some(value) = resource_constructor_hover(snapshot, file, offset, reader) {
-        return Some(markdown_hover(value));
-    }
-    if let Some(value) = type_name_hover(snapshot, file, offset, reader) {
+    if let Some(value) = type_name_hover(snapshot, file, offset) {
         return Some(markdown_hover(value));
     }
     let docs = symbol_docs_at_hover_target(snapshot, index, file, offset);
-    hover_with_live(snapshot, file, offset, docs.as_deref(), reader)
+    hover_with_docs(snapshot, file, offset, docs.as_deref())
 }
 
-fn project_module_hover(
+fn blocked_module_prefix_hover(
     snapshot: &AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<String> {
-    let module_name = project_module_name_at(snapshot, index, file, offset)?;
-    let module = snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| !module.name.is_empty() && module.name == module_name)?;
-    Some(project_module_hover_markdown(module))
-}
-
-fn project_module_name_at(
-    snapshot: &AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<String> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-    let (segments, cursor_segment, declaration) =
-        module_path_at_with_position(&analyzed.source, offset)?;
-    if declaration {
-        return Some(segments[..=cursor_segment].join("::"));
-    }
-    if binding_index_should_win_project_module_hover(index, file, offset) {
-        return None;
-    }
-    if cursor_segment + 1 == segments.len() {
-        return None;
-    }
-    let prefix = segments[..=cursor_segment].join("::");
-    let current = snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == file)?;
-    let aliases = build_alias_map(&current.imports);
-    Some(expand_module_alias(&prefix, &aliases))
-}
-
-fn binding_index_should_win_project_module_hover(
     index: &BindingIndex,
     file: &Path,
     offset: usize,
 ) -> bool {
-    let Some(symbol) = index.definition(file, offset) else {
+    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
         return false;
     };
-    matches!(symbol.kind, SymbolKind::Enum | SymbolKind::EnumMember)
-}
-
-fn project_module_hover_markdown(module: &CheckedModule) -> String {
-    let mut value = marrow_code_block(&format!("module {}", module.name));
-    value.push_str("\n\n**Project module**");
-
-    let mut facts = Vec::new();
-    push_module_count(&mut facts, module.functions.len(), "function", "functions");
-    push_module_count(&mut facts, module.resources.len(), "resource", "resources");
-    push_module_count(&mut facts, module.enums.len(), "enum", "enums");
-    if !facts.is_empty() {
-        value.push('\n');
-        value.push_str(&facts.join("\n"));
+    let Some((segments, cursor_segment, declaration)) =
+        module_path_at_with_position(&analyzed.source, offset)
+    else {
+        return false;
+    };
+    if declaration || cursor_segment + 1 == segments.len() {
+        return false;
     }
-    value
-}
-
-fn push_module_count(lines: &mut Vec<String>, count: usize, singular: &str, plural: &str) {
-    match count {
-        0 => {}
-        1 => lines.push(format!("- 1 {singular}")),
-        _ => lines.push(format!("- {count} {plural}")),
+    if let Some(symbol) = index.definition(file, offset)
+        && matches!(symbol.kind, SymbolKind::Enum | SymbolKind::EnumMember)
+    {
+        return false;
     }
+    true
 }
 
 fn rich_symbol_hover(
@@ -169,7 +107,6 @@ fn rich_symbol_hover(
     index: &BindingIndex,
     file: &Path,
     offset: usize,
-    reader: Option<&StoreReader>,
 ) -> Option<String> {
     let symbol = index.definition(file, offset)?;
     if !is_rich_symbol_hover_target(snapshot, index, file, offset, &symbol) {
@@ -178,7 +115,7 @@ fn rich_symbol_hover(
     match symbol.kind {
         SymbolKind::Resource => {
             let schema = resource_schema_for_symbol(snapshot, &symbol)?;
-            Some(resource_hover(schema, reader))
+            Some(resource_hover(schema))
         }
         SymbolKind::Enum => {
             let schema = enum_schema_for_symbol(snapshot, &symbol)?;
@@ -192,12 +129,7 @@ fn rich_symbol_hover(
     }
 }
 
-fn type_name_hover(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    reader: Option<&StoreReader>,
-) -> Option<String> {
+fn type_name_hover(snapshot: &AnalysisSnapshot, file: &Path, offset: usize) -> Option<String> {
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     if type_at(&snapshot.program, file, &analyzed.parsed, offset).is_some() {
         return None;
@@ -208,7 +140,7 @@ fn type_name_hover(
     let (segments, segment_index) = qualified_name_at_with_position(&analyzed.source, offset)?;
     if segment_index + 1 == segments.len() {
         if let Some(schema) = resource_schema_for_type_name(snapshot, file, &segments) {
-            return Some(resource_hover(schema, reader));
+            return Some(resource_hover(schema));
         }
         if let Some(schema) = enum_schema_for_type_name(snapshot, file, &segments) {
             return Some(enum_hover(schema));
@@ -217,35 +149,16 @@ fn type_name_hover(
     None
 }
 
-fn saved_root_hover(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    reader: Option<&StoreReader>,
-) -> Option<String> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-    let segments = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)?;
-    let Some(marrow_store::path::PathSegment::Root(root)) = segments.first() else {
-        return None;
-    };
-    if !offset_is_on_saved_root(&analyzed.source, offset, root) {
-        return None;
-    }
-    let (store, resource) = marrow_check::resolve::resolve_store_by_root(&snapshot.program, root)?;
-    Some(store_hover(store, resource, reader))
-}
-
 fn store_root_declaration_hover(
     snapshot: &AnalysisSnapshot,
     file: &Path,
     offset: usize,
-    reader: Option<&StoreReader>,
 ) -> Option<String> {
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     let store = store_root_at(&analyzed.parsed.file, &analyzed.source, offset)?;
-    let (store_schema, resource) =
+    let store_resource =
         marrow_check::resolve::resolve_store_by_root(&snapshot.program, &store.root.root)?;
-    Some(store_hover(store_schema, resource, reader))
+    Some(store_hover(store_resource.store, store_resource.resource))
 }
 
 fn resource_member_hover(
@@ -253,7 +166,6 @@ fn resource_member_hover(
     index: &BindingIndex,
     file: &Path,
     offset: usize,
-    reader: Option<&StoreReader>,
 ) -> Option<String> {
     let symbol = index.definition(file, offset)?;
     if !matches!(
@@ -265,7 +177,7 @@ fn resource_member_hover(
     }
 
     let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let mut value = if symbol.kind == SymbolKind::Index {
+    let value = if symbol.kind == SymbolKind::Index {
         let index = store_index_at(&parsed_file.parsed.file, symbol.span)?;
         let mut value = marrow_code_block(&index_signature(index));
         append_docs(&mut value, join_docs(&index.docs));
@@ -277,15 +189,6 @@ fn resource_member_hover(
         value
     };
 
-    if let Some(reader) = reader
-        && let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file)
-        && let Some(segments) = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)
-        && let Some(line) = live_value_line(reader, &segments, &snapshot.program)
-    {
-        value.push_str("\n\n");
-        value.push_str(&line);
-    }
-
     Some(value)
 }
 
@@ -293,7 +196,6 @@ fn resource_constructor_hover(
     snapshot: &AnalysisSnapshot,
     file: &Path,
     offset: usize,
-    reader: Option<&StoreReader>,
 ) -> Option<String> {
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     if !is_resource_constructor_leaf(&analyzed.source, offset) {
@@ -308,7 +210,7 @@ fn resource_constructor_hover(
         ResolvableKind::Resource,
     ) {
         Resolution::Found(def) => match def.item {
-            DefItem::Resource(schema) => Some(resource_hover(schema, reader)),
+            DefItem::Resource(schema) => Some(resource_hover(schema)),
             _ => None,
         },
         _ => None,
@@ -330,43 +232,25 @@ fn symbol_docs_at_hover_target(
     symbol_docs(snapshot, index, file, offset)
 }
 
-/// The hover for byte `offset`, augmented with the symbol's documentation and the
-/// live stored value when each is available.
+/// The hover for byte `offset`, augmented with the symbol's documentation when
+/// available.
 ///
 /// The type always comes from the checker and is shown first. `docs`, when
 /// present, is the symbol's `;;` description rendered as a paragraph below the
-/// type. When `reader` is `Some` and the cursor resolves to a concrete saved path,
-/// a final line shows the live value (a typed scalar, `N records`, `present`, or
-/// `absent`). A store that is `Unavailable` (locked, corrupt, missing) adds
-/// nothing — the hover shows only the type and docs, never an error. Passing
-/// `None` for `reader` disables live data entirely (the `marrow.liveData` setting
-/// is off, or no native store is configured); passing `None` for `docs` omits the
-/// description (the symbol has none, or is a local/parameter that carries none).
-pub fn hover_with_live(
+/// type.
+fn hover_with_docs(
     snapshot: &AnalysisSnapshot,
     file: &Path,
     offset: usize,
     docs: Option<&str>,
-    reader: Option<&StoreReader>,
 ) -> Option<Hover> {
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     let ty = type_at(&snapshot.program, file, &analyzed.parsed, offset)?;
     let mut value = marrow_code_block(&render_type(&ty));
 
-    // The documentation paragraph sits between the type and any live value: the
-    // type is the primary fact, the docs explain the symbol, the live value is
-    // the current store reading.
     if let Some(docs) = docs {
         value.push_str("\n\n");
         value.push_str(docs);
-    }
-
-    if let Some(reader) = reader
-        && let Some(segments) = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)
-        && let Some(line) = live_value_line(reader, &segments, &snapshot.program)
-    {
-        value.push_str("\n\n");
-        value.push_str(&line);
     }
 
     Some(markdown_hover(value))
@@ -377,7 +261,6 @@ fn function_hover(
     index: &BindingIndex,
     file: &Path,
     offset: usize,
-    reader: Option<&StoreReader>,
 ) -> Option<String> {
     let symbol = index.definition(file, offset)?;
     if symbol.kind != SymbolKind::Function
@@ -404,15 +287,6 @@ fn function_hover(
     if let Some(effects) = direct_effects_hover(snapshot, &symbol, checked_function) {
         value.push_str("\n\n");
         value.push_str(&effects);
-    }
-
-    if let Some(reader) = reader
-        && let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file)
-        && let Some(segments) = saved_path_at(&analyzed.parsed.file, &snapshot.program, offset)
-        && let Some(line) = live_value_line(reader, &segments, &snapshot.program)
-    {
-        value.push_str("\n\n");
-        value.push_str(&line);
     }
 
     Some(value)
@@ -758,8 +632,9 @@ fn is_rich_symbol_hover_target(
                 || is_resource_declaration_name(snapshot, file, offset, symbol)
         }
         SymbolKind::Enum => {
-            is_named_symbol_reference(snapshot, index, file, offset, symbol)
-                || is_enum_declaration_name(snapshot, file, offset, symbol)
+            !blocked_enum_type_symbol_hover(snapshot, file, offset, symbol)
+                && (is_named_symbol_reference(snapshot, index, file, offset, symbol)
+                    || is_enum_declaration_name(snapshot, file, offset, symbol))
         }
         SymbolKind::EnumMember => {
             is_named_symbol_reference(snapshot, index, file, offset, symbol)
@@ -767,6 +642,24 @@ fn is_rich_symbol_hover_target(
         }
         _ => false,
     }
+}
+
+fn blocked_enum_type_symbol_hover(
+    snapshot: &AnalysisSnapshot,
+    file: &Path,
+    offset: usize,
+    symbol: &SymbolRef,
+) -> bool {
+    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
+        return false;
+    };
+    if !is_type_annotation_target(&analyzed.parsed.file, offset) {
+        return false;
+    }
+    let Some((segments, _)) = qualified_name_at_with_position(&analyzed.source, offset) else {
+        return false;
+    };
+    segments.len() > 1 || symbol.file != file
 }
 
 fn is_named_symbol_reference(
@@ -923,20 +816,6 @@ fn saved_root_span(source: &str, span: SourceSpan, root: &str) -> Option<(usize,
         } else {
             None
         }
-    })
-}
-
-fn offset_is_on_saved_root(source: &str, offset: usize, root: &str) -> bool {
-    let tokens = lex_source(source).tokens;
-    tokens.windows(2).any(|pair| {
-        let [previous, token] = pair else {
-            return false;
-        };
-        previous.kind == TokenKind::Caret
-            && token.kind == TokenKind::Identifier
-            && token.text(source) == root
-            && previous.span.start_byte <= offset
-            && offset <= token.span.end_byte
     })
 }
 
@@ -1120,8 +999,7 @@ fn function_signature(function: &CheckedFunction) -> String {
         .iter()
         .map(|param| {
             let mode = match param.mode {
-                Some(ParamMode::Out) => "out ",
-                Some(ParamMode::InOut) => "inout ",
+                Some(CheckedParamMode::InOut) => "inout ",
                 None => "",
             };
             format!("{mode}{}: {}", param.name, render_type(&param.ty))
@@ -1136,8 +1014,7 @@ fn function_signature(function: &CheckedFunction) -> String {
 
 fn parameter_signature(param: &CheckedParam) -> String {
     let mode = match param.mode {
-        Some(ParamMode::Out) => "out ",
-        Some(ParamMode::InOut) => "inout ",
+        Some(CheckedParamMode::InOut) => "inout ",
         None => "",
     };
     format!("{mode}{}: {}", param.name, render_type(&param.ty))
@@ -1246,73 +1123,10 @@ fn enum_schema_for_type_name<'a>(
     segments: &[String],
 ) -> Option<&'a EnumSchema> {
     match segments {
-        [name] => enum_schema_visible_by_bare_name(snapshot, file, name),
-        [.., name] => {
-            let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-            let imports = analyzed
-                .parsed
-                .file
-                .uses
-                .iter()
-                .map(|use_decl| use_decl.name.clone())
-                .collect::<Vec<_>>();
-            let aliases = build_alias_map(&imports);
-            let prefix = segments[..segments.len() - 1].join("::");
-            let module_name = expand_module_alias(&prefix, &aliases);
-            enum_schema_in_visible_module(snapshot, file, &module_name, name)
-        }
+        [name] => enum_schema_in_file(snapshot, file, name),
         [] => None,
+        [_, ..] => None,
     }
-}
-
-fn enum_schema_visible_by_bare_name<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    name: &str,
-) -> Option<&'a EnumSchema> {
-    let current_module = module_name_for_file(snapshot, file);
-    if let Some(schema) =
-        current_module.and_then(|module| enum_schema_in_module(snapshot, module, name))
-    {
-        return Some(schema);
-    }
-    snapshot
-        .program
-        .modules
-        .iter()
-        .filter(|module| Some(module.name.as_str()) != current_module && !module.name.is_empty())
-        .find_map(|module| {
-            let schema = module
-                .enums
-                .iter()
-                .find(|enum_schema| enum_schema.name == name)?;
-            enum_is_public(module, name).then_some(schema)
-        })
-}
-
-fn enum_schema_in_visible_module<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    module_name: &str,
-    name: &str,
-) -> Option<&'a EnumSchema> {
-    let current_module = module_name_for_file(snapshot, file);
-    let module = snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.name == module_name)?;
-    if Some(module.name.as_str()) != current_module && !enum_is_public(module, name) {
-        return None;
-    }
-    module
-        .enums
-        .iter()
-        .find(|enum_schema| enum_schema.name == name)
-}
-
-fn enum_is_public(module: &marrow_check::CheckedModule, name: &str) -> bool {
-    module.enum_public.get(name).copied().unwrap_or(true)
 }
 
 fn module_name_for_file<'a>(snapshot: &'a AnalysisSnapshot, file: &Path) -> Option<&'a str> {
@@ -1322,21 +1136,6 @@ fn module_name_for_file<'a>(snapshot: &'a AnalysisSnapshot, file: &Path) -> Opti
         .iter()
         .find(|module| module.source_file == file)
         .map(|module| module.name.as_str())
-}
-
-fn enum_schema_in_module<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    module_name: &str,
-    name: &str,
-) -> Option<&'a EnumSchema> {
-    snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.name == module_name)?
-        .enums
-        .iter()
-        .find(|enum_schema| enum_schema.name == name)
 }
 
 fn enum_member_path_at(
@@ -1366,18 +1165,14 @@ fn enum_member_path_in(members: &[EnumMember], span: SourceSpan, path: &mut Vec<
     false
 }
 
-fn resource_hover(schema: &ResourceSchema, _reader: Option<&StoreReader>) -> String {
+fn resource_hover(schema: &ResourceSchema) -> String {
     let mut value = marrow_code_block(&resource_signature(schema));
     append_docs(&mut value, join_docs(&schema.docs));
     append_section(&mut value, resource_member_summary(schema, &[]));
     value
 }
 
-fn store_hover(
-    store: &StoreSchema,
-    resource: &ResourceSchema,
-    reader: Option<&StoreReader>,
-) -> String {
+fn store_hover(store: &StoreSchema, resource: &ResourceSchema) -> String {
     let mut value = marrow_code_block(&store_signature(store));
     append_docs(&mut value, join_docs(&store.docs));
     append_section(&mut value, identity_summary(store));
@@ -1385,12 +1180,6 @@ fn store_hover(
         &mut value,
         resource_member_summary(resource, &store.indexes),
     );
-    if let Some(reader) = reader
-        && let Availability::Available(count) = reader.record_count(&store.root)
-    {
-        value.push_str("\n\n");
-        value.push_str(&live_advisory_line(count.display()));
-    }
     value
 }
 
@@ -1594,7 +1383,7 @@ fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> b
                     .is_some_and(|ty| type_ref_covers(ty, offset))
                 || block_type_annotation_at(&function.body, offset)
         }
-        Declaration::Enum(_) => false,
+        Declaration::Enum(_) | Declaration::Evolve(_) => false,
     }
 }
 
@@ -1650,8 +1439,7 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
         }
         Statement::While { body, .. }
         | Statement::For { body, .. }
-        | Statement::Transaction { body, .. }
-        | Statement::Lock { body, .. } => block_type_annotation_at(body, offset),
+        | Statement::Transaction { body, .. } => block_type_annotation_at(body, offset),
         Statement::Try {
             body,
             catch,
@@ -1675,7 +1463,6 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
             .any(|arm| block_type_annotation_at(&arm.block, offset)),
         Statement::Assign { .. }
         | Statement::Delete { .. }
-        | Statement::Merge { .. }
         | Statement::Return { .. }
         | Statement::Break { .. }
         | Statement::Continue { .. }
@@ -2204,44 +1991,6 @@ fn join_docs(lines: &[String]) -> Option<String> {
     }
 }
 
-/// The debug/admin advisory line for a resolved saved path, or `None` when the
-/// store is unavailable so the hover stays type-only. A root path shows its
-/// record count; any other path shows its presence and, for a stored value, the
-/// typed value.
-fn live_value_line(
-    reader: &StoreReader,
-    segments: &[marrow_store::path::PathSegment],
-    program: &marrow_check::CheckedProgram,
-) -> Option<String> {
-    use marrow_store::path::PathSegment;
-    // A bare `^root` reads as the record count, the useful fact at a root.
-    if let [PathSegment::Root(root)] = segments {
-        return match reader.record_count(root) {
-            Availability::Available(count) => Some(live_advisory_line(count.display())),
-            Availability::Unavailable => None,
-        };
-    }
-    match reader.get(segments, program) {
-        Availability::Available(stored) => Some(live_advisory_line(present(&stored))),
-        Availability::Unavailable => None,
-    }
-}
-
-fn live_advisory_line(value: impl std::fmt::Display) -> String {
-    const LIVE_ADVISORY_LABEL: &str = "**debug/admin live data (advisory)**";
-    format!("{LIVE_ADVISORY_LABEL}: {value}")
-}
-
-/// The live-value text for a non-root path: the stored value when one is present,
-/// else a presence word.
-fn present(stored: &StoredValue) -> String {
-    match (&stored.value, stored.presence) {
-        (Some(value), _) => value.clone(),
-        (None, Presence::ChildrenOnly | Presence::ValueAndChildren) => "present".to_string(),
-        (None, Presence::Absent | Presence::ValueOnly) => "absent".to_string(),
-    }
-}
-
 /// Wrap `code` in a fenced `marrow` block so the client renders it as `.mw`.
 fn marrow_code_block(code: &str) -> String {
     format!("```marrow\n{code}\n```")
@@ -2304,7 +2053,7 @@ mod tests {
         needle: &str,
     ) -> String {
         let offset = offset_of(source, needle);
-        let hover = hover_with_index(snapshot, index, file, offset, None).expect("a hover");
+        let hover = hover_with_index(snapshot, index, file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -2317,7 +2066,7 @@ mod tests {
         file: &std::path::Path,
         offset: usize,
     ) -> Option<String> {
-        let hover = hover_with_index(snapshot, index, file, offset, None)?;
+        let hover = hover_with_index(snapshot, index, file, offset)?;
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -2360,7 +2109,7 @@ pub fn f(first: int, second: string): string
         let source = "\
 module a
 
-pub fn fill(out value: int)
+pub fn fill(inout value: int)
     value = 1
 ";
         let (snapshot, file) = analyze(source);
@@ -2370,7 +2119,7 @@ pub fn fill(out value: int)
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup contents");
         };
-        assert_eq!(markup.value, "```marrow\nout value: int\n```");
+        assert_eq!(markup.value, "```marrow\ninout value: int\n```");
     }
 
     #[test]
@@ -2826,7 +2575,7 @@ pub fn f(): int
             .expect("a hover over the std::text module segment");
         assert!(
             text_value.starts_with("```marrow\nstd::text\n```"),
-            "std::text module hover should lead with the module path: {text_value}"
+            "std::text default-library docs should lead with the module path: {text_value}"
         );
         assert!(
             text_value.contains("default library module"),
@@ -2946,7 +2695,7 @@ pub fn run(): int
     }
 
     #[test]
-    fn hover_over_project_module_leaf_in_use_shows_project_module_context() {
+    fn hover_over_project_module_leaf_in_use_is_blocked_without_canonical_fact() {
         let books_source = "\
 module shelf::books
 
@@ -2970,16 +2719,9 @@ pub fn run(): string
         );
         let index = index_for(&snapshot);
         let leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
-        let value = hover_value_at(&snapshot, &index, &file, leaf + 1)
-            .expect("a hover over the imported module leaf");
-
         assert!(
-            value.starts_with("```marrow\nmodule shelf::books\n```"),
-            "module hover should lead with the imported module path: {value}"
-        );
-        assert!(
-            value.contains("Project module"),
-            "module hover should identify project-module context: {value}"
+            hover_value_at(&snapshot, &index, &file, leaf + 1).is_none(),
+            "module/use path hover stays unavailable until Marrow exposes canonical module-path facts"
         );
     }
 
@@ -3009,24 +2751,9 @@ pub fn run(): string
         );
         let index = index_for(&snapshot);
         let call = offset_of(app_source, "books::titleOf()");
-        let qualifier = hover_value_at(&snapshot, &index, &file, call + 1)
-            .expect("a hover over the imported module qualifier");
-
         assert!(
-            qualifier.starts_with("```marrow\nmodule shelf::books\n```"),
-            "module qualifier should show its project module: {qualifier}"
-        );
-        assert!(
-            qualifier.contains("Project module"),
-            "module qualifier should identify project-module context: {qualifier}"
-        );
-        assert!(
-            !qualifier.contains("fn titleOf("),
-            "module qualifier should not pretend to be the function leaf: {qualifier}"
-        );
-        assert!(
-            !qualifier.contains("Formats a book title."),
-            "module qualifier should not inherit function docs: {qualifier}"
+            hover_value_at(&snapshot, &index, &file, call + 1).is_none(),
+            "module-prefix hover stays blocked until Marrow exposes canonical prefix facts"
         );
 
         let leaf = call + "books::".len();
@@ -3067,16 +2794,9 @@ pub fn run(): string
         let index = index_for(&snapshot);
         let call = offset_of(app_source, "shelf::books::titleOf()");
         let books = call + "shelf::".len();
-        let qualifier = hover_value_at(&snapshot, &index, &file, books + 1)
-            .expect("a hover over the fully qualified module segment");
-
         assert!(
-            qualifier.starts_with("```marrow\nmodule shelf::books\n```"),
-            "fully qualified module segment should show the project module: {qualifier}"
-        );
-        assert!(
-            qualifier.contains("Project module"),
-            "fully qualified module segment should identify project-module context: {qualifier}"
+            hover_value_at(&snapshot, &index, &file, books + 1).is_none(),
+            "fully qualified module-prefix hover stays blocked until canonical prefix facts exist"
         );
 
         let leaf = call + "shelf::books::".len();
@@ -3119,28 +2839,9 @@ pub fn status(): state::Status
         );
         let index = index_for(&snapshot);
         let qualifier = offset_of(app_source, "state::Status::open");
-        let value = hover_value_at(&snapshot, &index, &file, qualifier + 1)
-            .expect("a hover over the module qualifier");
-
         assert!(
-            value.starts_with("```marrow\nmodule shelf::state\n```"),
-            "module qualifier should show module context: {value}"
-        );
-        assert!(
-            value.contains("Project module"),
-            "module qualifier should identify project-module context: {value}"
-        );
-        assert!(
-            !value.starts_with("```marrow\nenum Status\n```"),
-            "module qualifier should not pretend to be the enum: {value}"
-        );
-        assert!(
-            !value.contains("Publication state."),
-            "module qualifier should not inherit enum docs: {value}"
-        );
-        assert!(
-            !value.contains("Open for edits."),
-            "module qualifier should not inherit enum member docs: {value}"
+            hover_value_at(&snapshot, &index, &file, qualifier + 1).is_none(),
+            "qualified enum module-prefix hover stays blocked until canonical prefix facts exist"
         );
     }
 
@@ -3222,7 +2923,7 @@ pub fn load(): book::Id
     }
 
     #[test]
-    fn hover_over_project_std_text_module_without_builtin_dispatch_is_project_context() {
+    fn hover_over_project_std_text_module_without_builtin_dispatch_is_blocked() {
         let std_text_source = "\
 module std::text
 
@@ -3242,20 +2943,9 @@ pub fn run(): int
         );
         let index = index_for(&snapshot);
         let text = offset_of(app_source, "std::text::custom") + "std::".len();
-        let module = hover_value_at(&snapshot, &index, &file, text + 1)
-            .expect("a hover over the project std::text module");
-
         assert!(
-            module.starts_with("```marrow\nmodule std::text\n```"),
-            "project std::text module should lead with the project module path: {module}"
-        );
-        assert!(
-            module.contains("Project module"),
-            "project std::text module should identify project context: {module}"
-        );
-        assert!(
-            !module.contains("default library"),
-            "project std::text module should not get default-library docs without builtin dispatch: {module}"
+            hover_value_at(&snapshot, &index, &file, text + 1).is_none(),
+            "project std::text module-prefix hover stays blocked until canonical prefix facts exist"
         );
 
         let custom = hover_value_at(
@@ -3577,7 +3267,7 @@ pub fn n(): int
         let source = "\
 module a
 
-pub fn fill(out value: int, inout count: int)
+pub fn fill(inout value: int, inout count: int)
     value = count
     count = count + 1
 ";
@@ -3590,7 +3280,7 @@ pub fn fill(out value: int, inout count: int)
         };
         assert_eq!(
             markup.value,
-            "```marrow\nfn fill(out value: int, inout count: int)\n```"
+            "```marrow\nfn fill(inout value: int, inout count: int)\n```"
         );
     }
 
@@ -3709,7 +3399,7 @@ store ^books(id: int): Book
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "resource Book");
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None);
+        let hover = hover_with_index(&snapshot, &index, &file, offset);
         if let Some(Hover {
             contents: HoverContents::Markup(markup),
             ..
@@ -3779,7 +3469,7 @@ pub fn make()
         );
         let index = index_for(&snapshot);
         let call = offset_of(app_source, "state::Book(title");
-        let qualifier_hover = hover_with_index(&snapshot, &index, &file, call + 1, None);
+        let qualifier_hover = hover_with_index(&snapshot, &index, &file, call + 1);
         if let Some(Hover {
             contents: HoverContents::Markup(markup),
             ..
@@ -3793,7 +3483,7 @@ pub fn make()
         }
 
         let leaf_offset = call + "state::".len();
-        let hover = hover_with_index(&snapshot, &index, &file, leaf_offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, leaf_offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -3831,7 +3521,7 @@ pub fn echo(book: Book): Book
 
         for needle in ["book: Book", "): Book", "local: Book"] {
             let offset = offset_of(source, needle) + needle.rfind("Book").unwrap();
-            let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+            let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
             let HoverContents::Markup(markup) = hover.contents else {
                 panic!("expected markup");
             };
@@ -3884,7 +3574,7 @@ pub fn echo(book: Book): Book
         );
         let index = index_for(&snapshot);
         let offset = offset_of(second_source, "book: Book") + "book: ".len();
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -3942,7 +3632,7 @@ pub fn books(items: sequence[state::Book])
         );
         let index = index_for(&snapshot);
         let annotation = offset_of(app_source, "state::Book");
-        let qualifier_hover = hover_with_index(&snapshot, &index, &file, annotation + 1, None);
+        let qualifier_hover = hover_with_index(&snapshot, &index, &file, annotation + 1);
         if let Some(Hover {
             contents: HoverContents::Markup(markup),
             ..
@@ -3956,7 +3646,7 @@ pub fn books(items: sequence[state::Book])
         }
 
         let leaf = annotation + "state::".len();
-        let hover = hover_with_index(&snapshot, &index, &file, leaf, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, leaf).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4033,7 +3723,7 @@ resource Book
     }
 
     #[test]
-    fn hover_over_saved_root_caret_and_chained_use_shows_store_hover() {
+    fn hover_over_saved_root_declaration_shows_store_hover() {
         let source = "\
 module a
 
@@ -4051,11 +3741,9 @@ pub fn f(): string
         let index = index_for(&snapshot);
         let declaration_caret = offset_of(source, "^books");
         let declaration_root = declaration_caret + 1;
-        let use_caret = source.rfind("^books").unwrap();
-        let use_root = use_caret + 1;
 
-        for offset in [declaration_caret, declaration_root, use_caret, use_root] {
-            let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        for offset in [declaration_caret, declaration_root] {
+            let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
             let HoverContents::Markup(markup) = hover.contents else {
                 panic!("expected markup");
             };
@@ -4075,8 +3763,25 @@ pub fn f(): string
             );
         }
 
+        let use_caret = source.rfind("^books").unwrap();
+        let use_root = use_caret + 1;
+        for offset in [use_caret, use_root] {
+            if let Some(hover) = hover_with_index(&snapshot, &index, &file, offset) {
+                let HoverContents::Markup(markup) = hover.contents else {
+                    panic!("expected markup");
+                };
+                assert!(
+                    !markup
+                        .value
+                        .starts_with("```marrow\nstore ^books(id: int): Book\n```"),
+                    "saved root use should not use store hover: {}",
+                    markup.value
+                );
+            }
+        }
+
         let title = source.rfind(").title").unwrap() + ").".len() + 1;
-        let hover = hover_with_index(&snapshot, &index, &file, title, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, title).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4106,7 +3811,7 @@ store ^books(id: int): books
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "^books") + 1;
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4201,7 +3906,7 @@ resource Book
     }
 
     #[test]
-    fn hover_over_a_saved_root_use_works_without_a_reader() {
+    fn hover_over_a_saved_root_use_stays_type_only() {
         let source = "\
 module a
 
@@ -4217,24 +3922,18 @@ pub fn clear()
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "delete ^books") + "delete ".len();
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("expected markup");
-        };
-        let value = markup.value;
-
-        assert!(
-            value.starts_with("```marrow\nstore ^books(id: int): Book\n```"),
-            "saved root should show its store even without live data: {value}"
-        );
-        assert!(
-            value.contains("Books saved by id."),
-            "saved root should include store docs: {value}"
-        );
-        assert!(
-            !value.contains("**debug/admin live data (advisory)**"),
-            "no reader means no live advisory line: {value}"
-        );
+        if let Some(hover) = hover_with_index(&snapshot, &index, &file, offset) {
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markup");
+            };
+            assert!(
+                !markup
+                    .value
+                    .starts_with("```marrow\nstore ^books(id: int): Book\n```"),
+                "saved root use should not use store hover: {}",
+                markup.value
+            );
+        }
     }
 
     #[test]
@@ -4254,7 +3953,7 @@ pub fn f(): string
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = source.rfind(").title").unwrap() + ").".len() + 1;
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4282,7 +3981,7 @@ resource Book at ^books(id: int)
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "required title") + "required ".len() + 1;
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4299,7 +3998,7 @@ resource Book at ^books(id: int)
     }
 
     #[test]
-    fn hover_over_a_saved_root_declaration_works_without_a_reader() {
+    fn hover_over_a_saved_root_declaration_shows_store_signature() {
         let source = "\
 module a
 
@@ -4312,7 +4011,7 @@ store ^books(id: int): Book
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "^books") + 1;
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4328,7 +4027,7 @@ store ^books(id: int): Book
         );
         assert!(
             !value.contains("**debug/admin live data (advisory)**"),
-            "no reader means no live advisory line: {value}"
+            "hover should stay analysis-only: {value}"
         );
     }
 
@@ -4405,7 +4104,7 @@ pub enum Status
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "enum Status");
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None);
+        let hover = hover_with_index(&snapshot, &index, &file, offset);
         if let Some(Hover {
             contents: HoverContents::Markup(markup),
             ..
@@ -4435,7 +4134,7 @@ pub fn set(status: Status)
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "status: Status") + "status: ".len();
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4471,7 +4170,7 @@ pub fn set(Status: int)
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = offset_of(source, "Status: int");
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None);
+        let hover = hover_with_index(&snapshot, &index, &file, offset);
         if let Some(Hover {
             contents: HoverContents::Markup(markup),
             ..
@@ -4486,7 +4185,7 @@ pub fn set(Status: int)
     }
 
     #[test]
-    fn hover_over_qualified_foreign_enum_type_annotation_shows_enum_hover() {
+    fn hover_over_qualified_foreign_enum_type_annotation_is_blocked_without_canonical_fact() {
         let state_source = "\
 module shelf::state
 
@@ -4512,28 +4211,14 @@ pub fn set(status: state::Status)
         );
         let index = index_for(&snapshot);
         let offset = offset_of(app_source, "state::Status") + "state::".len();
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("expected markup");
-        };
-        let value = markup.value;
-
         assert!(
-            value.starts_with("```marrow\nenum Status\n```"),
-            "qualified enum annotation should lead with the enum signature: {value}"
-        );
-        assert!(
-            value.contains("Lifecycle state."),
-            "qualified enum annotation should include docs: {value}"
-        );
-        assert!(
-            value.contains("open"),
-            "qualified enum annotation should include member summary: {value}"
+            hover_with_index(&snapshot, &index, &file, offset).is_none(),
+            "qualified enum annotations stay unavailable until Marrow exposes canonical module-path type facts"
         );
     }
 
     #[test]
-    fn hover_over_bare_project_enum_type_annotation_shows_enum_hover() {
+    fn hover_over_bare_foreign_enum_type_annotation_is_blocked_without_canonical_fact() {
         let other_source = "\
 module shelf::other
 
@@ -4564,23 +4249,9 @@ pub fn set(status: Status)
         );
         let index = index_for(&snapshot);
         let offset = offset_of(app_source, "status: Status") + "status: ".len();
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("expected markup");
-        };
-        let value = markup.value;
-
         assert!(
-            value.starts_with("```marrow\nenum Status\n```"),
-            "bare project enum annotation should lead with the enum signature: {value}"
-        );
-        assert!(
-            value.contains("Lifecycle state."),
-            "bare project enum annotation should include docs: {value}"
-        );
-        assert!(
-            value.contains("open"),
-            "bare project enum annotation should include member summary: {value}"
+            hover_with_index(&snapshot, &index, &file, offset).is_none(),
+            "foreign enum annotations stay unavailable until Marrow exposes canonical type-name facts"
         );
     }
 
@@ -4638,7 +4309,7 @@ pub fn current(): Status
         let (snapshot, file) = analyze(source);
         let index = index_for(&snapshot);
         let offset = source.rfind("Status::active::open").unwrap() + "Status::active::".len();
-        let hover = hover_with_index(&snapshot, &index, &file, offset, None).expect("a hover");
+        let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4761,56 +4432,8 @@ pub fn caller(): int
         assert!(hover(&snapshot, stray, 0).is_none());
     }
 
-    /// Analyze a project that pins a native store and seed `^books(1).title =
-    /// "Mort"`. Returns the snapshot, the module file path, the resolved project,
-    /// and the live source text so a test can hover into a saved path.
-    fn analyze_with_store(
-        source: &str,
-    ) -> (
-        AnalysisSnapshot,
-        std::path::PathBuf,
-        crate::workspace::Project,
-    ) {
-        use marrow_store::backend::Backend;
-        use marrow_store::path::{PathSegment, SavedKey, encode_path};
-        use marrow_store::redb::RedbStore;
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let config_text = r#"{
-            "sourceRoots": ["src"],
-            "store": { "backend": "native", "dataDir": "data" }
-        }"#;
-        std::fs::write(root.join("marrow.json"), config_text).unwrap();
-        let src = root.join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::create_dir_all(root.join("data")).unwrap();
-        let file = src.join("a.mw");
-        std::fs::write(&file, source).unwrap();
-
-        let store_path = root.join("data").join("marrow.redb");
-        {
-            let mut store = RedbStore::open(&store_path).unwrap();
-            let title = encode_path(&[
-                PathSegment::Root("books".to_string()),
-                PathSegment::RecordKey(SavedKey::Int(1)),
-                PathSegment::Field("title".to_string()),
-            ]);
-            store.write(&title, b"Mort".to_vec()).unwrap();
-        }
-
-        let config = parse_config(config_text).unwrap();
-        let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
-        let project = crate::workspace::Project {
-            root: root.to_path_buf(),
-            config,
-        };
-        std::mem::forget(dir);
-        (snapshot, file, project)
-    }
-
     #[test]
-    fn hover_on_a_saved_path_marks_live_value_advisory() {
+    fn hover_without_docs_is_type_only() {
         let source = "\
 module a
 
@@ -4820,118 +4443,9 @@ resource Book at ^books(id: int)
 pub fn f(): string
     return ^books(1).title
 ";
-        let (snapshot, file, project) = analyze_with_store(source);
-        let reader = StoreReader::for_project(&project).expect("native store reader");
-
-        // Hover over `title` in the function body's `^books(1).title`.
+        let (snapshot, file) = analyze(source);
         let offset = source.rfind(").title").unwrap() + ").".len() + 1;
-        let hover = hover_with_live(&snapshot, &file, offset, None, Some(&reader))
-            .expect("a hover at the path");
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("expected markup contents");
-        };
-        assert!(
-            markup.value.starts_with("```marrow\nstring\n```"),
-            "the checked type should lead the hover: {}",
-            markup.value
-        );
-        assert!(
-            markup
-                .value
-                .contains("**debug/admin live data (advisory)**: \"Mort\""),
-            "the live stored value should be marked advisory: {}",
-            markup.value
-        );
-        assert!(
-            !markup.value.contains("**live**: \"Mort\""),
-            "the old bare live label should not be shown: {}",
-            markup.value
-        );
-    }
-
-    #[test]
-    fn hover_over_a_saved_root_declaration_marks_live_count_advisory() {
-        let source = "\
-module a
-
-resource Book
-    required title: string
-
-;; Books saved by id.
-store ^books(id: int): Book
-";
-        let (snapshot, file, project) = analyze_with_store(source);
-        let reader = StoreReader::for_project(&project).expect("native store reader");
-        let index = index_for(&snapshot);
-        let offset = offset_of(source, "^books") + 1;
-        let hover =
-            hover_with_index(&snapshot, &index, &file, offset, Some(&reader)).expect("a hover");
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("expected markup");
-        };
-        let value = markup.value;
-
-        assert!(
-            value.starts_with("```marrow\nstore ^books(id: int): Book\n```"),
-            "declared saved root should keep the store signature: {value}"
-        );
-        assert!(
-            value.contains("Books saved by id."),
-            "declared saved root should keep store docs: {value}"
-        );
-        assert!(
-            value.contains("**debug/admin live data (advisory)**: 1 record"),
-            "declared saved root should mark the record count advisory: {value}"
-        );
-        assert!(
-            !value.contains("**live**: 1 record"),
-            "the old bare live label should not be shown: {value}"
-        );
-    }
-
-    #[test]
-    fn hover_on_a_saved_root_shows_the_record_count() {
-        let source = "\
-module a
-
-resource Book at ^books(id: int)
-    required title: string
-
-pub fn f()
-    delete ^books
-";
-        let (snapshot, file, project) = analyze_with_store(source);
-        let reader = StoreReader::for_project(&project).unwrap();
-        // Hover over `^books` in the body. The type at a bare root may not resolve,
-        // so this asserts the path resolver + count only when a hover is produced.
-        let offset = source.rfind("^books").unwrap();
-        if let Some(hover) = hover_with_live(&snapshot, &file, offset, None, Some(&reader)) {
-            let HoverContents::Markup(markup) = hover.contents else {
-                panic!("expected markup");
-            };
-            assert!(
-                markup.value.contains("1 record"),
-                "a root hover should show the record count: {}",
-                markup.value
-            );
-        }
-    }
-
-    #[test]
-    fn hover_without_a_reader_is_type_only() {
-        let source = "\
-module a
-
-resource Book at ^books(id: int)
-    required title: string
-
-pub fn f(): string
-    return ^books(1).title
-";
-        let (snapshot, file, _project) = analyze_with_store(source);
-        let offset = source.rfind(").title").unwrap() + ").".len() + 1;
-        // No reader, no docs: the live-data setting is off. Only the type shows.
-        let hover = hover_with_live(&snapshot, &file, offset, None, None).expect("a hover");
+        let hover = hover_with_docs(&snapshot, &file, offset, None).expect("a hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
@@ -4979,7 +4493,7 @@ pub fn caller(): int
         let index = index_for(&snapshot);
         let offset = source.rfind("add(1, 2)").unwrap();
         let docs = symbol_docs(&snapshot, &index, &file, offset);
-        let hover = hover_with_live(&snapshot, &file, offset, docs.as_deref(), None)
+        let hover = hover_with_docs(&snapshot, &file, offset, docs.as_deref())
             .expect("a hover at the call");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");

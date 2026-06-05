@@ -352,6 +352,7 @@ fn declaration_overrides(
                     add_enum_member_overrides(&mut overrides, lexed, source, member);
                 }
             }
+            Declaration::Evolve(_) => {}
         }
     }
 
@@ -906,7 +907,7 @@ fn type_annotation_overrides(
                     add_type_annotation_overrides(&mut overrides, lexed, source, &key.ty);
                 }
             }
-            Declaration::Enum(_) => {}
+            Declaration::Enum(_) | Declaration::Evolve(_) => {}
         }
     }
     overrides
@@ -949,8 +950,7 @@ fn add_block_type_annotation_overrides(
             }
             Statement::While { body, .. }
             | Statement::For { body, .. }
-            | Statement::Transaction { body, .. }
-            | Statement::Lock { body, .. } => {
+            | Statement::Transaction { body, .. } => {
                 add_block_type_annotation_overrides(overrides, lexed, source, body);
             }
             Statement::Try {
@@ -977,7 +977,6 @@ fn add_block_type_annotation_overrides(
             }
             Statement::Assign { .. }
             | Statement::Delete { .. }
-            | Statement::Merge { .. }
             | Statement::Return { .. }
             | Statement::Break { .. }
             | Statement::Continue { .. }

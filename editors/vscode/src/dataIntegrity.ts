@@ -10,12 +10,12 @@ import { LanguageClient } from "vscode-languageclient/node";
 interface Finding {
   // Root-first store path the finding concerns, rendered by the core.
   readonly path: string;
-  // Short category of the issue (e.g. "type-mismatch"), owned by the core.
-  readonly kind: string;
+  // Canonical Marrow tooling problem code, owned by the core.
+  readonly code: string;
   // Human-readable explanation, owned by the core.
   readonly message: string;
-  // Optional expected/actual type the core attaches when relevant.
-  readonly type?: string;
+  // Optional remediation help from the core.
+  readonly help?: string;
 }
 
 interface DataIntegrityResult {
@@ -113,10 +113,9 @@ export class MarrowDataIntegrity {
   }
 }
 
-// One report line per finding: kind, path, then message. The optional type is
-// appended in parentheses when the core attaches it. Display only — the core
-// owns the semantics behind each field.
+// One report line per finding. Display only — the core owns the semantics behind
+// each field.
 function formatFinding(finding: Finding): string {
-  const typeSuffix = finding.type !== undefined ? ` (${finding.type})` : "";
-  return `[${finding.kind}] ${finding.path}: ${finding.message}${typeSuffix}`;
+  const help = finding.help === undefined ? "" : ` Help: ${finding.help}`;
+  return `[${finding.code}] ${finding.path}: ${finding.message}${help}`;
 }

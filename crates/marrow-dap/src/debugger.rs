@@ -23,11 +23,8 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use marrow_check::CheckedProgram;
 use marrow_run::{Frame, RuntimeError, StepHook, Value};
-use marrow_store::path::PathSegment;
 
-use crate::durable::{self, DurableNode};
 use crate::step::{self, Resume, StopReason};
 use crate::variables::{self, Child};
 
@@ -72,12 +69,6 @@ pub enum Query {
     Locals,
     /// Expand a previously-returned compound local value.
     ExpandLocal(Value),
-    /// The top-level durable roots (`^...`).
-    DurableRoots,
-    /// The children of a durable path.
-    DurableChildren(Vec<PathSegment>),
-    /// Evaluate a raw durable watch/REPL `^` path.
-    Evaluate(String),
 }
 
 /// The answer to a [`Query`], owned and `Send`.
@@ -85,10 +76,6 @@ pub enum Query {
 pub enum QueryResult {
     Locals(LocalsSnapshot),
     Children(Vec<Child>),
-    Durable(Vec<DurableNode>),
-    /// A watch/REPL result: the rendered value, or an error message for an
-    /// unwatchable expression.
-    Evaluated(Result<String, String>),
 }
 
 /// A control message from the protocol thread to the parked run-thread.
@@ -112,12 +99,10 @@ pub enum RunEvent {
 }
 
 /// The hook installed on the run-thread. It owns the channel ends to the protocol
-/// thread, the breakpoint line set, the program (for schema-typed durable
-/// rendering and watch resolution), and the pending step mode.
+/// thread, the breakpoint line set, and the pending step mode.
 pub struct Debugger {
-    /// Locally resolved breakpoint lines (1-based) in the entry file. A
-    /// statement whose span starts on one of these prototype stop lines stops
-    /// unconditionally.
+    /// Unverified client breakpoint lines. A statement whose span starts on one
+    /// of these lines stops until Marrow exposes canonical stop-point facts.
     breakpoints: Vec<u32>,
     /// The step mode governing the *next* stop, updated each time the run resumes.
     mode: Resume,
@@ -125,18 +110,16 @@ pub struct Debugger {
     stop_on_entry: bool,
     /// True after the entry stop has been taken, so it fires at most once.
     entered: bool,
-    program: CheckedProgram,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
 }
 
 impl Debugger {
-    /// Build the hook for a launch: the locally resolved breakpoint lines,
-    /// whether to stop on entry, the program, and the channel ends.
+    /// Build the hook for a launch: requested breakpoint lines, whether to stop
+    /// on entry, and the channel ends.
     pub fn new(
         breakpoints: Vec<u32>,
         stop_on_entry: bool,
-        program: CheckedProgram,
         events: Sender<RunEvent>,
         control: Receiver<Control>,
     ) -> Self {
@@ -146,7 +129,6 @@ impl Debugger {
             mode: Resume::Continue,
             stop_on_entry,
             entered: false,
-            program,
             events,
             control,
         }
@@ -187,41 +169,11 @@ impl Debugger {
         LocalsSnapshot { entries }
     }
 
-    /// Resolve a raw durable watch/REPL expression at the current frame. Read-only
-    /// by construction; source expression evaluation is blocked at the session
-    /// boundary until Marrow exposes canonical evaluate facts.
-    fn evaluate(&self, frame: &Frame<'_, '_>, expression: &str) -> Result<String, String> {
-        let trimmed = expression.trim();
-        if trimmed.starts_with('^') {
-            let store = frame.store().borrow();
-            return match durable::watch(&*store, &self.program, trimmed) {
-                Ok(Some(value)) => Ok(value),
-                Ok(None) => Ok("<absent>".to_string()),
-                Err(message) => Err(message),
-            };
-        }
-        Err(
-            "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow"
-                .to_string(),
-        )
-    }
-
     /// Answer one query from the live frame, returning owned data.
     fn answer(&self, frame: &Frame<'_, '_>, query: Query) -> QueryResult {
         match query {
             Query::Locals => QueryResult::Locals(Self::snapshot_locals(frame)),
             Query::ExpandLocal(value) => QueryResult::Children(variables::children(&value)),
-            Query::DurableRoots => {
-                let store = frame.store().borrow();
-                QueryResult::Durable(durable::roots(&*store))
-            }
-            Query::DurableChildren(path) => {
-                let store = frame.store().borrow();
-                QueryResult::Durable(durable::children(&*store, &self.program, &path))
-            }
-            Query::Evaluate(expression) => {
-                QueryResult::Evaluated(self.evaluate(frame, &expression))
-            }
         }
     }
 

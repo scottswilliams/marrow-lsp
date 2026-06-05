@@ -215,39 +215,17 @@
               },
               "entry": {
                 "type": "string",
-                "description": "Debug/admin prototype entry string, such as `module::function`. F5 remains usable for launch and stepping, but this string is not a stable production entry API until Marrow exposes canonical function-entry facts. When omitted, the adapter uses `defaultEntry` from marrow.json."
+                "description": "Blocked-on-marrow entry string, such as `module::function`. F5 remains usable for launch and stepping, but this string is not a stable production entry API until Marrow exposes canonical function-entry facts. When omitted, the adapter uses `defaultEntry` from marrow.json."
               },
               "args": {
                 "type": "array",
-                "description": "Prototype launch arguments for the Marrow entry. Non-empty values are blocked by default until Marrow exposes typed launch argument facts; set allowPrototypeArgs to use the debug/admin scalar decoder.",
-                "items": {
-                  "oneOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "type": "boolean"
-                    }
-                  ]
-                },
+                "description": "Launch arguments for the Marrow entry. Non-empty values are blocked until Marrow exposes typed launch argument facts.",
+                "maxItems": 0,
                 "default": []
-              },
-              "allowPrototypeArgs": {
-                "type": "boolean",
-                "description": "Allow scalar launch args through the debug/admin prototype decoder. This is blocked on typed launch argument facts from Marrow.",
-                "default": false
               },
               "stopOnEntry": {
                 "type": "boolean",
                 "description": "Break at the first statement of the entry.",
-                "default": false
-              },
-              "allowRawDataInspection": {
-                "type": "boolean",
-                "description": "Expose raw saved-data debugger inspection (^ Durable Data scope and ^ watch expressions). This is a debug/admin prototype blocked on typed durable watch/path facts from Marrow.",
                 "default": false
               }
             }
@@ -260,15 +238,13 @@
             "name": "Debug Marrow entry",
             "project": "${workspaceFolder}",
             "args": [],
-            "allowPrototypeArgs": false,
-            "stopOnEntry": false,
-            "allowRawDataInspection": false
+            "stopOnEntry": false
           }
         ],
         "configurationSnippets": [
           {
             "label": "Marrow: Debug entry",
-            "description": "Debug a Marrow entry with the debug/admin prototype entry string while canonical function-entry facts are pending.",
+            "description": "Debug a Marrow entry while canonical function-entry facts are pending.",
             "body": {
               "type": "marrow",
               "request": "launch",
@@ -276,9 +252,7 @@
               "project": "^\"\\${workspaceFolder}\"",
               "entry": "^\"module::function\"",
               "args": [],
-              "allowPrototypeArgs": false,
-              "stopOnEntry": false,
-              "allowRawDataInspection": false
+              "stopOnEntry": false
             }
           }
         ]
@@ -300,7 +274,7 @@
         "marrow.liveData": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Opt in to debug/admin read-only native dev-store reads for hover, presentation-only CodeLens and Data Explorer surfaces, and advisory stored-data integrity checks. Leave disabled to prevent editor-triggered reads of local stored data."
+          "markdownDescription": "Opt in to read-only native dev-store reads for the Data Explorer and advisory stored-data integrity checks. Leave disabled to prevent editor-triggered reads of local stored data."
         }
       }
     }

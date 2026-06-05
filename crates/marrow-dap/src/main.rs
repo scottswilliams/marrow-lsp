@@ -15,9 +15,7 @@
 //! answers to the protocol thread's queries over channels. The live frame stays
 //! on the run-thread; see [`debugger`] for the full rendezvous.
 
-mod breakpoints;
 mod debugger;
-mod durable;
 mod project;
 mod protocol;
 mod run;

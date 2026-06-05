@@ -161,12 +161,12 @@ Goal: jump-to-definition and references should work for all resolved symbols use
 Expected outcomes:
 
 - Enum type names and enum values jump to declarations.
-- Enum type annotations jump to the declared enum, including qualified module paths and imported
-  enum names.
+- Enum type annotations jump through Marrow's binding-index facts where those facts exist; missing
+  module-path identity facts remain blocked instead of reconstructed locally.
 - Resource names, roots, identities, fields, layers, indexes, and identity keys jump to the
   canonical declaration span.
-- Module path segments jump to module declarations or imported module files when a single target is
-  known.
+- Module path segments jump to module declarations or imported module files only after Marrow
+  exposes canonical module-path facts.
 - Builtins either jump nowhere by design with hover documentation, or jump to canonical docs if the
   project later exposes doc locations.
 - Existing saved-data rename refusals remain intact and are expanded to any newly indexed

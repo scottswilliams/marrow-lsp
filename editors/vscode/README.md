@@ -9,8 +9,7 @@ Rust binaries. No parsing or position math runs in TypeScript.
 ## Features
 
 - **Diagnostics** — parse, type, and schema errors reported as you edit.
-- **Hover** — type and documentation on hover. Live data values are available only when
-  `marrow.liveData` is enabled.
+- **Hover** — type and documentation from canonical analysis facts.
 - **Completion** — context-aware completion of names in scope.
 - **Document & workspace symbols** — outline a single `.mw` file and search symbols across the
   whole project.
@@ -20,16 +19,15 @@ Rust binaries. No parsing or position math runs in TypeScript.
   catalog-backed evolution facts.
 - **Semantic tokens** — semantic highlighting layered over the TextMate grammar.
 - **Formatting** — format a `.mw` document.
-- **CodeLens** — a **record-count** lens above declarations when `marrow.liveData` is enabled.
-- **Marrow Data Explorer** — an opt-in debug/admin view (Activity Bar) for inspecting the native
-  dev store when `marrow.liveData` is enabled. It is not a production catalog view yet; rows use
-  the current raw saved-data protocol while Marrow's typed store DTOs are still pending.
+- **Marrow Data Explorer** — an opt-in view (Activity Bar) that lists saved root names from the
+  native dev store when `marrow.liveData` is enabled. It is gated on Marrow tooling facts and does
+  not accept editor-authored saved paths.
   Refreshes automatically when `marrow.json` is saved, and on demand from the view title.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
-  debug/admin prototype entry string such as `module::function` while Marrow's canonical
+  blocked-on-marrow entry string such as `module::function` while Marrow's canonical
   function-entry facts are pending. F5 remains useful for stepping, breakpoints, and variables;
-  the entry string is not a stable production entry API. The raw `^` durable-data scope is a
-  separate debug/admin data-inspection prototype.
+  the entry string is not a stable production entry API. Durable-data debugger inspection is
+  blocked until Marrow exposes typed durable watch/path facts.
 
 ## Requirements
 
@@ -58,20 +56,18 @@ same way, in order:
   dev locations when the file exists.
 - `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
   bundled and dev locations when the file exists.
-- `marrow.liveData` — opt in to debug/admin read-only native dev-store reads for hover,
-  presentation-only CodeLens and Data Explorer surfaces, and advisory data-integrity checks.
-  Leave disabled to prevent editor-triggered reads of local stored data.
+- `marrow.liveData` — opt in to read-only native dev-store reads for the Data Explorer and
+  advisory data-integrity checks. Leave disabled to prevent editor-triggered reads of local
+  stored data.
 
 ## Known limitations
 
 - The bundled binaries are **platform-specific**. Each release `.vsix` targets one platform
   (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`); install the one that
   matches your machine, or point `marrow.server.path` / `marrow.dap.path` at your own build.
-- Live data values, the record-count CodeLens, and the Data Explorer are opt-in debug/admin
-  surfaces. They require `marrow.liveData` and a readable native dev store, and remain
-  presentation-only until Marrow exposes catalog-bound typed data facts. A disabled, busy, or
-  missing store is treated as "unavailable" and simply omits live values rather than reporting an
-  error.
+- The Data Explorer lists saved root names only. Child paths, stored values, and paging remain
+  blocked on catalog-bound typed data facts. A disabled, busy, or missing store is treated as
+  "unavailable" rather than reporting an error.
 - Debugging is **statement-level** (not expression-level stepping).
 
 ## Development

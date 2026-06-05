@@ -177,38 +177,6 @@ fn summarize(name: &str, result: &Json) -> String {
                     count_summary(result, "roots", "no saved roots", "saved root")
                 }
             }
-            "mw_saved_get" => {
-                if result.get("available").and_then(Json::as_bool) != Some(true) {
-                    "not present".to_string()
-                } else {
-                    match result.get("value") {
-                        Some(value) => format!("value {}", clip(&compact(value))),
-                        // No value rendered: a record node that is absent or holds only
-                        // children carries its `presence` word, which is the honest line.
-                        None => match result.get("presence").and_then(Json::as_str) {
-                            Some(presence) => clip(presence),
-                            None => "present".to_string(),
-                        },
-                    }
-                }
-            }
-            "mw_saved_children" => {
-                if result.get("available").and_then(Json::as_bool) != Some(true) {
-                    "data unavailable".to_string()
-                } else {
-                    let children = array_len(result, "children");
-                    let base = match children {
-                        0 => "no children".to_string(),
-                        1 => "1 child".to_string(),
-                        n => format!("{n} children"),
-                    };
-                    if result.get("more").and_then(Json::as_bool) == Some(true) {
-                        format!("{base} (more)")
-                    } else {
-                        base
-                    }
-                }
-            }
             "mw_data_integrity" => {
                 if result.get("available").and_then(Json::as_bool) != Some(true) {
                     "data unavailable".to_string()
@@ -494,17 +462,6 @@ mod tests {
                 "data unavailable",
             ),
             (
-                "mw_saved_get",
-                json!({ "available": true, "value": "\"Mort\"", "type": "string" }),
-                "value \"\\\"Mort\\\"\"",
-            ),
-            ("mw_saved_get", json!({ "available": false }), "not present"),
-            (
-                "mw_saved_children",
-                json!({ "available": true, "children": [{}, {}], "more": true }),
-                "2 children (more)",
-            ),
-            (
                 "mw_data_integrity",
                 json!({ "available": true, "findings": [], "scanned": 5, "truncated": false }),
                 "clean, 5 scanned",
@@ -550,13 +507,6 @@ mod tests {
                 json!({ "diagnostics": [{ "message": "no such module" }], "output": "", "tests": [] }),
                 "1 diagnostic: no such module",
             ),
-            // An available saved path with no rendered value reports its presence
-            // word rather than implying a value is present.
-            (
-                "mw_saved_get",
-                json!({ "available": true, "presence": "absent" }),
-                "absent",
-            ),
         ];
         for (name, result, expected) in cases {
             let summary = summarize(name, &result);
@@ -589,30 +539,12 @@ mod tests {
                 json!({
                     "items": [{}, {}, {}],
                     "contract": contract(
-                        "blocked-on-marrow",
+                        "presentation-only",
                         "development helper",
                         &["canonical completion-context facts"],
                     ),
                 }),
-                "development helper (blocked-on-marrow: canonical completion-context facts): 3 completions",
-            ),
-            (
-                "mw_saved_children",
-                json!({
-                    "available": true,
-                    "children": [{}, {}],
-                    "more": false,
-                    "contract": contract(
-                        "blocked-on-marrow",
-                        "debug/admin prototype",
-                        &[
-                            "catalog-bound saved-place identity",
-                            "typed children",
-                            "cursor/page facts",
-                        ],
-                    ),
-                }),
-                "debug/admin prototype (blocked-on-marrow: catalog-bound saved-place identity +2): 2 children",
+                "development helper (presentation-only: canonical completion-context facts): 3 completions",
             ),
             (
                 "mw_saved_roots",
@@ -621,11 +553,11 @@ mod tests {
                     "roots": [],
                     "contract": contract(
                         "blocked-on-marrow",
-                        "debug/admin prototype",
+                        "blocked-on-marrow",
                         &["catalog-bound saved-place identity"],
                     ),
                 }),
-                "debug/admin prototype (blocked-on-marrow: catalog-bound saved-place identity): data unavailable",
+                "blocked-on-marrow (blocked-on-marrow: catalog-bound saved-place identity): data unavailable",
             ),
             (
                 "mw_data_integrity",
@@ -655,7 +587,7 @@ mod tests {
                     "diagnostics": [],
                     "contract": contract(
                         "presentation-only",
-                        "debug/admin prototype",
+                        "blocked-on-marrow",
                         &[
                             "transitive effect facts",
                             "durable-scope facts",
@@ -663,7 +595,7 @@ mod tests {
                         ],
                     ),
                 }),
-                "debug/admin prototype (presentation-only: transitive effect facts +2): value 42",
+                "blocked-on-marrow (presentation-only: transitive effect facts +2): value 42",
             ),
         ];
         for (name, result, expected) in cases {
@@ -693,12 +625,7 @@ mod tests {
             "dataAccess": "disabled",
             "message": "data access not enabled; relaunch ...",
         });
-        for tool in [
-            "mw_saved_roots",
-            "mw_saved_get",
-            "mw_saved_children",
-            "mw_data_integrity",
-        ] {
+        for tool in ["mw_saved_roots", "mw_data_integrity"] {
             assert_eq!(summarize(tool, &result), "data access disabled");
         }
     }

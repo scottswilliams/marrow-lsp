@@ -230,6 +230,7 @@ fn resolve_project(file: &Path) -> Result<Project, WorkspaceError> {
             let text = std::fs::read_to_string(&config_path).map_err(|error| {
                 WorkspaceError::Config(marrow_project::ConfigError {
                     code: marrow_project::CONFIG_INVALID,
+                    kind: marrow_project::ConfigErrorKind::InvalidJson,
                     message: error.to_string(),
                 })
             })?;

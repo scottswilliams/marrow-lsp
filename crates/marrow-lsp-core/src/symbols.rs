@@ -49,6 +49,14 @@ fn declaration_symbol(declaration: &Declaration, index: &LineIndex) -> DocumentS
         Declaration::Enum(enum_decl) => enum_symbol(enum_decl, index),
         Declaration::Resource(resource) => resource_symbol(resource, index),
         Declaration::Store(store) => store_symbol(store, index),
+        Declaration::Evolve(evolve) => symbol(
+            "evolve",
+            None,
+            SymbolKind::NAMESPACE,
+            evolve.span,
+            index,
+            None,
+        ),
     }
 }
 

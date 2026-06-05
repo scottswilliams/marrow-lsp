@@ -12,19 +12,17 @@ Initial release.
 ### Added
 
 - Diagnostics (parse, type, and schema errors) for `.mw` files.
-- Hover with type and documentation, plus opt-in debug/admin live data presentation from the
-  native dev store while typed/catalog-bound facts are pending.
+- Hover with type and documentation from canonical analysis facts.
 - Context-aware completion.
 - Document and workspace symbols.
 - Go to definition and find references.
 - Data-safe rename that refuses saved-data-backed edits.
 - Semantic tokens for semantic highlighting over the TextMate grammar.
 - Document formatting.
-- Presentation-only record-count CodeLens when opt-in live data is enabled.
-- The Marrow Data Explorer view for opt-in debug/admin inspection of the native dev store while
-  typed/catalog-bound store facts are pending.
+- The Marrow Data Explorer view for opt-in saved-root listing while typed/catalog-bound store
+  facts are pending.
 - F5 debugging via the `marrow-dap` adapter, with statement stepping and breakpoints. The
-  `module::function` entry string is a useful debug/admin prototype while canonical
+  `module::function` entry string is useful while canonical
   function-entry facts are pending, not a stable production entry API.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
   debug adapter (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`).

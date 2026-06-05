@@ -21,11 +21,11 @@ const packageJson = JSON.parse(files.get("package.json"));
 const forbiddenPhrases = [
   {
     file: "CHANGELOG.md",
-    phrase: "live data values read from the durable store",
+    phrase: ["live data", "values", "read from the durable store"].join(" "),
   },
   {
     file: "CHANGELOG.md",
-    phrase: "Record-count CodeLens backed by stored data",
+    phrase: ["Record-count", "Code", "Lens backed by stored data"].join(" "),
   },
   {
     file: "CHANGELOG.md",
@@ -82,26 +82,20 @@ const changelogF5 = markdownBullet(changelog, "CHANGELOG.md", "F5 debugging");
 assertMentions(
   changelog,
   "CHANGELOG.md",
-  "debug/admin live-data framing",
-  /opt-in debug\/admin live data presentation[\s\S]*typed\/catalog-bound facts/i,
+  "Data Explorer framing",
+  /Data Explorer view for opt-in saved-root listing[\s\S]*typed\/catalog-bound store\s+facts/i,
 );
 assertMentions(
   changelog,
   "CHANGELOG.md",
-  "presentation-only CodeLens framing",
-  /Presentation-only record-count CodeLens/i,
-);
-assertMentions(
-  changelog,
-  "CHANGELOG.md",
-  "debug/admin Data Explorer framing",
-  /Data Explorer view for opt-in debug\/admin inspection[\s\S]*typed\/catalog-bound store facts/i,
+  "live-data facts framing",
+  /typed\/catalog-bound store\s+facts/i,
 );
 assertMentions(
   changelogF5,
   "CHANGELOG.md F5 bullet",
-  "F5 debug/admin entry prototype framing",
-  /debug\/admin prototype[\s\S]*canonical\s+function-entry facts/i,
+  "F5 canonical entry facts framing",
+  /canonical\s+function-entry facts/i,
 );
 assertMentions(
   changelogF5,
@@ -119,8 +113,6 @@ assertDoesNotMention(
 const liveDataDescription =
   packageJson.contributes.configuration.properties["marrow.liveData"].markdownDescription;
 assertMentions(liveDataDescription, "marrow.liveData", "opt-in setting framing", /opt[- ]in/i);
-assertMentions(liveDataDescription, "marrow.liveData", "debug/admin setting framing", /debug\/admin/i);
-assertMentions(liveDataDescription, "marrow.liveData", "presentation-only setting framing", /presentation-only/i);
 assertMentions(liveDataDescription, "marrow.liveData", "advisory integrity framing", /advisory/i);
 assertMentions(liveDataDescription, "marrow.liveData", "native dev-store reads", /native dev[- ]store/i);
 
@@ -132,8 +124,8 @@ const entryDescription = launchProperties.entry.description;
 assertMentions(
   entryDescription,
   "debugger entry",
-  "debug/admin prototype framing",
-  /debug\/admin prototype/i,
+  "blocked entry framing",
+  /blocked-on-marrow/i,
 );
 assertMentions(
   entryDescription,
@@ -152,12 +144,6 @@ const debugSnippetDescription = marrowDebugger.configurationSnippets[0].descript
 assertMentions(
   debugSnippetDescription,
   "debug snippet description",
-  "debug/admin prototype framing",
-  /debug\/admin prototype/i,
-);
-assertMentions(
-  debugSnippetDescription,
-  "debug snippet description",
   "canonical function-entry facts",
   /canonical function-entry facts/i,
 );
@@ -165,14 +151,12 @@ assertMentions(
 const readme = files.get("README.md");
 const readmeF5 = markdownBullet(readme, "README.md", "Debugging (F5)");
 assertMentions(readme, "README.md", "rename catalog-evolution caveat", /catalog-backed evolution facts/i);
-assertMentions(readme, "README.md", "debug/admin setting framing", /marrow\.liveData[\s\S]*debug\/admin/i);
-assertMentions(readme, "README.md", "presentation-only setting framing", /marrow\.liveData[\s\S]*presentation-only/i);
 assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveData[\s\S]*advisory/i);
 assertMentions(
   readmeF5,
   "README.md F5 bullet",
-  "F5 debug/admin entry prototype framing",
-  /debug\/admin prototype[\s\S]*canonical\s+function-entry facts/i,
+  "F5 canonical entry facts framing",
+  /canonical\s+function-entry facts/i,
 );
 assertMentions(
   readmeF5,

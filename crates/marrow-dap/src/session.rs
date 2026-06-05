@@ -8,16 +8,12 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
 use serde_json::{Value as Json, json};
 
-use marrow_check::CheckedProgram;
-use marrow_store::path::PathSegment;
-
-use crate::breakpoints;
 use crate::debugger::{Control, Query, QueryResult, RunEvent, StopInfo};
 use crate::protocol::write_message;
 use crate::step::Resume;
@@ -25,29 +21,26 @@ use crate::step::Resume;
 /// The variable reference for the Locals scope at a stop. Fixed, since there is
 /// one Locals scope per frame.
 const LOCALS_REF: i64 = 1;
-/// The variable reference for the opt-in raw durable-data scope. Fixed likewise.
+/// Reserved durable-data reference. It rejects until Marrow exposes canonical
+/// durable watch/path facts.
 const DURABLE_REF: i64 = 2;
-/// The first dynamically-allocated reference, for expandable locals and durable
-/// subtrees. Kept clear of the two fixed scope references.
+/// The first dynamically-allocated reference for expandable locals.
 const FIRST_DYNAMIC_REF: i64 = 1000;
 /// The single thread id the debugger exposes — the run is single-threaded.
 const THREAD_ID: i64 = 1;
-const RAW_DATA_INSPECTION_BLOCKED: &str = "blocked-on-marrow: raw durable-data inspection needs typed durable watch/path facts from Marrow";
+const RAW_DATA_INSPECTION_BLOCKED: &str =
+    "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
 const EXPRESSION_EVALUATE_BLOCKED: &str = "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow";
-const PROTOTYPE_ARGS_BLOCKED: &str =
+const LAUNCH_ARGS_BLOCKED: &str =
     "blocked-on-marrow: DAP launch args need typed launch argument decoding facts from Marrow";
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
-const BREAKPOINT_PLACEMENT_PENDING: &str = "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow; local syntax-walk placement is pending until launch/program analysis";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
-const DURABLE_VALUE_BLOCKER: &str = "typed durable watch/path facts";
 
-/// What a dynamic variable reference expands to. Resolved on the run-thread: a
-/// local value is expanded in memory, a durable path is read from the live store.
+/// What a dynamic variable reference expands to. Resolved on the run-thread.
 #[derive(Clone)]
 enum Expandable {
     Local(marrow_run::Value),
-    Durable(Vec<PathSegment>),
 }
 
 /// The live run-thread plus the channels to drive it.
@@ -64,15 +57,9 @@ struct Running {
 pub struct Session<W: Write> {
     out: W,
     seq: i64,
-    /// Requested breakpoint lines per source file. They are locally resolved
-    /// when answering `setBreakpoints` and again when the run starts, so
-    /// breakpoints sent before `launch` are not lost.
-    breakpoints: HashMap<PathBuf, Vec<u32>>,
-    /// The program for the launched project, used for prototype breakpoint
-    /// placement. Set at launch.
-    program: Option<CheckedProgram>,
-    /// The entry source file, the one the debugger reports stack frames in.
-    entry_file: Option<PathBuf>,
+    /// Unverified requested breakpoint lines. They are line-only transport until
+    /// Marrow exposes canonical debugger stop-point and source facts.
+    breakpoints: Vec<u32>,
     /// The run-thread, present once launched and configurationDone-d.
     running: Option<Running>,
     /// Pending launch arguments captured between `launch` and `configurationDone`
@@ -81,9 +68,6 @@ pub struct Session<W: Write> {
     /// The dynamic reference registry for the current stop, cleared on resume.
     expandables: HashMap<i64, Expandable>,
     next_ref: i64,
-    /// Launch opt-in for raw durable `^` inspection. Program execution still
-    /// uses the configured store; this gates only debugger inspection surfaces.
-    allow_raw_data_inspection: bool,
     /// Set once the client asked to disconnect/terminate, so the loop exits.
     done: bool,
 }
@@ -94,7 +78,6 @@ struct PendingLaunch {
     entry: Option<String>,
     args: Vec<marrow_run::Value>,
     stop_on_entry: bool,
-    allow_raw_data_inspection: bool,
 }
 
 impl<W: Write> Session<W> {
@@ -102,14 +85,11 @@ impl<W: Write> Session<W> {
         Session {
             out,
             seq: 0,
-            breakpoints: HashMap::new(),
-            program: None,
-            entry_file: None,
+            breakpoints: Vec::new(),
             running: None,
             pending: None,
             expandables: HashMap::new(),
             next_ref: FIRST_DYNAMIC_REF,
-            allow_raw_data_inspection: false,
             done: false,
         }
     }
@@ -226,11 +206,7 @@ impl<W: Write> Session<W> {
             .get("entry")
             .and_then(Json::as_str)
             .map(str::to_string);
-        let allow_prototype_args = arguments
-            .get("allowPrototypeArgs")
-            .and_then(Json::as_bool)
-            .unwrap_or(false);
-        let args = match parse_args(arguments.get("args"), allow_prototype_args) {
+        let args = match parse_args(arguments.get("args")) {
             Ok(args) => args,
             Err(message) => {
                 self.respond(request, false, json!(message));
@@ -241,40 +217,30 @@ impl<W: Write> Session<W> {
             .get("stopOnEntry")
             .and_then(Json::as_bool)
             .unwrap_or(false);
-        let allow_raw_data_inspection = arguments
-            .get("allowRawDataInspection")
-            .and_then(Json::as_bool)
-            .unwrap_or(false);
-
         // Prepare the project now so a bad project fails the launch with a clear
         // message, but keep the store/program until configurationDone starts it.
         match crate::project::prepare(&project_dir, entry.as_deref()) {
-            Ok(launch) => {
-                self.program = Some(launch.program.clone());
-                self.entry_file = entry_source_file(&launch.program, &launch.entry);
+            Ok(_) => {
                 self.pending = Some(PendingLaunch {
                     project_dir,
                     entry,
                     args,
                     stop_on_entry,
-                    allow_raw_data_inspection,
                 });
-                self.allow_raw_data_inspection = allow_raw_data_inspection;
                 self.respond(request, true, json!({}));
             }
             Err(error) => self.respond(request, false, json!(error.to_string())),
         }
     }
 
-    /// `setBreakpoints`: snap each requested line to the next statement in the
-    /// source file, but report the result as advisory until Marrow provides
-    /// canonical stop-point facts.
+    /// `setBreakpoints`: keep each requested source line as an unverified runtime
+    /// stop until Marrow provides canonical stop-point facts.
     fn on_set_breakpoints(&mut self, request: &Json, arguments: &Json) {
-        let path = arguments
+        let has_source_path = arguments
             .get("source")
             .and_then(|source| source.get("path"))
             .and_then(Json::as_str)
-            .map(PathBuf::from);
+            .is_some();
         let requested: Vec<u32> = arguments
             .get("breakpoints")
             .and_then(Json::as_array)
@@ -287,67 +253,39 @@ impl<W: Write> Session<W> {
             })
             .unwrap_or_default();
 
-        let Some(path) = path else {
+        if !has_source_path {
             self.respond(request, true, json!({ "breakpoints": [] }));
             return;
-        };
+        }
 
-        let (advisory, _) = self.resolve_breakpoints(&path, &requested);
-        self.breakpoints.insert(path, requested);
+        let advisory = self.resolve_breakpoints(&requested);
+        self.breakpoints = requested;
         self.respond(request, true, json!({ "breakpoints": advisory }));
     }
 
-    /// Resolve requested lines against the program's statement lines for `path`,
-    /// returning the per-breakpoint client objects and the resolved line set.
-    fn resolve_breakpoints(&self, path: &Path, requested: &[u32]) -> (Vec<Json>, Vec<u32>) {
-        let Some(program) = self.program.as_ref() else {
-            return (
-                requested
-                    .iter()
-                    .map(|line| {
-                        json!({
-                            "verified": false,
-                            "line": *line,
-                            "message": BREAKPOINT_PLACEMENT_PENDING,
-                        })
-                    })
-                    .collect(),
-                Vec::new(),
-            );
-        };
-        let lines = breakpoints::statement_lines(program, path);
-        let mut advisory = Vec::new();
-        let mut resolved = Vec::new();
-        for &line in requested {
-            match breakpoints::resolve_line(&lines, line) {
-                Some(stmt_line) => {
-                    resolved.push(stmt_line);
-                    advisory.push(json!({
-                        "verified": false,
-                        "line": stmt_line,
-                        "message": format!("{BREAKPOINT_VERIFICATION_BLOCKED}; local syntax-walk resolution is advisory"),
-                    }));
-                }
-                None => advisory.push(json!({
+    /// Return unverified breakpoint objects for the requested source lines.
+    fn resolve_breakpoints(&self, requested: &[u32]) -> Vec<Json> {
+        requested
+            .iter()
+            .map(|line| {
+                json!({
                     "verified": false,
-                    "line": line,
-                    "message": format!("{BREAKPOINT_VERIFICATION_BLOCKED}; local syntax-walk resolution found no statement for this line"),
-                })),
-            }
-        }
-        (advisory, resolved)
+                    "line": *line,
+                    "message": BREAKPOINT_VERIFICATION_BLOCKED,
+                })
+            })
+            .collect()
     }
 
     /// `configurationDone`: start the run-thread with the captured launch and the
-    /// resolved breakpoints. The run begins immediately; the first stop arrives as
-    /// a `stopped` event the dispatcher pumps.
+    /// unverified breakpoint lines. The run begins immediately; the first stop
+    /// arrives as a `stopped` event the dispatcher pumps.
     fn on_configuration_done(&mut self, request: &Json) {
         let Some(pending) = self.pending.take() else {
             self.respond(request, false, json!("configurationDone before a launch"));
             return;
         };
-        let breakpoint_lines = self.entry_breakpoint_lines();
-        let allow_raw_data_inspection = pending.allow_raw_data_inspection;
+        let breakpoint_lines = self.unverified_breakpoint_lines();
         match crate::run::spawn(
             pending.project_dir,
             pending.entry,
@@ -356,7 +294,6 @@ impl<W: Write> Session<W> {
             pending.stop_on_entry,
         ) {
             Ok(running) => {
-                self.allow_raw_data_inspection = allow_raw_data_inspection;
                 self.running = Some(Running {
                     handle: running.handle,
                     control: running.control,
@@ -373,36 +310,10 @@ impl<W: Write> Session<W> {
         }
     }
 
-    /// The locally resolved breakpoint lines in the entry source file — the file
-    /// the run reports frames in and the runtime spans line up with.
-    fn entry_breakpoint_lines(&self) -> Vec<u32> {
-        match &self.entry_file {
-            Some(file) => self
-                .breakpoints
-                .iter()
-                .filter(|(path, _)| breakpoints::same_file(file, path))
-                .flat_map(|(path, requested)| self.resolved_breakpoint_lines(path, requested))
-                .collect(),
-            // No known entry file: union every set breakpoint line, since a
-            // single-file project's spans still match by line.
-            None => self
-                .breakpoints
-                .iter()
-                .flat_map(|(file, requested)| self.resolved_breakpoint_lines(file, requested))
-                .collect(),
-        }
-    }
-
-    fn resolved_breakpoint_lines(&self, path: &Path, requested: &[u32]) -> Vec<u32> {
-        let lines = self
-            .program
-            .as_ref()
-            .map(|program| breakpoints::statement_lines(program, path))
-            .unwrap_or_default();
-        requested
-            .iter()
-            .filter_map(|line| breakpoints::resolve_line(&lines, *line))
-            .collect()
+    /// The requested breakpoint lines, not tied to a source file until Marrow
+    /// exposes canonical debugger source facts.
+    fn unverified_breakpoint_lines(&self) -> Vec<u32> {
+        self.breakpoints.clone()
     }
 
     /// `threads`: the one synthetic thread the single-threaded run presents.
@@ -426,18 +337,12 @@ impl<W: Write> Session<W> {
             );
             return;
         };
-        let path = self
-            .entry_file
-            .as_ref()
-            .map(|file| file.display().to_string())
-            .unwrap_or_default();
         let name = format!("depth {}", stop.depth);
         let frame = json!({
             "id": THREAD_ID,
             "name": name,
             "line": stop.line,
             "column": stop.column.max(1),
-            "source": { "path": path },
         });
         self.respond(
             request,
@@ -446,47 +351,31 @@ impl<W: Write> Session<W> {
         );
     }
 
-    /// `scopes`: Locals are always available. Raw durable data is a debug/admin
-    /// prototype and is exposed only when launch opts in.
+    /// `scopes`: Locals are available. Durable data is blocked until Marrow
+    /// exposes canonical tooling facts.
     fn on_scopes(&mut self, request: &Json) {
-        let mut scopes = vec![json!({
+        let scopes = vec![json!({
             "name": "Locals",
             "variablesReference": LOCALS_REF,
             "expensive": false,
         })];
-        if self.allow_raw_data_inspection {
-            scopes.push(json!({
-                "name": "^ Durable Data (debug/admin prototype)",
-                "variablesReference": DURABLE_REF,
-                "expensive": true,
-            }));
-        }
         self.respond(request, true, json!({ "scopes": scopes }));
     }
 
-    /// `variables`: list the children of a scope or an expandable value, querying
-    /// the parked run-thread for live data.
+    /// `variables`: list the children of a scope or an expandable local value.
     fn on_variables(&mut self, request: &Json, arguments: &Json) {
         let reference = arguments
             .get("variablesReference")
             .and_then(Json::as_i64)
             .unwrap_or(0);
-        if !self.allow_raw_data_inspection
-            && (reference == DURABLE_REF
-                || matches!(
-                    self.expandables.get(&reference),
-                    Some(Expandable::Durable(_))
-                ))
-        {
+        if reference == DURABLE_REF {
             self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
             return;
         }
         let variables = match reference {
             LOCALS_REF => self.locals_variables(),
-            DURABLE_REF => self.durable_variables(None),
             other => match self.expandables.get(&other).cloned() {
                 Some(Expandable::Local(value)) => self.expand_local(value),
-                Some(Expandable::Durable(path)) => self.durable_variables(Some(path)),
                 None => Vec::new(),
             },
         };
@@ -525,28 +414,6 @@ impl<W: Write> Session<W> {
                     .map(|value| self.alloc_ref(Expandable::Local(value)))
                     .unwrap_or(0);
                 variable_json(&child.name, &child.value, reference, LOCAL_VALUE_BLOCKER)
-            })
-            .collect()
-    }
-
-    /// The durable scope contents: the saved roots, or the children of `path`.
-    fn durable_variables(&mut self, path: Option<Vec<PathSegment>>) -> Vec<Json> {
-        let query = match path {
-            Some(path) => Query::DurableChildren(path),
-            None => Query::DurableRoots,
-        };
-        let Some(QueryResult::Durable(nodes)) = self.query(query) else {
-            return Vec::new();
-        };
-        nodes
-            .into_iter()
-            .map(|node| {
-                let reference = if node.expandable {
-                    self.alloc_ref(Expandable::Durable(node.path))
-                } else {
-                    0
-                };
-                variable_json(&node.name, &node.value, reference, DURABLE_VALUE_BLOCKER)
             })
             .collect()
     }
@@ -607,8 +474,8 @@ impl<W: Write> Session<W> {
         self.resume_run(Resume::Pause);
     }
 
-    /// `evaluate`: a watch/REPL request. Restricted to read-only `^` paths while
-    /// canonical expression evaluation remains blocked on Marrow facts.
+    /// `evaluate`: watch/REPL requests are blocked until Marrow exposes canonical
+    /// expression and durable path facts.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
         if arguments.get("context").and_then(Json::as_str) == Some("hover") {
             self.respond(
@@ -630,27 +497,7 @@ impl<W: Write> Session<W> {
             self.respond(request, false, json!(EXPRESSION_EVALUATE_BLOCKED));
             return;
         }
-        if !self.allow_raw_data_inspection {
-            self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
-            return;
-        }
-        let Some(QueryResult::Evaluated(result)) = self.query(Query::Evaluate(expression)) else {
-            self.respond(request, false, json!("not stopped"));
-            return;
-        };
-        match result {
-            Ok(value) => self.respond(
-                request,
-                true,
-                json!({
-                    "result": value,
-                    "variablesReference": 0,
-                    "presentationHint": debug_admin_presentation_hint(),
-                    "marrowContract": debug_admin_contract(DURABLE_VALUE_BLOCKER),
-                }),
-            ),
-            Err(message) => self.respond(request, false, json!(message)),
-        }
+        self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
     }
 
     /// `disconnect` / `terminate`: unwind the run (rolling back any open
@@ -801,7 +648,7 @@ fn variable_json(name: &str, value: &str, reference: i64, blocked_on: &str) -> J
 
 fn debug_admin_contract(blocked_on: &str) -> Json {
     json!({
-        "status": "debug/admin prototype",
+        "status": "blocked-on-marrow",
         "blockedOn": blocked_on,
     })
 }
@@ -813,86 +660,36 @@ fn debug_admin_presentation_hint() -> Json {
     })
 }
 
-/// Parse the optional launch `args` array into scalar runtime values when the
-/// debug/admin prototype path is explicitly enabled.
-fn parse_args(
-    args: Option<&Json>,
-    allow_prototype_args: bool,
-) -> Result<Vec<marrow_run::Value>, String> {
+/// Parse the optional launch `args` array. Non-empty values are blocked until
+/// Marrow exposes typed launch argument facts.
+fn parse_args(args: Option<&Json>) -> Result<Vec<marrow_run::Value>, String> {
     let Some(array) = args else {
         return Ok(Vec::new());
     };
     let Some(items) = array.as_array() else {
-        return Err("`args` must be an array of scalars".to_string());
+        return Err("`args` must be an array".to_string());
     };
-    if !items.is_empty() && !allow_prototype_args {
-        return Err(PROTOTYPE_ARGS_BLOCKED.to_string());
+    if !items.is_empty() {
+        return Err(LAUNCH_ARGS_BLOCKED.to_string());
     }
-    items.iter().map(scalar_arg).collect()
-}
-
-/// One launch argument as a scalar [`marrow_run::Value`].
-fn scalar_arg(arg: &Json) -> Result<marrow_run::Value, String> {
-    match arg {
-        Json::Bool(value) => Ok(marrow_run::Value::Bool(*value)),
-        Json::String(text) => Ok(marrow_run::Value::Str(text.clone())),
-        Json::Number(number) => number
-            .as_i64()
-            .map(marrow_run::Value::Int)
-            .ok_or_else(|| "only integer numbers are supported as args".to_string()),
-        other => Err(format!("unsupported arg `{other}`; pass scalars only")),
-    }
-}
-
-/// The source file the named entry function lives in, so stack frames and entry
-/// breakpoints reference the right file.
-fn entry_source_file(program: &CheckedProgram, entry: &str) -> Option<PathBuf> {
-    // The entry is "module::fn" or a bare "fn" searched across modules.
-    let (module_name, fn_name) = match entry.rsplit_once("::") {
-        Some((module, name)) => (Some(module), name),
-        None => (None, entry),
-    };
-    program
-        .modules
-        .iter()
-        .find(|module| {
-            module
-                .functions
-                .iter()
-                .any(|function| function.name == fn_name)
-                && module_name.is_none_or(|name| module.name == name)
-        })
-        .map(|module| module.source_file.clone())
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marrow_check::{ProjectSources, analyze_project};
-    use marrow_project::ProjectConfig;
-
-    fn program(source: &str) -> (CheckedProgram, PathBuf, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src = root.join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        let file = src.join("m.mw");
-        std::fs::write(&file, source).unwrap();
-        let config = ProjectConfig {
-            source_roots: vec!["src".to_string()],
-            default_entry: None,
-            store: None,
-            tests: Vec::new(),
-            accepted_catalog: "marrow.catalog.json".to_string(),
-        };
-        let snapshot = analyze_project(&root, &config, &ProjectSources::new()).unwrap();
-        (snapshot.program, file, dir)
-    }
 
     #[test]
-    fn breakpoints_set_before_launch_are_resolved_when_the_program_arrives() {
-        let source = "module m\n\npub fn f(): int\n    return 1\n";
-        let (program, file, _dir) = program(source);
+    fn set_breakpoints_keeps_latest_unverified_lines_without_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("m.mw");
+        let other_file = dir.path().join("other.mw");
+        std::fs::write(&file, "module m\n\npub fn f(): int\n    return 1\n").unwrap();
+        std::fs::write(
+            &other_file,
+            "module other\n\npub fn f(): int\n    return 2\n",
+        )
+        .unwrap();
         let mut session = Session::new(Vec::new());
         let request = json!({ "seq": 1, "command": "setBreakpoints" });
 
@@ -903,14 +700,19 @@ mod tests {
                 "breakpoints": [{ "line": 3 }]
             }),
         );
-        session.program = Some(program);
-        session.entry_file = Some(file);
+        session.on_set_breakpoints(
+            &request,
+            &json!({
+                "source": { "path": other_file.display().to_string() },
+                "breakpoints": [{ "line": 4 }]
+            }),
+        );
 
-        assert_eq!(session.entry_breakpoint_lines(), vec![4]);
+        assert_eq!(session.unverified_breakpoint_lines(), vec![4]);
     }
 
     #[test]
-    fn breakpoint_response_before_launch_says_local_placement_is_pending() {
+    fn breakpoint_response_reports_unverified_source_line() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("m.mw");
         std::fs::write(&file, "module m\n\npub fn f(): int\n    return 1\n").unwrap();
@@ -930,18 +732,11 @@ mod tests {
         let response: Json = serde_json::from_str(body).unwrap();
         let breakpoint = &response["body"]["breakpoints"][0];
         assert_eq!(breakpoint["verified"], false, "{response}");
+        assert_eq!(breakpoint["line"], 3, "{response}");
         let message = breakpoint["message"].as_str().unwrap();
         assert!(
             message.contains("blocked-on-marrow"),
-            "pending message should keep the Marrow blocker: {response}"
-        );
-        assert!(
-            message.contains("pending until launch"),
-            "pre-launch message should not claim no statement was found: {response}"
-        );
-        assert!(
-            !message.contains("found no statement"),
-            "pre-launch message should distinguish missing analysis from an unresolved line: {response}"
+            "breakpoint response should keep the Marrow blocker: {response}"
         );
     }
 }

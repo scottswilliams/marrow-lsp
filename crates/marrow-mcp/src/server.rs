@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use marrow_lsp_core::mcp::{self, RunArgsPolicy, RunMode};
+use marrow_lsp_core::mcp::{self, RunMode};
 use serde_json::{Value as Json, json};
 
 /// The MCP protocol version this server speaks, echoed in the `initialize` reply.
@@ -78,7 +78,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_complete",
-            "description": "Development helper: list current context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Blocked-on-Marrow for any production contract until canonical completion-context facts exist; not a stable production completion API.",
+            "description": "Presentation-only development helper: list current context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing canonical completion-context facts for any production contract; not a stable production completion API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -91,7 +91,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_resource_schema",
-            "description": "Development inspection helper over current checked schema facts: return one resource schema by source `name`, or every resource in the project when `name` is omitted, including saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes. Missing catalog-bound resource/store/member identity, presence/default facts, and typed protocol DTOs; not a stable production schema API.",
+            "description": "Presentation-only development inspection helper over current checked schema facts: return one resource schema by source `name`, or every resource in the project when `name` is omitted, including saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes. Missing catalog-bound resource/store/member identity, presence/default facts, and typed protocol DTOs; not a stable production schema API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -103,37 +103,13 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Debug/admin prototype: list raw saved-data root names from the project's real store. Requires data access to be enabled at launch; otherwise returns a refusal envelope and reads nothing. This is not a stable typed production API.",
+            "description": "Blocked-on-marrow saved-data helper: list saved root names from the project's real store through canonical Marrow tooling facts. Requires data access to be enabled at launch; otherwise returns a refusal envelope and reads nothing. This is not a stable typed production API.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
                 },
                 "required": ["file"],
-            },
-        },
-        {
-            "name": "mw_saved_get",
-            "description": "Debug/admin prototype: read raw saved-data presence/value at a saved `path` from the project's real store. Gated behind data access. The path is a raw segment array: {root}/{key}/{field}/{layer}/{index}/{index_key}; a key is {int}/{str}/{bool}/{date}/{duration}/{instant}/{bytes}. This is not a stable typed production API.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "path": { "type": "array", "description": "Debug/admin prototype raw saved-data path segments, root-first; not a stable typed production API." },
-                },
-                "required": ["file", "path"],
-            },
-        },
-        {
-            "name": "mw_saved_children",
-            "description": "Debug/admin prototype: list the immediate raw saved-data children of a saved `path` from the project's real store, capped. Gated behind data access. Same raw path encoding as mw_saved_get. This is not a stable typed production API.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "path": { "type": "array", "description": "Debug/admin prototype raw saved-data path segments, root-first; empty array lists the roots' level; not a stable typed production API." },
-                },
-                "required": ["file", "path"],
             },
         },
         {
@@ -149,14 +125,13 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Debug/admin prototype for execution, entry strings, and args: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\") as a presentation contract until Marrow exposes canonical function-entry facts; the entry string is not a stable production entry API. Non-empty `args` are blocked by default until Marrow exposes typed run argument facts; set `allowPrototypeArgs: true` only to use the debug/admin prototype scalar decoder. `args` are not a stable typed production API. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
+            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` evaluates `entry` (\"module::fn\") as a presentation contract until Marrow exposes canonical function-entry facts; the entry string is not a stable production entry API. Non-empty `args` are blocked until Marrow exposes typed run argument facts. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "entry": string_prop("Debug/admin prototype entry string such as `module::fn` (run mode); useful until Marrow exposes canonical function-entry facts, but not a stable production entry API."),
-                    "args": { "type": "array", "description": "Debug/admin prototype positional scalar arguments for run mode; non-empty args require `allowPrototypeArgs: true` and are not a stable typed production API." },
-                    "allowPrototypeArgs": { "type": "boolean", "description": "Set true to enable the debug/admin prototype scalar decoder for non-empty `args`; omit for the stable default." },
+                    "entry": string_prop("Entry string such as `module::fn` (run mode); useful until Marrow exposes canonical function-entry facts, but not a stable production entry API."),
+                    "args": { "type": "array", "description": "Positional arguments for run mode; non-empty args are blocked until Marrow exposes typed run argument facts." },
                     "mode": { "type": "string", "enum": ["run", "test"], "description": "`run` (default) executes `entry`; `test` runs the project's tests." },
                 },
                 "required": ["file"],
@@ -200,16 +175,6 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
             let file = required_path(arguments, "file")?;
             Ok(mcp::saved_roots(&file, policy.allow_data))
         }
-        "mw_saved_get" => {
-            let file = required_path(arguments, "file")?;
-            let path = required_array(arguments, "path")?;
-            Ok(mcp::saved_get(&file, path, policy.allow_data))
-        }
-        "mw_saved_children" => {
-            let file = required_path(arguments, "file")?;
-            let path = required_array(arguments, "path")?;
-            Ok(mcp::saved_children(&file, path, policy.allow_data))
-        }
         "mw_data_integrity" => {
             let file = required_path(arguments, "file")?;
             Ok(mcp::data_integrity(&file, policy.allow_data))
@@ -225,12 +190,7 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
                     return Err(format!("unknown run mode `{other}`; use `run` or `test`"));
                 }
             };
-            let args_policy = if optional_bool(arguments, "allowPrototypeArgs").unwrap_or(false) {
-                RunArgsPolicy::AllowPrototypeScalars
-            } else {
-                RunArgsPolicy::StableTypedFactsOnly
-            };
-            Ok(mcp::run(&file, entry, &args, mode, args_policy))
+            Ok(mcp::run(&file, entry, &args, mode))
         }
         other => Err(format!("unknown tool `{other}`")),
     }
@@ -247,20 +207,6 @@ fn required_str<'a>(arguments: &'a Json, key: &str) -> Result<&'a str, String> {
 /// An optional string argument, or `None` when absent or not a string.
 fn optional_str<'a>(arguments: &'a Json, key: &str) -> Option<&'a str> {
     arguments.get(key).and_then(Json::as_str)
-}
-
-/// An optional boolean argument, or `None` when absent or not a boolean.
-fn optional_bool(arguments: &Json, key: &str) -> Option<bool> {
-    arguments.get(key).and_then(Json::as_bool)
-}
-
-/// A required array argument.
-fn required_array(arguments: &Json, key: &str) -> Result<Json, String> {
-    arguments
-        .get(key)
-        .filter(|value| value.is_array())
-        .cloned()
-        .ok_or_else(|| format!("missing or non-array argument `{key}`"))
 }
 
 /// An optional array argument, empty when absent.
@@ -312,8 +258,6 @@ mod tests {
             "mw_complete",
             "mw_resource_schema",
             "mw_saved_roots",
-            "mw_saved_get",
-            "mw_saved_children",
             "mw_data_integrity",
             "mw_run",
         ] {
@@ -333,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_marks_saved_data_tools_as_debug_admin_prototypes() {
+    fn catalog_marks_saved_data_tools_as_blocked_helpers() {
         let tools = tools();
         let tools = tools.as_array().unwrap();
         let saved_tool = |name: &str| {
@@ -343,53 +287,40 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing saved-data tool {name}"))
         };
 
-        for name in ["mw_saved_roots", "mw_saved_get", "mw_saved_children"] {
-            let description = saved_tool(name)["description"].as_str().unwrap();
-            let lower = description.to_ascii_lowercase();
-            assert!(
-                lower.contains("debug/admin prototype"),
-                "{name} must advertise the debug/admin prototype contract: {description}"
-            );
-            assert!(
-                lower.contains("raw saved-data"),
-                "{name} must advertise raw saved-data access: {description}"
-            );
-            assert!(
-                lower.contains("not a stable typed production api"),
-                "{name} must not present a stable typed production API: {description}"
-            );
-            assert!(
-                !lower.contains("schema-typed"),
-                "{name} must not claim schema-typed saved-data semantics: {description}"
-            );
-        }
-
-        for name in ["mw_saved_get", "mw_saved_children"] {
-            let description = saved_tool(name)["inputSchema"]["properties"]["path"]["description"]
-                .as_str()
-                .unwrap();
-            let lower = description.to_ascii_lowercase();
-            assert!(
-                lower.contains("debug/admin prototype"),
-                "{name}.path must advertise the debug/admin prototype contract: {description}"
-            );
-            assert!(
-                lower.contains("raw saved-data"),
-                "{name}.path must advertise raw saved-data path segments: {description}"
-            );
-            assert!(
-                lower.contains("not a stable typed production api"),
-                "{name}.path must not present a stable typed production API: {description}"
-            );
-            assert!(
-                !lower.contains("schema-typed"),
-                "{name}.path must not claim schema-typed path semantics: {description}"
-            );
-        }
+        let description = saved_tool("mw_saved_roots")["description"]
+            .as_str()
+            .unwrap();
+        let lower = description.to_ascii_lowercase();
+        assert!(
+            lower.contains("blocked-on-marrow"),
+            "mw_saved_roots must advertise the blocked contract: {description}"
+        );
+        assert!(
+            lower.contains("saved-data"),
+            "mw_saved_roots must advertise saved-data access: {description}"
+        );
+        assert!(
+            lower.contains("not a stable typed production api"),
+            "mw_saved_roots must not present a stable typed production API: {description}"
+        );
+        assert!(
+            !lower.contains("schema-typed"),
+            "mw_saved_roots must not claim schema-typed saved-data semantics: {description}"
+        );
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let removed_get = "mw_saved_get";
+        let removed_children = "mw_saved_children";
+        assert!(
+            !names.contains(&removed_get) && !names.contains(&removed_children),
+            "saved-data tools that accept client-authored paths stay absent until Marrow exposes typed path facts"
+        );
     }
 
     #[test]
-    fn catalog_demotes_mcp_tools_blocked_on_canonical_marrow_facts() {
+    fn catalog_marks_active_helpers_as_presentation_only() {
         let tools = tools();
         let tools = tools.as_array().unwrap();
         let tool = |name: &str| {
@@ -411,8 +342,8 @@ mod tests {
             "mw_complete must advertise that completion is a development helper: {complete}"
         );
         assert!(
-            complete.contains("blocked-on-marrow"),
-            "mw_complete must name the blocked-on-Marrow production contract: {complete}"
+            complete.contains("presentation-only"),
+            "mw_complete must advertise presentation-only helper status: {complete}"
         );
         assert!(
             complete.contains("canonical completion-context facts"),
@@ -427,6 +358,10 @@ mod tests {
         assert!(
             schema.contains("development inspection helper"),
             "mw_resource_schema must advertise inspection-helper status: {schema}"
+        );
+        assert!(
+            schema.contains("presentation-only"),
+            "mw_resource_schema must advertise presentation-only helper status: {schema}"
         );
         assert!(
             schema.contains("current checked schema facts"),
@@ -489,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_marks_mw_run_args_as_a_prototype_opt_in() {
+    fn catalog_marks_mw_run_args_as_blocked() {
         let tools = tools();
         let tools = tools.as_array().unwrap();
         let run_tool = tools
@@ -500,12 +435,8 @@ mod tests {
         let description = run_tool["description"].as_str().unwrap();
         let lower = description.to_ascii_lowercase();
         assert!(
-            lower.contains("debug/admin prototype"),
-            "mw_run must advertise its prototype execution contract: {description}"
-        );
-        assert!(
-            lower.contains("allowprototypeargs"),
-            "mw_run must name the explicit prototype arg opt-in: {description}"
+            !lower.contains("allowprototypeargs"),
+            "mw_run must not advertise an argument opt-in: {description}"
         );
         assert!(
             lower.contains("typed run argument facts"),
@@ -513,24 +444,21 @@ mod tests {
         );
 
         let properties = &run_tool["inputSchema"]["properties"];
+        let removed_args_opt_in = ["allow", "Prototype", "Args"].concat();
         assert!(
-            properties.get("allowPrototypeArgs").is_some(),
-            "mw_run schema must expose the explicit prototype arg opt-in: {properties}"
+            properties.get(&removed_args_opt_in).is_none(),
+            "mw_run schema must not expose an argument opt-in: {properties}"
         );
         let args_description = properties["args"]["description"].as_str().unwrap();
         let lower = args_description.to_ascii_lowercase();
         assert!(
-            lower.contains("debug/admin prototype"),
-            "mw_run.args must not look like a stable argument protocol: {args_description}"
-        );
-        assert!(
-            lower.contains("not a stable typed production api"),
-            "mw_run.args must not claim production typing: {args_description}"
+            lower.contains("blocked until marrow exposes typed run argument facts"),
+            "mw_run.args must name the Marrow blocker: {args_description}"
         );
     }
 
     #[test]
-    fn catalog_marks_mw_run_entry_as_a_debug_admin_prototype() {
+    fn catalog_marks_mw_run_entry_as_blocked() {
         let tools = tools();
         let tools = tools.as_array().unwrap();
         let run_tool = tools
@@ -541,8 +469,8 @@ mod tests {
         let description = run_tool["description"].as_str().unwrap();
         let lower = description.to_ascii_lowercase();
         assert!(
-            lower.contains("debug/admin prototype"),
-            "mw_run must advertise debug/admin prototype status: {description}"
+            lower.contains("presentation-only"),
+            "mw_run must advertise presentation-only status: {description}"
         );
         assert!(
             lower.contains("canonical function-entry facts"),
@@ -558,8 +486,8 @@ mod tests {
             .unwrap();
         let lower = entry_description.to_ascii_lowercase();
         assert!(
-            lower.contains("debug/admin prototype"),
-            "mw_run.entry must advertise debug/admin prototype status: {entry_description}"
+            lower.contains("entry string"),
+            "mw_run.entry must describe the entry string: {entry_description}"
         );
         assert!(
             lower.contains("canonical function-entry facts"),
@@ -601,43 +529,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_tool_arguments_reject_missing_saved_paths() {
-        let policy = Policy { allow_data: false };
-        for tool in ["mw_saved_get", "mw_saved_children"] {
-            let error = call(
-                tool,
-                &json!({ "file": "/nope/project/src/main.mw" }),
-                policy,
-            )
-            .expect_err("missing saved-data path must be a protocol argument error");
-            assert!(
-                error.contains("path"),
-                "{tool} should report the missing path argument: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn raw_tool_arguments_reject_non_array_saved_paths() {
-        let policy = Policy { allow_data: false };
-        for tool in ["mw_saved_get", "mw_saved_children"] {
-            let error = call(
-                tool,
-                &json!({
-                    "file": "/nope/project/src/main.mw",
-                    "path": "root",
-                }),
-                policy,
-            )
-            .expect_err("non-array saved-data path must be a protocol argument error");
-            assert!(
-                error.contains("path"),
-                "{tool} should report the non-array path argument: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn raw_tool_arguments_reject_non_array_run_args() {
         let policy = Policy { allow_data: false };
         let error = call(
@@ -657,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn mw_run_blocks_non_empty_args_without_prototype_opt_in() {
+    fn mw_run_blocks_non_empty_args() {
         let policy = Policy { allow_data: false };
         let result = call(
             "mw_run",
@@ -672,32 +563,7 @@ mod tests {
         let message = result["diagnostics"][0]["message"].as_str().unwrap();
         assert!(
             message.contains("typed run argument facts from Marrow"),
-            "mw_run args must be blocked before project loading without the prototype opt-in: {result}"
-        );
-    }
-
-    #[test]
-    fn mw_run_allows_non_empty_args_with_prototype_opt_in() {
-        let policy = Policy { allow_data: false };
-        let result = call(
-            "mw_run",
-            &json!({
-                "file": "/nope/project/src/main.mw",
-                "entry": "app::main",
-                "args": [1],
-                "allowPrototypeArgs": true,
-            }),
-            policy,
-        )
-        .unwrap();
-        let message = result["diagnostics"][0]["message"].as_str().unwrap();
-        assert!(
-            !message.contains("typed run argument facts from Marrow"),
-            "the explicit prototype opt-in should let core reach normal project loading: {result}"
-        );
-        assert!(
-            message.contains("no marrow.json"),
-            "the nonexistent project should fail after the args gate: {result}"
+            "mw_run args must be blocked before project loading: {result}"
         );
     }
 

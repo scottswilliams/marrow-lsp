@@ -52,15 +52,12 @@ function installVscodeStub() {
   };
 }
 
-function makeClient(children) {
+function makeClient() {
   return {
     async sendRequest(method, params) {
+      assert.equal(params, undefined);
       if (method === "marrow/savedRoots") {
         return { available: true, roots: ["Root"] };
-      }
-      if (method === "marrow/savedChildren") {
-        assert.deepEqual(params, { path: [{ root: "Root" }] });
-        return { available: true, children, more: false };
       }
       throw new Error(`unexpected request ${method}`);
     },
@@ -80,34 +77,14 @@ try {
   const { MarrowDataProvider } = await import(pathToFileURL(join(outDir, "dataExplorer.js")));
 
   const provider = new MarrowDataProvider();
-  provider.setClient(
-    makeClient([
-      {
-        kind: "key",
-        key: { str: "canonical" },
-        appendSegment: { index_key: { str: "canonical" } },
-      },
-      { kind: "key", key: { str: "legacy-key" } },
-      { kind: "name", name: "legacy_field" },
-    ]),
-  );
+  provider.setClient(makeClient());
 
   const roots = await provider.getChildren();
   assert.equal(roots.length, 1);
   const children = await provider.getChildren(roots[0]);
 
-  assert.deepEqual(children[0], {
-    kind: "store",
-    path: [{ root: "Root" }, { index_key: { str: "canonical" } }],
-    label: "\"canonical\"",
-    role: undefined,
-    detail: undefined,
-    type: undefined,
-  });
-  assert.deepEqual(children.slice(1), [
-    { kind: "unavailable", label: "path metadata unavailable" },
-    { kind: "unavailable", label: "path metadata unavailable" },
-  ]);
+  assert.deepEqual(roots[0], { kind: "root", label: "Root" });
+  assert.deepEqual(children, []);
 } finally {
   Module._load = restoreLoad;
   rmSync(outDir, { recursive: true, force: true });

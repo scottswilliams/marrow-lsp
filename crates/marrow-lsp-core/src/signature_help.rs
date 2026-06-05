@@ -7,12 +7,12 @@ use lsp_types::{
     SignatureInformation,
 };
 use marrow_check::{
-    AnalysisSnapshot, CheckedFunction, CheckedProgram, Def, DefItem, Resolution, ResolvableKind,
-    build_alias_map, expand_alias, resolve,
+    AnalysisSnapshot, CheckedFunction, CheckedParamMode, CheckedProgram, Def, DefItem, Resolution,
+    ResolvableKind, resolve,
 };
 use marrow_schema::{NodeKind, ResourceSchema, stdlib};
 use marrow_syntax::{
-    Declaration, FunctionDecl, Keyword, LexedSource, ParamMode, SourceSpan, Token, TokenKind,
+    Declaration, FunctionDecl, Keyword, LexedSource, SourceSpan, Token, TokenKind,
 };
 
 use crate::{language_facts, types::render_type};
@@ -27,11 +27,7 @@ pub fn signature_help(
 ) -> Option<SignatureHelp> {
     let call = active_call(source, lexed, offset)?;
     let from_module = module_of_file(program, file)?;
-    let aliases = module_imports(program, from_module)
-        .map(build_alias_map)
-        .unwrap_or_default();
-    let segments = expand_alias(&call.segments, &aliases);
-    let signature = signature_for(program, docs, from_module, &segments)?;
+    let signature = signature_for(program, docs, from_module, &call.segments)?;
     Some(help(signature, call.active_parameter, call.named_argument))
 }
 
@@ -490,8 +486,7 @@ fn checked_function_signature(
         .enumerate()
         .map(|(index, param)| {
             let mode = match param.mode {
-                Some(ParamMode::Out) => "out ",
-                Some(ParamMode::InOut) => "inout ",
+                Some(CheckedParamMode::InOut) => "inout ",
                 None => "",
             };
             let documentation = docs
@@ -696,14 +691,6 @@ fn module_of_file<'p>(program: &'p CheckedProgram, file: &Path) -> Option<&'p st
         .map(|module| module.name.as_str())
 }
 
-fn module_imports<'p>(program: &'p CheckedProgram, module_name: &str) -> Option<&'p [String]> {
-    program
-        .modules
-        .iter()
-        .find(|module| module.name == module_name)
-        .map(|module| module.imports.as_slice())
-}
-
 fn significant_tokens(lexed: &LexedSource) -> Vec<Token> {
     lexed
         .tokens
@@ -798,7 +785,7 @@ fn books(id: int): int
 fn id(value: int): int
     return value
 
-fn parse(text: string, out value: int, inout count: int): bool
+fn parse(text: string, inout value: int, inout count: int): bool
     value = 0
     count = count + 1
     return true
@@ -1039,13 +1026,13 @@ pub fn run(): int
 
         assert_eq!(
             signature_label(&help),
-            "parse(text: string, out value: int, inout count: int): bool"
+            "parse(text: string, inout value: int, inout count: int): bool"
         );
         assert_eq!(
             parameter_labels(&help),
             vec![
                 "text: string".to_string(),
-                "out value: int".to_string(),
+                "inout value: int".to_string(),
                 "inout count: int".to_string(),
             ]
         );
@@ -1281,7 +1268,7 @@ pub fn run(): int
     }
 
     #[test]
-    fn resource_index_key_list_returns_no_signature_help() {
+    fn resource_index_argument_list_returns_no_signature_help() {
         let (program, file) = project();
         let help = help_at(
             &program,

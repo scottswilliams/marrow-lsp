@@ -9,7 +9,8 @@ use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
-use marrow_run::{Host, RuntimeError, Value, run_entry_with_debugger};
+use marrow_run::{CheckedEntryCall, Host, RuntimeError, Value, run_entry_with_debugger};
+use marrow_store::tree::TreeStore;
 
 use crate::debugger::{Control, Debugger, RunEvent};
 
@@ -31,11 +32,9 @@ pub struct RunHandle {
     pub events: Receiver<RunEvent>,
 }
 
-/// Start the run on a dedicated thread: prepare the launch (program, entry,
-/// store), build the [`Debugger`] with prototype breakpoint lines, and run.
-/// Returns the handle and channels, or an error string if the launch could not be
-/// prepared. Preparing here (again) keeps the store open on the thread that uses
-/// it, never crossing back to the protocol thread.
+/// Start the run on a dedicated thread. Project preparation opens the store on
+/// that same thread, so non-send store internals never cross the protocol/run
+/// boundary.
 pub fn spawn(
     project_dir: std::path::PathBuf,
     entry: Option<String>,
@@ -43,9 +42,6 @@ pub fn spawn(
     breakpoint_lines: Vec<u32>,
     stop_on_entry: bool,
 ) -> Result<RunHandle, String> {
-    let launch = crate::project::prepare(&project_dir, entry.as_deref())
-        .map_err(|error| error.to_string())?;
-
     let (event_tx, event_rx) = channel::<RunEvent>();
     let (control_tx, control_rx) = channel::<Control>();
 
@@ -53,7 +49,8 @@ pub fn spawn(
         .name("marrow-dap-run".to_string())
         .spawn(move || {
             run_on_thread(
-                launch,
+                project_dir,
+                entry,
                 args,
                 breakpoint_lines,
                 stop_on_entry,
@@ -74,55 +71,49 @@ pub fn spawn(
 /// and run the entry. The live frame the hook serves never escapes this thread.
 /// Returns the [`Outcome`].
 fn run_on_thread(
-    launch: crate::project::Launch,
+    project_dir: std::path::PathBuf,
+    requested_entry: Option<String>,
     args: Vec<Value>,
     breakpoint_lines: Vec<u32>,
     stop_on_entry: bool,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
 ) -> Option<Outcome> {
+    let launch = match crate::project::prepare(&project_dir, requested_entry.as_deref()) {
+        Ok(launch) => launch,
+        Err(error) => {
+            return Some(Outcome {
+                output: String::new(),
+                result: Err(error.to_string()),
+            });
+        }
+    };
     let crate::project::Launch {
         program,
         entry,
         store,
     } = launch;
-    let debugger = Debugger::new(
-        breakpoint_lines,
-        stop_on_entry,
-        program.clone(),
-        events,
-        control,
-    );
-    // Dispatch on the concrete store so its `&RefCell<S>` unsizes to the
-    // `&RefCell<dyn Backend>` the runtime takes — a trait object behind a `Box`
-    // could not sit directly in a `RefCell<dyn Backend>`.
-    match store {
-        crate::project::LaunchStore::Memory(store) => {
-            run_with_store(store, &program, &entry, &args, debugger)
-        }
-        crate::project::LaunchStore::Native(store) => {
-            run_with_store(*store, &program, &entry, &args, debugger)
-        }
-    }
+    let debugger = Debugger::new(breakpoint_lines, stop_on_entry, events, control);
+    run_with_store(store, &program, &entry, &args, debugger)
 }
 
-/// Run the entry over a concrete store `S`, threading the debugger. The store sits
-/// in a stack `RefCell<S>` whose `&` unsizes to `&RefCell<dyn Backend>` at the call.
-fn run_with_store<S: marrow_store::backend::Backend + 'static>(
-    store: S,
+/// Run the entry over the launch store, threading the debugger.
+fn run_with_store(
+    store: TreeStore,
     program: &marrow_check::CheckedProgram,
     entry: &str,
     args: &[Value],
     mut debugger: Debugger,
 ) -> Option<Outcome> {
-    let store = RefCell::new(store);
     // A debug run gets a real clock and a captured log sink, so `std::clock`/
     // `std::log` work; it gets no filesystem and no maintenance.
     let log = std::rc::Rc::new(RefCell::new(String::new()));
     let host = Host::new()
         .with_system_clock()
         .with_log_sink(std::rc::Rc::clone(&log));
-    let result = run_entry_with_debugger(program, &store, &host, &mut debugger, entry, args);
+    let runtime = program.runtime();
+    let result = CheckedEntryCall::new(&runtime, entry, args.to_vec())
+        .and_then(|call| run_entry_with_debugger(&store, &host, &mut debugger, &call));
     Some(outcome(result, &log.borrow()))
 }
 
