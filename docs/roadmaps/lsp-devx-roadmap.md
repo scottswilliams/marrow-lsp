@@ -1,14 +1,16 @@
 # Marrow LSP And VS Code Dev Experience Roadmap
 
-This roadmap guides the Marrow LSP and VS Code developer-experience work. The active goal is to
-make `.mw` editing feel like a mature language extension: precise color, useful hover, reliable
-navigation, strong completions, and steady cleanup without diverging from the Marrow language
-kernel.
+This roadmap guides feature direction for the Marrow LSP and VS Code developer
+experience. Active hardening work now runs from
+[`production-readiness-roadmap.md`](production-readiness-roadmap.md). Feature
+lanes below resume only when they are consistent with that roadmap and the fact
+ledger.
 
 During the Marrow prototype-to-v0.1 rewrite, use
-[`v01-parallel-orchestration.md`](v01-parallel-orchestration.md) as the
-coordination plan between the Marrow project lead and the `marrow-lsp`
-orchestrator.
+[`v01-parallel-orchestration.md`](v01-parallel-orchestration.md) as historical
+coordination context and
+[`lsp-fact-consumption-ledger.md`](lsp-fact-consumption-ledger.md) as the
+surface-status contract.
 
 ## Operating Rules
 
@@ -33,8 +35,9 @@ orchestrator.
 - Every lane gets at least two read-only reviews before integration: one soundness review that tries
   to break the change with repros, and one idiom/spec review that checks fit with Marrow semantics
   and repo style.
-- Cleanup is continuous but scoped: improve files touched by a lane, remove stale helpers and
-  duplicated logic, and do not bundle unrelated refactors.
+- Cleanup is continuous but scoped: improve files touched by a lane, remove stale helpers,
+  duplicated logic, prototype paths, compatibility shims, and low-value comments, and do not
+  bundle unrelated refactors.
 
 ## Integration Bar
 
@@ -210,7 +213,8 @@ Expected outcomes:
   key types.
 - Large resource trees are summarized with counts and first few members rather than dumping the
   whole tree.
-- Root hover includes record count only when live data is enabled and the store is available.
+- Live record counts remain blocked until Marrow exposes checked saved-place
+  queries, typed store summaries, and source/store generation boundaries.
 - Data explorer terminology matches hover and completion terminology.
 
 Likely LSP files:

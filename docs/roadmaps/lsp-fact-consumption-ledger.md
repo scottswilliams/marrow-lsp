@@ -1,17 +1,20 @@
 # LSP Fact Consumption Ledger
 
 This ledger records what `marrow-lsp` may treat as semantic authority while
-Marrow core is moving to v0.1. The rule is direct: if a fact belongs to Marrow
-and Marrow does not expose it, LSP, MCP, DAP, and VS Code must delete the
-surface, block it, or render an explicitly presentation-only view. They must
-not reconstruct language, catalog, runtime, or storage meaning locally.
+Marrow core is moving to v0.1. It is maintained through the product-surface
+truth lane in
+[`production-readiness-roadmap.md`](production-readiness-roadmap.md). The rule
+is direct: if a fact belongs to Marrow and Marrow does not expose it, LSP, MCP,
+DAP, and VS Code must delete the surface, block it, or render an explicitly
+presentation-only view. They must not reconstruct language, catalog, runtime,
+or storage meaning locally.
 
 ## Status Definitions
 
 | Status | Meaning |
 | --- | --- |
 | `ready` | The surface consumes current public Marrow facts and does not decide language, catalog, storage, or runtime semantics locally. |
-| `presentation-only` | The surface is UI over source text, diagnostics, transport output, packaging, or bounded debug/admin data. It is not a stable semantic contract. |
+| `presentation-only` | The surface is UI over source text, diagnostics, transport output, packaging, or bounded debug/admin data. It is not a stable semantic contract. If users can invoke it, the contract must be explicit, bounded, tested, and impossible to confuse with production semantics. |
 | `blocked-on-marrow` | The surface needs a Marrow-owned fact that is not exposed, and the executable feature path is absent or returns a stable unavailable result. |
 | `deleted` | The prior implementation depended on removed or private Marrow details and has no active runtime/editor path. |
 
