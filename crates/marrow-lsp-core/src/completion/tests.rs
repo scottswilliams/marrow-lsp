@@ -255,24 +255,24 @@ fn bare_identifier_lists_locals_and_keywords() {
 }
 
 #[test]
-fn bare_identifier_lists_v01_keywords_without_removed_reserved_words() {
+fn bare_identifier_lists_statement_keywords_without_reserved_non_statements() {
     let (program, file) = project();
     let labels = complete(&program, &file, "module shelf::app\n\npub fn f()\n    |\n");
 
     for keyword in ["return", "transaction", "throw", "try"] {
         assert!(
             labels.contains(&keyword.to_string()),
-            "a v0.1 keyword {keyword:?}, got {labels:?}"
+            "a statement keyword {keyword:?}, got {labels:?}"
         );
     }
 
-    let removed_reserved: Vec<&str> = ["merge", "lock"]
+    let reserved_non_statements: Vec<&str> = ["merge", "lock"]
         .into_iter()
         .filter(|keyword| labels.contains(&keyword.to_string()))
         .collect();
     assert!(
-        removed_reserved.is_empty(),
-        "removed reserved words should not be bare completions, got {removed_reserved:?} in {labels:?}"
+        reserved_non_statements.is_empty(),
+        "reserved non-statement words should not be bare completions, got {reserved_non_statements:?} in {labels:?}"
     );
 }
 
