@@ -1,8 +1,10 @@
 use super::*;
+use crate::positions::LineIndex;
+use lsp_types::{Range, Url};
 use marrow_check::{AnalysisSnapshot, ProjectSources, analyze_project, build_binding_index};
 use marrow_project::parse_config;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A file-index map built from in-memory text, so a test can resolve spans
 /// without touching disk. Mirrors how the server threads open buffers' indices.

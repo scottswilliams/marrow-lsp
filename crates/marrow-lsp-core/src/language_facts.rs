@@ -1,4 +1,5 @@
 use marrow_schema::{ScalarType, stdlib};
+use marrow_syntax::Keyword;
 
 pub(crate) struct BareBuiltin {
     pub(crate) name: &'static str,
@@ -261,6 +262,28 @@ pub(crate) fn bare_builtin_kind(name: &str) -> Option<BareBuiltinKind> {
         .iter()
         .any(|builtin| builtin.name == name)
         .then_some(BareBuiltinKind::Function)
+}
+
+pub(crate) fn keyword_is_callable_path_segment(keyword: Keyword) -> bool {
+    keyword_callable_spelling(keyword)
+        .and_then(bare_builtin_kind)
+        .is_some()
+}
+
+fn keyword_callable_spelling(keyword: Keyword) -> Option<&'static str> {
+    match keyword {
+        Keyword::Int => Some("int"),
+        Keyword::Decimal => Some("decimal"),
+        Keyword::Bool => Some("bool"),
+        Keyword::String => Some("string"),
+        Keyword::Bytes => Some("bytes"),
+        Keyword::Date => Some("date"),
+        Keyword::Instant => Some("instant"),
+        Keyword::Duration => Some("duration"),
+        Keyword::ErrorCode => Some("ErrorCode"),
+        Keyword::Error => Some("Error"),
+        _ => None,
+    }
 }
 
 fn std_modules() -> Vec<&'static str> {

@@ -1,0 +1,157 @@
+use std::{collections::HashMap, path::Path};
+
+use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
+use marrow_check::{BindingIndex, RenameSafety, SymbolRef};
+
+use super::{
+    indices::FileIndex,
+    module_paths::{self, ModulePathDefinition},
+    source_names::{is_valid_rename, name_in_span, name_in_span_at, symbol_name},
+};
+
+/// Why a rename could not be carried out, for the caller to turn into a JSON-RPC
+/// error or a quiet refusal as its transport requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameError {
+    /// The cursor is not on a renameable symbol.
+    NoSymbol,
+    /// The requested replacement is not a single valid Marrow identifier.
+    InvalidName,
+    /// The symbol names data encoded on disk. Renaming it in source alone would
+    /// change the on-disk path and orphan the stored data, so it is refused.
+    SavedDataBacked,
+}
+
+impl RenameError {
+    /// A human-readable explanation, used as the message a transport surfaces.
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoSymbol => "no renameable symbol at this position".to_string(),
+            Self::InvalidName => "new name must be a valid Marrow identifier".to_string(),
+            Self::SavedDataBacked => "cannot rename: this names saved data, so renaming it in \
+                 source would orphan the stored records on disk"
+                .to_string(),
+        }
+    }
+}
+
+/// The definition site of the symbol at byte `offset` in `file`, as an LSP
+/// location, or `None` when the cursor is not on a known symbol.
+pub fn definition(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    index: &BindingIndex,
+    indices: &impl FileIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<Location> {
+    match module_paths::definition(snapshot, index, indices, file, offset) {
+        Some(ModulePathDefinition::Location(location)) => return Some(location),
+        Some(ModulePathDefinition::NoDefinition) => return None,
+        None => {}
+    }
+    if module_paths::saved_root_syntax_at(snapshot, file, offset) {
+        return None;
+    }
+    let symbol = index.definition(file, offset)?;
+    symbol_location(&symbol, indices)
+}
+
+/// Every reference to the symbol at byte `offset` in `file`, as LSP locations.
+pub fn references(
+    index: &BindingIndex,
+    indices: &impl FileIndex,
+    file: &Path,
+    offset: usize,
+    include_declaration: bool,
+) -> Option<Vec<Location>> {
+    let definition = index.definition(file, offset)?;
+    let refs = index.references(&definition);
+    let locations = refs
+        .iter()
+        .filter(|reference| include_declaration || **reference != definition)
+        .filter_map(|reference| symbol_location(reference, indices))
+        .collect();
+    Some(locations)
+}
+
+/// The identifier range the editor should pre-select for a rename at `offset`.
+pub fn prepare_rename(
+    index: &BindingIndex,
+    indices: &impl FileIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<Range> {
+    let definition = index.definition(file, offset)?;
+    let name = symbol_name(&definition, indices)?;
+    let line_index = indices.index_for(file)?;
+    let (start, end) = name_in_span_at(line_index.text(), offset, &name)?;
+    Some(line_index.range(start, end))
+}
+
+/// A workspace edit renaming the symbol at `offset` in `file` to `new_name`.
+pub fn rename(
+    index: &BindingIndex,
+    indices: &impl FileIndex,
+    file: &Path,
+    offset: usize,
+    new_name: &str,
+) -> Result<WorkspaceEdit, RenameError> {
+    if !is_valid_rename(new_name) {
+        return Err(RenameError::InvalidName);
+    }
+    let definition = index
+        .definition(file, offset)
+        .ok_or(RenameError::NoSymbol)?;
+    if let RenameSafety::SavedDataBacked = index.rename_safety(&definition) {
+        return Err(RenameError::SavedDataBacked);
+    }
+    let name = symbol_name(&definition, indices).ok_or(RenameError::NoSymbol)?;
+
+    let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for reference in index.references(&definition) {
+        let Some(line_index) = indices.index_for(&reference.file) else {
+            continue;
+        };
+        let Some((start, end)) = name_in_span(
+            line_index.text(),
+            reference.span.start_byte,
+            reference.span.end_byte,
+            &name,
+        ) else {
+            continue;
+        };
+        let Some(url) = Url::from_file_path(&reference.file).ok() else {
+            continue;
+        };
+        edits.entry(url).or_default().push(TextEdit {
+            range: line_index.range(start, end),
+            new_text: new_name.to_string(),
+        });
+    }
+
+    Ok(WorkspaceEdit {
+        changes: Some(edits),
+        document_changes: None,
+        change_annotations: None,
+    })
+}
+
+fn symbol_location(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<Location> {
+    let line_index = indices.index_for(&symbol.file)?;
+    let url = Url::from_file_path(&symbol.file).ok()?;
+    let range = match symbol_name(symbol, indices) {
+        Some(name) => {
+            match name_in_span(
+                line_index.text(),
+                symbol.span.start_byte,
+                symbol.span.end_byte,
+                &name,
+            ) {
+                Some((start, end)) => line_index.range(start, end),
+                None => line_index.range(symbol.span.start_byte, symbol.span.end_byte),
+            }
+        }
+        None => line_index.range(symbol.span.start_byte, symbol.span.end_byte),
+    };
+    Some(Location { uri: url, range })
+}
