@@ -1,7 +1,7 @@
 use super::*;
 use marrow_check::{ProjectSources, analyze_project, build_binding_index};
 use marrow_project::parse_config;
-use marrow_syntax::{lex_source, parse_source};
+use marrow_syntax::{Token, lex_source, parse_source};
 
 type DecodedToken = (u32, u32, u32, u32, u32);
 type DecodedTokens = Vec<DecodedToken>;
