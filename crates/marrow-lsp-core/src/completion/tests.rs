@@ -171,19 +171,19 @@ fn documentation_value(item: &CompletionItem) -> &str {
 #[test]
 fn after_caret_lists_durable_roots() {
     let (program, file) = project();
-    let labels = complete(
+    let items = complete_items(
         &program,
         &file,
         "module shelf::app\n\npub fn f()\n    delete ^|\n",
     );
-    assert!(
-        labels.contains(&"books".to_string()),
-        "after `^` the saved root `books` should be offered, got {labels:?}"
-    );
+    let books = item_named(&items, "books");
+    assert_eq!(books.kind, Some(CompletionItemKind::STRUCT));
+    assert_eq!(books.detail.as_deref(), Some("saved root of Book"));
+    assert_eq!(documentation_value(books), "Books saved by id.");
 }
 
 #[test]
-fn after_keyed_root_dot_lists_fields_and_layers() {
+fn after_keyed_root_dot_lists_no_saved_path_members_without_canonical_fact() {
     let (program, file) = project();
     let labels = complete(
         &program,
@@ -191,25 +191,13 @@ fn after_keyed_root_dot_lists_fields_and_layers() {
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).|\n",
     );
     assert!(
-        labels.contains(&"title".to_string()),
-        "fields, got {labels:?}"
-    );
-    assert!(
-        labels.contains(&"shelf".to_string()),
-        "fields, got {labels:?}"
-    );
-    assert!(
-        labels.contains(&"tags".to_string()),
-        "keyed leaf, got {labels:?}"
-    );
-    assert!(
-        labels.contains(&"notes".to_string()),
-        "group, got {labels:?}"
+        labels.is_empty(),
+        "saved-path member completion should be blocked without a canonical fact, got {labels:?}"
     );
 }
 
 #[test]
-fn after_keyed_root_dot_group_dot_lists_nested_members() {
+fn after_saved_layer_dot_lists_no_nested_members_without_canonical_fact() {
     let (program, file) = project();
     let labels = complete(
         &program,
@@ -217,13 +205,13 @@ fn after_keyed_root_dot_group_dot_lists_nested_members() {
         "module shelf::app\n\npub fn f(id: int, n: string)\n    const x = ^books(id).notes(n).|\n",
     );
     assert!(
-        labels.contains(&"text".to_string()),
-        "the `notes` group's field, got {labels:?}"
+        labels.is_empty(),
+        "saved-path layer completion should be blocked without a canonical fact, got {labels:?}"
     );
 }
 
 #[test]
-fn after_unkeyed_root_dot_lists_index_names() {
+fn after_unkeyed_root_dot_lists_no_indexes_without_canonical_fact() {
     let (program, file) = project();
     let labels = complete(
         &program,
@@ -231,8 +219,8 @@ fn after_unkeyed_root_dot_lists_index_names() {
         "module shelf::app\n\npub fn f()\n    const x = ^books.|\n",
     );
     assert!(
-        labels.contains(&"byShelf".to_string()),
-        "after `^books.` the index `byShelf` should be offered, got {labels:?}"
+        labels.is_empty(),
+        "saved-index completion should be blocked without a canonical fact, got {labels:?}"
     );
 }
 

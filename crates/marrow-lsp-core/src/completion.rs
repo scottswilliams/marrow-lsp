@@ -13,7 +13,7 @@ use std::path::Path;
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use marrow_check::{CheckedModule, CheckedProgram, scope_at};
-use marrow_schema::{EnumSchema, Node, NodeKind, ResourceSchema, StoreSchema, stdlib};
+use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
 
 use crate::{language_facts, types::render_type};
@@ -69,8 +69,7 @@ pub fn completion(
 ) -> Vec<CompletionItem> {
     match classify(source, lexed, offset) {
         Context::Root => root_completions(program),
-        Context::SavedPath { root, layers } => saved_path_completions(program, &root, &layers),
-        Context::SavedIndex { root } => saved_index_completions(program, &root),
+        Context::UnavailableSavedPath => Vec::new(),
         Context::Namespace { qualifier } => namespace_completions(program, file, &qualifier),
         Context::Type => type_completions(program),
         Context::Bare => bare_completions(program, file, parsed, offset),
@@ -81,11 +80,9 @@ pub fn completion(
 enum Context {
     /// Just after a `^`: the durable saved roots.
     Root,
-    /// After `^root(...).` (`layers` are the names already descended past the
-    /// key): fields and deeper layers of the resource stored at that root.
-    SavedPath { root: String, layers: Vec<String> },
-    /// After `^root.` with no key: the store's index names.
-    SavedIndex { root: String },
+    /// A saved-path dot position whose executable candidates need a canonical
+    /// Marrow completion fact.
+    UnavailableSavedPath,
     /// After `qualifier::`: what the qualifier (an enum, a used module, or a
     /// `std` module path) exposes.
     Namespace { qualifier: Vec<String> },
@@ -134,7 +131,11 @@ fn classify(source: &str, lexed: &LexedSource, offset: usize) -> Context {
             None => Context::Bare,
         },
         TokenKind::Dot | TokenKind::QuestionDot => {
-            saved_context_before(source, &tokens, anchor).unwrap_or(Context::Bare)
+            if is_saved_path_dot(&tokens, anchor) {
+                Context::UnavailableSavedPath
+            } else {
+                Context::Bare
+            }
         }
         // A `:` that introduces a type annotation (`name: <here>`, `): <here>`).
         TokenKind::Colon => {
@@ -169,53 +170,38 @@ fn qualifier_before(source: &str, tokens: &[Token], colon_index: usize) -> Optio
     Some(segments)
 }
 
-/// Decide whether the `.` at `dot_index` lies on a saved path (`^root...`), and
-/// classify it. Two shapes complete:
-///
-/// - `^root(keys).` and any deeper `.layer` or `.layer(keys)` chain — a keyed
-///   read: fields on the resource stored at the root, or the innermost layer's
-///   members.
-/// - `^root.` with no key application — the store's index names.
-///
-/// The chain left of the final `.` is a run of segments, each a layer name with
-/// an optional `(keys)` application, separated by `.`; this walks it leftward
-/// segment by segment back to the `^root`. Anything else yields `None`, so the
-/// caller falls back to a bare completion.
-fn saved_context_before(source: &str, tokens: &[Token], dot_index: usize) -> Option<Context> {
-    let mut layers: Vec<String> = Vec::new();
+/// Whether the `.` at `dot_index` lies on a saved path (`^root...`). Until
+/// Marrow exposes query-native saved-place completion facts, these positions
+/// return no candidates instead of falling back to bare lexical suggestions.
+fn is_saved_path_dot(tokens: &[Token], dot_index: usize) -> bool {
     let mut cursor = dot_index;
 
     loop {
-        let mut segment = cursor.checked_sub(1)?;
-        // An optional `(keys)` application on this segment: skip it to reach the
-        // layer name that owns it. Whether the segment is keyed decides, at the
-        // root, between an index read (`^root.`) and a field read (`^root(k).`).
+        let Some(mut segment) = cursor.checked_sub(1) else {
+            return false;
+        };
         let keyed = tokens[segment].kind == TokenKind::RightParen;
         if keyed {
-            segment = matching_open_paren(tokens, segment)?.checked_sub(1)?;
+            let Some(open_paren) = matching_open_paren(tokens, segment) else {
+                return false;
+            };
+            let Some(name) = open_paren.checked_sub(1) else {
+                return false;
+            };
+            segment = name;
         }
         if tokens[segment].kind != TokenKind::Identifier {
-            return None;
+            return false;
         }
-        let before = segment.checked_sub(1)?;
+        let Some(before) = segment.checked_sub(1) else {
+            return false;
+        };
         match tokens[before].kind {
-            // `^name` — the segment is the root. A bare `^root.` (no key) lists the
-            // store's index names; a keyed `^root(keys).…` lists fields and layers on
-            // the stored resource, descending any gathered group names.
-            TokenKind::Caret => {
-                let root = tokens[segment].text(source).to_string();
-                if !keyed && layers.is_empty() {
-                    return Some(Context::SavedIndex { root });
-                }
-                layers.reverse();
-                return Some(Context::SavedPath { root, layers });
-            }
-            // `.name` continues the chain to the left; record this layer and step.
+            TokenKind::Caret => return true,
             TokenKind::Dot | TokenKind::QuestionDot => {
-                layers.push(tokens[segment].text(source).to_string());
                 cursor = before;
             }
-            _ => return None,
+            _ => return false,
         }
     }
 }
@@ -267,47 +253,6 @@ fn root_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
         );
     }
     dedup(items)
-}
-
-/// The fields and deeper layers of the resource stored at `root`, after
-/// descending the already-typed `layers`. With no layers this is the resource's
-/// top-level members; otherwise the members of the innermost layer.
-fn saved_path_completions(
-    program: &CheckedProgram,
-    root: &str,
-    layers: &[String],
-) -> Vec<CompletionItem> {
-    let Some(resolved) = marrow_check::resolve::resolve_store_by_root(program, root) else {
-        return Vec::new();
-    };
-    let resource = resolved.resource;
-    let members: &[Node] = if layers.is_empty() {
-        &resource.members
-    } else {
-        let chain: Vec<&str> = layers.iter().map(String::as_str).collect();
-        match resource.descend_layers(&chain) {
-            Some(node) => &node.members,
-            None => return Vec::new(),
-        }
-    };
-    members.iter().map(member_item).collect()
-}
-
-/// The index names of the store whose saved root is `root` (`^root.`).
-fn saved_index_completions(program: &CheckedProgram, root: &str) -> Vec<CompletionItem> {
-    let Some(resolved) = marrow_check::resolve::resolve_store_by_root(program, root) else {
-        return Vec::new();
-    };
-    resolved
-        .store
-        .indexes
-        .iter()
-        .map(|index| {
-            item(&index.name, CompletionItemKind::METHOD)
-                .detail(format!("index({})", index.args.join(", ")))
-                .docs_from(&index.docs)
-        })
-        .collect()
 }
 
 /// What `qualifier::` exposes: an enum's members, a used module's public
@@ -476,33 +421,6 @@ fn current_module<'a>(program: &'a CheckedProgram, file: &Path) -> Option<&'a Ch
         .modules
         .iter()
         .find(|module| module.source_file == file)
-}
-
-/// A completion item for one resource member: a field, a keyed leaf, or a group.
-fn member_item(node: &Node) -> CompletionItem {
-    let (kind, detail) = match &node.kind {
-        NodeKind::Slot { ty, .. } if node.key_params.is_empty() => {
-            (CompletionItemKind::FIELD, ty.to_string())
-        }
-        NodeKind::Slot { ty, .. } => (
-            CompletionItemKind::METHOD,
-            format!("({}): {ty}", key_params(node)),
-        ),
-        NodeKind::Group => (
-            CompletionItemKind::MODULE,
-            format!("group({})", key_params(node)),
-        ),
-    };
-    item(&node.name, kind).detail(detail).docs_from(&node.docs)
-}
-
-/// The `name: type` list of a node's key parameters, for a layer's detail.
-fn key_params(node: &Node) -> String {
-    node.key_params
-        .iter()
-        .map(|key| format!("{}: {}", key.name, key.ty))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// A one-line rendering of a std op's signature, e.g. `(string, string): bool`.
