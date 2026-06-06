@@ -1414,17 +1414,23 @@ fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
 
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/dataIntegrity", "params": {} }),
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/dataIntegrity" }),
     );
     let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
     assert!(response.get("error").is_none(), "no error: {response:?}");
     let result = &response["result"];
     assert_eq!(
-        result["available"], false,
+        result["available"].as_bool(),
+        Some(false),
         "missing marrow.liveData opt-in should not read the store"
     );
-    assert_eq!(result["scanned"], 0, "no store entries should be scanned");
-    assert_eq!(result["findings"], json!([]));
+    assert_eq!(
+        result["scanned"].as_u64(),
+        Some(0),
+        "no store entries should be scanned"
+    );
+    assert_eq!(result["findings"].as_array().map(Vec::len), Some(0));
+    assert_eq!(result["truncated"].as_bool(), Some(false));
 
     let _ = server.0.kill();
 }

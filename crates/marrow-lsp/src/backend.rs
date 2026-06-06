@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use marrow_lsp_core::data_explorer::{SavedRootsResult, saved_roots};
-use marrow_lsp_core::data_integrity::{DataIntegrityParams, DataIntegrityResult, data_integrity};
+use marrow_lsp_core::data_integrity::{DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
@@ -86,10 +86,7 @@ impl Backend {
     /// store when live data is off, and it is invoked only on explicit request. A
     /// missing fresh checked program, a `None` reader (live data off, no project,
     /// or no native store), or an unreadable store answers `available: false`.
-    pub async fn data_integrity(
-        &self,
-        _params: DataIntegrityParams,
-    ) -> jsonrpc::Result<DataIntegrityResult> {
+    pub async fn data_integrity(&self) -> jsonrpc::Result<DataIntegrityResult> {
         let state = self.state.lock().await;
         let reader = self.reader(&state.workspace);
         let Some(program) = state.workspace.fresh_program(&state.documents) else {
@@ -171,7 +168,10 @@ impl LanguageServer for Backend {
         // client passes it under `initializationOptions`; only an explicit `true`
         // enables opening the native dev store.
         if let Some(options) = &params.initialization_options
-            && options.get("marrow.liveData") == Some(&serde_json::Value::Bool(true))
+            && options
+                .get("marrow.liveData")
+                .and_then(|value| value.as_bool())
+                == Some(true)
         {
             self.live_data.store(true, Ordering::Relaxed);
         }

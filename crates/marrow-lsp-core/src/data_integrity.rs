@@ -40,11 +40,6 @@ pub struct SchemaImpact {
     pub truncated: bool,
 }
 
-/// `marrow/dataIntegrity` request params: none. The advisory always scans the
-/// whole store, so the request carries no arguments; an empty object decodes here.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DataIntegrityParams {}
-
 /// `marrow/dataIntegrity` reply: whether the store could be read, plus the scan's
 /// findings, the count scanned, and whether the store held more past the cap. When
 /// `available` is false the findings are empty and the editor shows an unavailable
