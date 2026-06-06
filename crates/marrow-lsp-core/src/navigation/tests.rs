@@ -281,6 +281,10 @@ fn rename_rejects_invalid_replacement_text() {
     let index = build_binding_index(&snapshot);
     let def_offset = offset_of(source, "const n") + "const ".len();
 
+    assert!(
+        rename(&index, &indices, &file, def_offset, "count2").is_ok(),
+        "a normal identifier remains a valid rename target"
+    );
     assert_eq!(
         rename(&index, &indices, &file, def_offset, "two words"),
         Err(RenameError::InvalidName)
@@ -291,11 +295,21 @@ fn rename_rejects_invalid_replacement_text() {
     );
     // Marrow keywords are not valid identifiers; renaming a symbol to one
     // would produce source that no longer parses.
-    for keyword in ["at", "index", "unique", "out", "inout", "ErrorCode"] {
+    for keyword in [
+        "at",
+        "index",
+        "unique",
+        "out",
+        "inout",
+        "ErrorCode",
+        "store",
+        "evolve",
+        "is",
+    ] {
         assert_eq!(
             rename(&index, &indices, &file, def_offset, keyword),
             Err(RenameError::InvalidName),
-            "renaming to the reserved word `{keyword}` must be rejected"
+            "renaming to the keyword `{keyword}` must be rejected"
         );
     }
 }

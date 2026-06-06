@@ -820,65 +820,23 @@ fn is_keyword(word: &str) -> bool {
 }
 
 fn is_valid_rename(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
+    let lexed = lex_source(name);
+    if !lexed.diagnostics.is_empty() {
+        return false;
+    }
+
+    let mut tokens = lexed
+        .tokens
+        .iter()
+        .filter(|token| token.kind != TokenKind::Eof);
+    let Some(token) = tokens.next() else {
         return false;
     };
-    is_ident_start(first) && chars.all(is_ident_continue) && !is_reserved_word(name)
-}
 
-fn is_reserved_word(word: &str) -> bool {
-    matches!(
-        word,
-        "and"
-            | "at"
-            | "bool"
-            | "break"
-            | "bytes"
-            | "catch"
-            | "const"
-            | "continue"
-            | "date"
-            | "decimal"
-            | "delete"
-            | "duration"
-            | "else"
-            | "enum"
-            | "Error"
-            | "ErrorCode"
-            | "false"
-            | "finally"
-            | "fn"
-            | "for"
-            | "if"
-            | "in"
-            | "index"
-            | "inout"
-            | "instant"
-            | "int"
-            | "lock"
-            | "match"
-            | "merge"
-            | "module"
-            | "not"
-            | "or"
-            | "out"
-            | "pub"
-            | "required"
-            | "resource"
-            | "return"
-            | "sequence"
-            | "string"
-            | "throw"
-            | "transaction"
-            | "true"
-            | "try"
-            | "unique"
-            | "unknown"
-            | "use"
-            | "var"
-            | "while"
-    )
+    tokens.next().is_none()
+        && token.kind == TokenKind::Identifier
+        && token.span.start_byte == 0
+        && token.span.end_byte == name.len()
 }
 
 #[cfg(test)]
