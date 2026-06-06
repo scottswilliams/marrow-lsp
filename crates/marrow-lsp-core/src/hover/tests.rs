@@ -1,4 +1,5 @@
 use super::*;
+use lsp_types::HoverContents;
 use marrow_check::{ProjectSources, analyze_project};
 use marrow_project::parse_config;
 
@@ -1377,6 +1378,28 @@ store ^books(id: int): Book
     assert!(
         !value.contains("index byTitle(title) unique"),
         "resource hover should not include store-owned indexes: {value}"
+    );
+}
+
+#[test]
+fn hover_over_a_store_index_declaration_name_shows_docs_and_signature() {
+    let source = "\
+module a
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+    ;; Books by display title.
+    index byTitle(title) unique
+";
+    let (snapshot, file) = analyze(source);
+    let index = index_for(&snapshot);
+    let value = hover_value(&snapshot, &index, &file, source, "byTitle");
+
+    assert_eq!(
+        value,
+        "```marrow\nindex byTitle(title) unique\n```\n\nBooks by display title."
     );
 }
 
