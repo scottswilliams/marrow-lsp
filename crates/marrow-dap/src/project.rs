@@ -15,6 +15,10 @@ use marrow_store::tree::TreeStore;
 
 /// The project config file whose directory is the project root.
 const CONFIG_FILE: &str = "marrow.json";
+const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
+const STATUS_INVALID_PROJECT: &str = "invalid-project";
+const FUNCTION_ENTRY_FACTS: &str = "canonical function-entry facts";
+const CATALOG_IDENTITY_FACTS: &str = "accepted catalog identity facts";
 
 /// A loaded project ready to debug: its checked program, the resolved entry
 /// function name, and a fresh in-memory store the run will read and write.
@@ -60,6 +64,34 @@ impl std::fmt::Display for LaunchError {
             Self::CheckErrors(errors) => {
                 write!(f, "the project has errors: {}", errors.join("; "))
             }
+        }
+    }
+}
+
+impl LaunchError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoProject(_) | Self::Config(_) | Self::Analyze(_) | Self::CheckErrors(_) => {
+                "dap.launchProject.invalid"
+            }
+            Self::NoEntry | Self::ExplicitEntryBlocked => "dap.launchEntry.blocked",
+            Self::CatalogIdentityBlocked => "dap.launchCatalogIdentity.blocked",
+        }
+    }
+
+    pub fn status(&self) -> &'static str {
+        if self.blocked_on().is_some() {
+            STATUS_BLOCKED_ON_MARROW
+        } else {
+            STATUS_INVALID_PROJECT
+        }
+    }
+
+    pub fn blocked_on(&self) -> Option<&'static str> {
+        match self {
+            Self::NoEntry | Self::ExplicitEntryBlocked => Some(FUNCTION_ENTRY_FACTS),
+            Self::CatalogIdentityBlocked => Some(CATALOG_IDENTITY_FACTS),
+            Self::NoProject(_) | Self::Config(_) | Self::Analyze(_) | Self::CheckErrors(_) => None,
         }
     }
 }
@@ -155,6 +187,9 @@ pub fn main(): int
             matches!(error, LaunchError::CatalogIdentityBlocked),
             "{error}"
         );
+        assert_eq!(error.code(), "dap.launchCatalogIdentity.blocked");
+        assert_eq!(error.status(), "blocked-on-marrow");
+        assert_eq!(error.blocked_on(), Some("accepted catalog identity facts"));
         assert!(
             !dir.path().join("marrow.catalog.json").exists(),
             "a presentation-only debug prepare must not write the accepted catalog"
@@ -176,11 +211,9 @@ pub fn main(): int
             matches!(error, LaunchError::ExplicitEntryBlocked),
             "{error}"
         );
-        let message = error.to_string();
-        assert!(
-            message.contains("canonical function-entry facts"),
-            "explicit entry rejection should name Marrow entry facts: {message}"
-        );
+        assert_eq!(error.code(), "dap.launchEntry.blocked");
+        assert_eq!(error.status(), "blocked-on-marrow");
+        assert_eq!(error.blocked_on(), Some("canonical function-entry facts"));
     }
 
     /// The launch error, asserting the call did not unexpectedly succeed without
@@ -210,19 +243,9 @@ pub fn main(): int
         );
         let error = expect_error(prepare(dir.path(), None));
         assert!(matches!(error, LaunchError::NoEntry), "{error}");
-        let message = error.to_string();
-        assert!(
-            message.contains("canonical function-entry discovery facts"),
-            "missing entry should name Marrow entry-call facts: {message}"
-        );
-        assert!(
-            message.contains("defaultEntry"),
-            "missing entry should preserve defaultEntry guidance: {message}"
-        );
-        assert!(
-            !message.contains("pass `entry`"),
-            "missing entry must not advertise explicit entry overrides: {message}"
-        );
+        assert_eq!(error.code(), "dap.launchEntry.blocked");
+        assert_eq!(error.status(), "blocked-on-marrow");
+        assert_eq!(error.blocked_on(), Some("canonical function-entry facts"));
     }
 
     #[test]
@@ -230,5 +253,8 @@ pub fn main(): int
         let dir = tempfile::tempdir().unwrap();
         let error = expect_error(prepare(dir.path(), None));
         assert!(matches!(error, LaunchError::NoProject(_)), "{error}");
+        assert_eq!(error.code(), "dap.launchProject.invalid");
+        assert_eq!(error.status(), "invalid-project");
+        assert_eq!(error.blocked_on(), None);
     }
 }

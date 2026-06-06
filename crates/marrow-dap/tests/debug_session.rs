@@ -147,6 +147,26 @@ fn write_blocked_arg_fixture(dir: &Path) {
     .unwrap();
 }
 
+fn write_catalog_identity_fixture(dir: &Path) {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  resource Book\n\
+                  \x20   required title: string\n\
+                  \n\
+                  store ^books(id: int): Book\n\
+                  \n\
+                  pub fn main(): int\n\
+                  \x20   return 1\n";
+    std::fs::write(src.join("shelf.mw"), source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
+    )
+    .unwrap();
+}
+
 /// Write a fixture with an expandable local sequence so DAP value responses
 /// exercise the local expansion contract while durable surfaces stay blocked.
 fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
@@ -199,6 +219,73 @@ fn assert_debug_admin_value_contract(value: &Json, missing_fact: &str) {
     );
 }
 
+fn assert_response_marrow_error(
+    response: &Json,
+    code: &str,
+    status: &str,
+    blocked_on: Option<&str>,
+) {
+    assert_eq!(response["success"], false, "{response}");
+    let has_display_message = response["message"]
+        .as_str()
+        .map(|text| !text.is_empty())
+        .unwrap_or(false);
+    assert!(
+        has_display_message,
+        "failed DAP responses should keep a client display message: {response}"
+    );
+
+    let contract = response["body"]["marrowError"]
+        .as_object()
+        .unwrap_or_else(|| panic!("failed DAP response should include marrowError: {response}"));
+    assert_eq!(
+        contract.get("code").and_then(Json::as_str),
+        Some(code),
+        "DAP error should expose stable code `{code}`: {response}"
+    );
+    assert_eq!(
+        contract.get("status").and_then(Json::as_str),
+        Some(status),
+        "DAP error should expose stable status `{status}`: {response}"
+    );
+    match blocked_on {
+        Some(missing_fact) => assert_eq!(
+            contract.get("blockedOn").and_then(Json::as_str),
+            Some(missing_fact),
+            "DAP error should name `{missing_fact}`: {response}"
+        ),
+        None => assert!(
+            contract.get("blockedOn").is_none(),
+            "DAP error should not expose blockedOn when it is not blocked on Marrow: {response}"
+        ),
+    }
+}
+
+fn assert_blocked_response(response: &Json, code: &str, blocked_on: &str) {
+    assert_response_marrow_error(response, code, "blocked-on-marrow", Some(blocked_on));
+}
+
+fn assert_breakpoint_marrow_contract(breakpoint: &Json, code: &str, blocked_on: &str) {
+    let contract = breakpoint["marrowContract"].as_object().unwrap_or_else(|| {
+        panic!("advisory breakpoint should include marrowContract: {breakpoint}")
+    });
+    assert_eq!(
+        contract.get("code").and_then(Json::as_str),
+        Some(code),
+        "breakpoint should expose stable code `{code}`: {breakpoint}"
+    );
+    assert_eq!(
+        contract.get("status").and_then(Json::as_str),
+        Some("blocked-on-marrow"),
+        "breakpoint should expose blocked status: {breakpoint}"
+    );
+    assert_eq!(
+        contract.get("blockedOn").and_then(Json::as_str),
+        Some(blocked_on),
+        "breakpoint should name `{blocked_on}`: {breakpoint}"
+    );
+}
+
 #[test]
 fn launch_blocks_non_empty_args_by_default_until_typed_facts_exist() {
     let dir = tempfile::tempdir().unwrap();
@@ -218,15 +305,10 @@ fn launch_blocks_non_empty_args_by_default_until_typed_facts_exist() {
         }),
     );
     let blocked = client.response_for(launch);
-    assert_eq!(blocked["success"], false, "{blocked}");
-    let message = blocked["message"].as_str().unwrap();
-    assert!(
-        message.contains("blocked-on-marrow"),
-        "non-empty args rejection should name the Marrow blocker: {blocked}"
-    );
-    assert!(
-        message.contains("typed launch argument decoding facts"),
-        "non-empty args rejection should name the missing facts: {blocked}"
+    assert_blocked_response(
+        &blocked,
+        "dap.launchArgs.blocked",
+        "typed launch argument decoding facts",
     );
 }
 
@@ -249,15 +331,59 @@ fn launch_rejects_non_array_args_as_protocol_validation() {
         }),
     );
     let rejected = client.response_for(launch);
-    assert_eq!(rejected["success"], false, "{rejected}");
-    let message = rejected["message"].as_str().unwrap();
-    assert!(
-        message.contains("`args` must be an array"),
-        "non-array args should fail protocol validation: {rejected}"
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchArgs.invalidType",
+        "invalid-params",
+        None,
     );
-    assert!(
-        !message.contains("blocked-on-marrow"),
-        "non-array args should not be reported as a semantic blocker: {rejected}"
+}
+
+#[test]
+fn launch_rejects_missing_project_config_with_typed_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+        }),
+    );
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchProject.invalid",
+        "invalid-project",
+        None,
+    );
+}
+
+#[test]
+fn launch_blocks_catalog_identity_without_typed_admission_facts() {
+    let dir = tempfile::tempdir().unwrap();
+    write_catalog_identity_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+        }),
+    );
+    let blocked = client.response_for(launch);
+    assert_blocked_response(
+        &blocked,
+        "dap.launchCatalogIdentity.blocked",
+        "accepted catalog identity facts",
     );
 }
 
@@ -280,15 +406,10 @@ fn launch_rejects_explicit_entry_strings_until_canonical_facts_exist() {
         }),
     );
     let blocked = client.response_for(launch);
-    assert_eq!(blocked["success"], false, "{blocked}");
-    let message = blocked["message"].as_str().unwrap();
-    assert!(
-        message.contains("blocked-on-marrow"),
-        "explicit entry rejection should name the Marrow blocker: {blocked}"
-    );
-    assert!(
-        message.contains("canonical function-entry facts"),
-        "explicit entry rejection should name the missing facts: {blocked}"
+    assert_blocked_response(
+        &blocked,
+        "dap.launchEntry.blocked",
+        "canonical function-entry facts",
     );
 }
 
@@ -332,14 +453,10 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
     assert_eq!(breakpoints.len(), 1, "{advisory}");
     assert_eq!(breakpoints[0]["verified"], false, "{advisory}");
     assert_eq!(breakpoints[0]["line"], 6, "{advisory}");
-    let message = breakpoints[0]["message"].as_str().unwrap();
-    assert!(
-        message.contains("blocked-on-marrow"),
-        "advisory breakpoint should name the Marrow blocker: {advisory}"
-    );
-    assert!(
-        message.contains("canonical stop-point facts"),
-        "advisory breakpoint should name the missing facts: {advisory}"
+    assert_breakpoint_marrow_contract(
+        &breakpoints[0],
+        "dap.breakpoint.unverified",
+        "canonical stop-point facts",
     );
 
     // configurationDone starts at the entry stop; stepping reaches the inspection line.
@@ -399,31 +516,19 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
             json!({ "expression": expression, "context": "watch" }),
         );
         let blocked = client.response_for(blocked);
-        assert_eq!(blocked["success"], false, "{blocked}");
-        let message = blocked["message"].as_str().unwrap();
-        assert!(
-            message.contains("blocked-on-marrow"),
-            "non-^ evaluate rejection should name the Marrow blocker: {blocked}"
-        );
-        assert!(
-            message.contains("canonical expression/evaluate facts"),
-            "non-^ evaluate rejection should name the missing facts: {blocked}"
+        assert_blocked_response(
+            &blocked,
+            "dap.evaluate.blocked",
+            "canonical expression/evaluate facts",
         );
     }
 
     let durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
     let durable_variables = client.response_for(durable_variables);
-    assert!(
-        durable_variables["success"] == false
-            && durable_variables["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("blocked-on-marrow")
-            && durable_variables["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("typed durable watch/path facts"),
-        "fixed durable variables reference must reject with the Marrow blocker: {durable_variables}"
+    assert_blocked_response(
+        &durable_variables,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
     );
 
     let watch = client.request(
@@ -431,11 +536,10 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
         json!({ "expression": "^books(1).title", "context": "watch" }),
     );
     let watch = client.response_for(watch);
-    assert_eq!(watch["success"], false, "{watch}");
-    let message = watch["message"].as_str().unwrap();
-    assert!(
-        message.contains("blocked-on-marrow") && message.contains("typed durable watch/path facts"),
-        "durable watch rejection should name the missing Marrow facts: {watch}"
+    assert_blocked_response(
+        &watch,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
     );
 
     // A non-^ expression is refused at the session boundary.
@@ -444,13 +548,10 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
         json!({ "expression": "1 + 1", "context": "watch" }),
     );
     let bad = client.response_for(bad);
-    assert_eq!(bad["success"], false, "{bad}");
-    assert!(
-        bad["message"]
-            .as_str()
-            .unwrap()
-            .contains("canonical expression/evaluate facts"),
-        "{bad}"
+    assert_blocked_response(
+        &bad,
+        "dap.evaluate.blocked",
+        "canonical expression/evaluate facts",
     );
 
     // continue to termination: expect the print output and a terminated event.
@@ -494,6 +595,11 @@ fn advisory_breakpoint_does_not_stop_without_stop_on_entry() {
     );
     let advisory = client.response_for(set);
     assert_eq!(advisory["body"]["breakpoints"][0]["verified"], false);
+    assert_breakpoint_marrow_contract(
+        &advisory["body"]["breakpoints"][0],
+        "dap.breakpoint.unverified",
+        "canonical stop-point facts",
+    );
 
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
@@ -587,13 +693,10 @@ fn dap_value_surfaces_mark_blocked_contracts() {
 
     let durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
     let durable_variables = client.response_for(durable_variables);
-    assert_eq!(durable_variables["success"], false, "{durable_variables}");
-    assert!(
-        durable_variables["message"]
-            .as_str()
-            .unwrap()
-            .contains("typed durable watch/path facts"),
-        "{durable_variables}"
+    assert_blocked_response(
+        &durable_variables,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
     );
 
     let watch = client.request(
@@ -601,13 +704,10 @@ fn dap_value_surfaces_mark_blocked_contracts() {
         json!({ "expression": "^books(1).title", "context": "watch" }),
     );
     let watch = client.response_for(watch);
-    assert_eq!(watch["success"], false, "{watch}");
-    assert!(
-        watch["message"]
-            .as_str()
-            .unwrap()
-            .contains("typed durable watch/path facts"),
-        "{watch}"
+    assert_blocked_response(
+        &watch,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
     );
 }
 
@@ -664,16 +764,10 @@ fn durable_data_inspection_is_blocked_by_default() {
 
     let manual_durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
     let manual_durable_variables = client.response_for(manual_durable_variables);
-    assert_eq!(
-        manual_durable_variables["success"], false,
-        "durable-data variables must reject the fixed reference by default: {manual_durable_variables}"
-    );
-    assert!(
-        manual_durable_variables["message"]
-            .as_str()
-            .unwrap()
-            .contains("blocked-on-marrow"),
-        "durable-data variables rejection should name the Marrow blocker: {manual_durable_variables}"
+    assert_blocked_response(
+        &manual_durable_variables,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
     );
 
     let local_watch = client.request(
@@ -681,13 +775,10 @@ fn durable_data_inspection_is_blocked_by_default() {
         json!({ "expression": "title", "context": "watch" }),
     );
     let local_watch = client.response_for(local_watch);
-    assert_eq!(local_watch["success"], false, "{local_watch}");
-    assert!(
-        local_watch["message"]
-            .as_str()
-            .unwrap()
-            .contains("canonical expression/evaluate facts"),
-        "{local_watch}"
+    assert_blocked_response(
+        &local_watch,
+        "dap.evaluate.blocked",
+        "canonical expression/evaluate facts",
     );
 
     let durable_watch = client.request(
@@ -695,17 +786,28 @@ fn durable_data_inspection_is_blocked_by_default() {
         json!({ "expression": "  ^books(1).title", "context": "watch" }),
     );
     let durable_watch = client.response_for(durable_watch);
-    assert_eq!(durable_watch["success"], false, "{durable_watch}");
-    let message = durable_watch["message"].as_str().unwrap();
-    assert!(
-        message.contains("blocked-on-marrow"),
-        "durable-data rejection should name the Marrow blocker: {durable_watch}"
+    assert_blocked_response(
+        &durable_watch,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
     );
-    assert!(
-        message.contains("typed durable watch/path facts")
-            || message.contains("durable-data inspection"),
-        "durable-data rejection should name the missing facts: {durable_watch}"
-    );
+}
+
+#[test]
+fn local_state_failures_expose_typed_contracts() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    let cont = client.response_for(cont);
+    assert_response_marrow_error(&cont, "dap.notRunning", "invalid-state", None);
+
+    let step = client.request("stepIn", json!({ "threadId": 1 }));
+    let step = client.response_for(step);
+    assert_response_marrow_error(&step, "dap.notStopped", "invalid-state", None);
 }
 
 #[test]
@@ -757,15 +859,10 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
         json!({ "expression": "title", "context": "hover" }),
     );
     let hover = client.response_for(hover);
-    assert_eq!(hover["success"], false, "{hover}");
-    let message = hover["message"].as_str().unwrap();
-    assert!(
-        message.contains("blocked-on-marrow"),
-        "hover evaluate rejection should name the Marrow blocker: {hover}"
-    );
-    assert!(
-        message.contains("canonical evaluate facts"),
-        "hover evaluate rejection should name the missing facts: {hover}"
+    assert_blocked_response(
+        &hover,
+        "dap.hoverEvaluate.blocked",
+        "canonical evaluate facts",
     );
 }
 

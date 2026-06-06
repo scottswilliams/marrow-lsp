@@ -28,6 +28,16 @@ const DURABLE_REF: i64 = 2;
 const FIRST_DYNAMIC_REF: i64 = 1000;
 /// The single thread id the debugger exposes — the run is single-threaded.
 const THREAD_ID: i64 = 1;
+const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
+const STATUS_INVALID_PARAMS: &str = "invalid-params";
+const STATUS_INVALID_STATE: &str = "invalid-state";
+const STATUS_RUNTIME_ERROR: &str = "runtime-error";
+const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
+const LAUNCH_ARGS_FACTS: &str = "typed launch argument decoding facts";
+const STOP_POINT_FACTS: &str = "canonical stop-point facts";
+const EXPRESSION_EVALUATE_FACTS: &str = "canonical expression/evaluate facts";
+const HOVER_EVALUATE_FACTS: &str = "canonical evaluate facts";
+const DURABLE_WATCH_PATH_FACTS: &str = "typed durable watch/path facts";
 const RAW_DATA_INSPECTION_BLOCKED: &str =
     "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
 const EXPRESSION_EVALUATE_BLOCKED: &str = "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow";
@@ -35,7 +45,74 @@ const LAUNCH_ARGS_BLOCKED: &str =
     "blocked-on-marrow: DAP launch args need typed launch argument decoding facts from Marrow";
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
+const HOVER_EVALUATE_BLOCKED: &str =
+    "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
+const ERROR_UNSUPPORTED_REQUEST: DapError =
+    DapError::new("dap.unsupportedRequest", STATUS_UNSUPPORTED_REQUEST);
+const ERROR_LAUNCH_PROJECT_INVALID_PARAMS: DapError =
+    DapError::new("dap.launchProject.invalid", STATUS_INVALID_PARAMS);
+const ERROR_LAUNCH_ARGS_INVALID_TYPE: DapError =
+    DapError::new("dap.launchArgs.invalidType", STATUS_INVALID_PARAMS);
+const ERROR_LAUNCH_ARGS_BLOCKED: DapError =
+    DapError::blocked("dap.launchArgs.blocked", LAUNCH_ARGS_FACTS);
+const ERROR_BREAKPOINT_UNVERIFIED: DapError =
+    DapError::blocked("dap.breakpoint.unverified", STOP_POINT_FACTS);
+const ERROR_CONFIGURATION_NOT_READY: DapError =
+    DapError::new("dap.launch.notConfigured", STATUS_INVALID_STATE);
+const ERROR_RUN_INVALID: DapError = DapError::new("dap.run.invalid", STATUS_RUNTIME_ERROR);
+const ERROR_DURABLE_DATA_BLOCKED: DapError =
+    DapError::blocked("dap.durableData.blocked", DURABLE_WATCH_PATH_FACTS);
+const ERROR_NOT_RUNNING: DapError = DapError::new("dap.notRunning", STATUS_INVALID_STATE);
+const ERROR_NOT_STOPPED: DapError = DapError::new("dap.notStopped", STATUS_INVALID_STATE);
+const ERROR_EVALUATE_BLOCKED: DapError =
+    DapError::blocked("dap.evaluate.blocked", EXPRESSION_EVALUATE_FACTS);
+const ERROR_HOVER_EVALUATE_BLOCKED: DapError =
+    DapError::blocked("dap.hoverEvaluate.blocked", HOVER_EVALUATE_FACTS);
+
+#[derive(Clone, Copy)]
+struct DapError {
+    code: &'static str,
+    status: &'static str,
+    blocked_on: Option<&'static str>,
+}
+
+impl DapError {
+    const fn new(code: &'static str, status: &'static str) -> Self {
+        Self {
+            code,
+            status,
+            blocked_on: None,
+        }
+    }
+
+    const fn blocked(code: &'static str, blocked_on: &'static str) -> Self {
+        Self {
+            code,
+            status: STATUS_BLOCKED_ON_MARROW,
+            blocked_on: Some(blocked_on),
+        }
+    }
+
+    fn from_launch_error(error: &crate::project::LaunchError) -> Self {
+        Self {
+            code: error.code(),
+            status: error.status(),
+            blocked_on: error.blocked_on(),
+        }
+    }
+
+    fn metadata(self) -> Json {
+        let mut value = json!({
+            "code": self.code,
+            "status": self.status,
+        });
+        if let Some(blocked_on) = self.blocked_on {
+            value["blockedOn"] = json!(blocked_on);
+        }
+        value
+    }
+}
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
 #[derive(Clone)]
@@ -117,6 +194,22 @@ impl<W: Write> Session<W> {
         write_message(&mut self.out, &response);
     }
 
+    fn respond_error(&mut self, request: &Json, message: impl Into<String>, error: DapError) {
+        let seq = self.next_seq();
+        let response = json!({
+            "seq": seq,
+            "type": "response",
+            "request_seq": request.get("seq").cloned().unwrap_or(Json::Null),
+            "success": false,
+            "command": request.get("command").cloned().unwrap_or(Json::Null),
+            "message": message.into(),
+            "body": {
+                "marrowError": error.metadata(),
+            },
+        });
+        write_message(&mut self.out, &response);
+    }
+
     /// Send a DAP event.
     fn event(&mut self, name: &str, body: Json) {
         let seq = self.next_seq();
@@ -164,10 +257,10 @@ impl<W: Write> Session<W> {
             "pause" => self.on_pause(request),
             "evaluate" => self.on_evaluate(request, &arguments),
             "disconnect" | "terminate" => self.on_disconnect(request),
-            other => self.respond(
+            other => self.respond_error(
                 request,
-                false,
-                json!(format!("unsupported request `{other}`")),
+                format!("unsupported request `{other}`"),
+                ERROR_UNSUPPORTED_REQUEST,
             ),
         }
     }
@@ -192,7 +285,11 @@ impl<W: Write> Session<W> {
     /// until `configurationDone`.
     fn on_launch(&mut self, request: &Json, arguments: &Json) {
         let Some(project) = arguments.get("project").and_then(Json::as_str) else {
-            self.respond(request, false, json!("launch needs a `project` directory"));
+            self.respond_error(
+                request,
+                "launch needs a `project` directory",
+                ERROR_LAUNCH_PROJECT_INVALID_PARAMS,
+            );
             return;
         };
         let project_dir = PathBuf::from(project);
@@ -202,8 +299,8 @@ impl<W: Write> Session<W> {
             .map(str::to_string);
         let args = match parse_args(arguments.get("args")) {
             Ok(args) => args,
-            Err(message) => {
-                self.respond(request, false, json!(message));
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
                 return;
             }
         };
@@ -222,7 +319,10 @@ impl<W: Write> Session<W> {
                 });
                 self.respond(request, true, json!({}));
             }
-            Err(error) => self.respond(request, false, json!(error.to_string())),
+            Err(error) => {
+                let contract = DapError::from_launch_error(&error);
+                self.respond_error(request, error.to_string(), contract);
+            }
         }
     }
 
@@ -264,6 +364,7 @@ impl<W: Write> Session<W> {
                     "verified": false,
                     "line": *line,
                     "message": BREAKPOINT_VERIFICATION_BLOCKED,
+                    "marrowContract": ERROR_BREAKPOINT_UNVERIFIED.metadata(),
                 })
             })
             .collect()
@@ -274,7 +375,11 @@ impl<W: Write> Session<W> {
     /// dispatcher pumps.
     fn on_configuration_done(&mut self, request: &Json) {
         let Some(pending) = self.pending.take() else {
-            self.respond(request, false, json!("configurationDone before a launch"));
+            self.respond_error(
+                request,
+                "configurationDone before a launch",
+                ERROR_CONFIGURATION_NOT_READY,
+            );
             return;
         };
         match crate::run::spawn(
@@ -294,7 +399,7 @@ impl<W: Write> Session<W> {
                 self.pump_until_stopped_or_done();
             }
             Err(error) => {
-                self.respond(request, false, json!(error));
+                self.respond_error(request, error, ERROR_RUN_INVALID);
                 self.terminate_session();
             }
         }
@@ -353,7 +458,11 @@ impl<W: Write> Session<W> {
             .and_then(Json::as_i64)
             .unwrap_or(0);
         if reference == DURABLE_REF {
-            self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
+            self.respond_error(
+                request,
+                RAW_DATA_INSPECTION_BLOCKED,
+                ERROR_DURABLE_DATA_BLOCKED,
+            );
             return;
         }
         let variables = match reference {
@@ -405,7 +514,7 @@ impl<W: Write> Session<W> {
     /// `continue`: resume until the run finishes or another supported stop occurs.
     fn on_continue(&mut self, request: &Json) {
         if self.running.is_none() {
-            self.respond(request, false, json!("not running"));
+            self.respond_error(request, "not running", ERROR_NOT_RUNNING);
             return;
         }
         self.respond(request, true, json!({ "allThreadsContinued": true }));
@@ -425,7 +534,7 @@ impl<W: Write> Session<W> {
             .and_then(|r| r.stopped_at.as_ref())
             .map(|stop| stop.depth)
         else {
-            self.respond(request, false, json!("not stopped"));
+            self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
             return;
         };
         let mode = match kind {
@@ -447,7 +556,7 @@ impl<W: Write> Session<W> {
     /// which cannot interrupt a statement mid-flight.
     fn on_pause(&mut self, request: &Json) {
         if self.running.is_none() {
-            self.respond(request, false, json!("not running"));
+            self.respond_error(request, "not running", ERROR_NOT_RUNNING);
             return;
         }
         self.respond(request, true, json!({}));
@@ -462,12 +571,10 @@ impl<W: Write> Session<W> {
     /// expression and durable path facts.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
         if arguments.get("context").and_then(Json::as_str) == Some("hover") {
-            self.respond(
+            self.respond_error(
                 request,
-                false,
-                json!(
-                    "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow"
-                ),
+                HOVER_EVALUATE_BLOCKED,
+                ERROR_HOVER_EVALUATE_BLOCKED,
             );
             return;
         }
@@ -478,10 +585,14 @@ impl<W: Write> Session<W> {
             .unwrap_or_default()
             .to_string();
         if !expression.trim_start().starts_with('^') {
-            self.respond(request, false, json!(EXPRESSION_EVALUATE_BLOCKED));
+            self.respond_error(request, EXPRESSION_EVALUATE_BLOCKED, ERROR_EVALUATE_BLOCKED);
             return;
         }
-        self.respond(request, false, json!(RAW_DATA_INSPECTION_BLOCKED));
+        self.respond_error(
+            request,
+            RAW_DATA_INSPECTION_BLOCKED,
+            ERROR_DURABLE_DATA_BLOCKED,
+        );
     }
 
     /// `disconnect` / `terminate`: unwind the run (rolling back any open
@@ -646,17 +757,28 @@ fn debug_admin_presentation_hint() -> Json {
 
 /// Parse the optional launch `args` array. Non-empty values are blocked until
 /// Marrow exposes typed launch argument facts.
-fn parse_args(args: Option<&Json>) -> Result<Vec<marrow_run::Value>, String> {
+fn parse_args(args: Option<&Json>) -> Result<Vec<marrow_run::Value>, LaunchArgsError> {
     let Some(array) = args else {
         return Ok(Vec::new());
     };
     let Some(items) = array.as_array() else {
-        return Err("`args` must be an array".to_string());
+        return Err(LaunchArgsError {
+            message: "`args` must be an array",
+            contract: ERROR_LAUNCH_ARGS_INVALID_TYPE,
+        });
     };
     if !items.is_empty() {
-        return Err(LAUNCH_ARGS_BLOCKED.to_string());
+        return Err(LaunchArgsError {
+            message: LAUNCH_ARGS_BLOCKED,
+            contract: ERROR_LAUNCH_ARGS_BLOCKED,
+        });
     }
     Ok(Vec::new())
+}
+
+struct LaunchArgsError {
+    message: &'static str,
+    contract: DapError,
 }
 
 #[cfg(test)]
@@ -685,10 +807,17 @@ mod tests {
         let breakpoint = &response["body"]["breakpoints"][0];
         assert_eq!(breakpoint["verified"], false, "{response}");
         assert_eq!(breakpoint["line"], 3, "{response}");
-        let message = breakpoint["message"].as_str().unwrap();
-        assert!(
-            message.contains("blocked-on-marrow"),
-            "breakpoint response should keep the Marrow blocker: {response}"
+        assert_eq!(
+            breakpoint["marrowContract"]["code"], "dap.breakpoint.unverified",
+            "{response}"
+        );
+        assert_eq!(
+            breakpoint["marrowContract"]["status"], "blocked-on-marrow",
+            "{response}"
+        );
+        assert_eq!(
+            breakpoint["marrowContract"]["blockedOn"], "canonical stop-point facts",
+            "{response}"
         );
     }
 }
