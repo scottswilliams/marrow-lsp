@@ -47,6 +47,28 @@ fn int_prop(description: &str) -> Json {
     json!({ "type": "integer", "description": description })
 }
 
+fn production_contract(description: &str) -> Json {
+    json!({
+        "status": "ready",
+        "stableProductionApi": true,
+        "description": description,
+        "missingFacts": [],
+    })
+}
+
+fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
+    json!({
+        "status": "presentation-only",
+        "stableProductionApi": false,
+        "description": description,
+        "missingFacts": missing_facts,
+    })
+}
+
+fn marrow_meta(contract: Json) -> Json {
+    json!({ "marrow/contract": contract })
+}
+
 /// The tool catalog: one entry per agent tool, each with the JSON Schema for its
 /// arguments. This is the smallest set that closes an agent's `.mw` loop — check,
 /// inspect a type, complete, read the schema, inspect saved data (gated), and run.
@@ -55,6 +77,7 @@ pub fn tools() -> Json {
         {
             "name": "mw_check",
             "description": "Check Marrow source and return diagnostics. Pass `file` (a path inside a project) to type-check the whole project — optionally with `source` to overlay an unsaved edit — or pass a bare `source` snippet for syntax-only checking. This is the primary compile-error feedback tool.",
+            "_meta": marrow_meta(production_contract("compile feedback")),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -66,6 +89,13 @@ pub fn tools() -> Json {
         {
             "name": "mw_type_at",
             "description": "Report the Marrow type of the expression at a zero-based UTF-16 line/character in `file`.",
+            "_meta": marrow_meta(json!({
+                "status": "ready",
+                "stableProductionApi": true,
+                "description": "type inspection",
+                "basis": "Marrow checked type_at facts",
+                "missingFacts": [],
+            })),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -79,6 +109,10 @@ pub fn tools() -> Json {
         {
             "name": "mw_complete",
             "description": "Presentation-only development helper: list current context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing canonical completion-context facts for any production contract; not a stable production completion API.",
+            "_meta": marrow_meta(presentation_contract(
+                "development helper",
+                &["canonical completion-context facts"],
+            )),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -92,6 +126,22 @@ pub fn tools() -> Json {
         {
             "name": "mw_resource_schema",
             "description": "Presentation-only development inspection helper over current checked schema facts: return one named resource schema, including saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes. The resource `name` is required so this tool cannot materialize the whole catalog; paged catalog/schema listing waits for Marrow-owned DTOs. Missing catalog-bound resource/store/member identity, presence/default facts, and typed protocol DTOs; not a stable production schema API.",
+            "_meta": marrow_meta(json!({
+                "status": "presentation-only",
+                "stableProductionApi": false,
+                "description": "development inspection helper",
+                "basis": "current checked schema facts",
+                "missingFacts": [
+                    "catalog-bound resource/store/member identity",
+                    "presence/default facts",
+                    "typed protocol DTOs",
+                ],
+                "boundedness": {
+                    "requiresNamedResource": true,
+                    "wholeCatalog": "blocked",
+                    "blocker": "paged catalog/schema DTOs",
+                },
+            })),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -104,6 +154,24 @@ pub fn tools() -> Json {
         {
             "name": "mw_saved_roots",
             "description": "Presentation-only root-only data helper: list saved root names from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, typed children, cursor/page facts, snapshot/store generation, and stable data DTOs; not a stable typed production API.",
+            "_meta": marrow_meta(json!({
+                "status": "presentation-only",
+                "stableProductionApi": false,
+                "description": "root-only data helper",
+                "missingFacts": [
+                    "catalog-bound saved-place identity",
+                    "typed children",
+                    "cursor/page facts",
+                    "snapshot/store generation",
+                    "stable data DTOs",
+                ],
+                "dataAccess": "gated",
+                "pathSurface": {
+                    "rootOnly": true,
+                    "childPaths": "absent",
+                    "editorAuthoredSavedPath": "blocked",
+                },
+            })),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -115,6 +183,24 @@ pub fn tools() -> Json {
         {
             "name": "mw_data_integrity",
             "description": "Debug/admin advisory over the current schema and real store: scan the project's real stored data and report capped/current-schema advisory findings such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation. Gated behind data access; returns a refusal envelope and reads nothing when disabled. This is not catalog-epoch/store-generation-bound production validation or repair.",
+            "_meta": marrow_meta(json!({
+                "status": "presentation-only",
+                "stableProductionApi": false,
+                "description": "debug/admin advisory",
+                "basis": "current schema and real store",
+                "missingFacts": [
+                    "catalog/store identity",
+                    "store generation",
+                    "catalog epoch/digest",
+                    "typed repair or drift facts",
+                ],
+                "dataAccess": "gated",
+                "scope": "capped-current-schema-advisory",
+                "advisory": true,
+                "debugAdmin": true,
+                "productionValidation": false,
+                "repair": false,
+            })),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -126,6 +212,39 @@ pub fn tools() -> Json {
         {
             "name": "mw_run",
             "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed over a FRESH in-memory store under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. Projects that need accepted catalog identity are refused because this tool will not establish durable catalog state. `mode: \"run\"` evaluates `entry` (\"module::fn\") as a presentation contract until Marrow exposes canonical function-entry facts; the entry string is not a stable production entry API. Non-empty `args` are blocked in every mode until Marrow exposes typed run argument facts. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
+            "_meta": marrow_meta(json!({
+                "status": "presentation-only",
+                "stableProductionApi": false,
+                "description": "sandboxed execution helper",
+                "missingFacts": [
+                    "canonical function-entry facts",
+                    "transitive effect facts",
+                    "durable-scope facts",
+                    "transaction facts",
+                    "runtime generation facts",
+                    "typed run protocol DTOs",
+                ],
+                "sandbox": "fresh-in-memory-store",
+                "host": "locked-down",
+                "realStore": "never-touched",
+                "catalogState": "not-established",
+                "blockedInputs": {
+                    "args": {
+                        "status": "blocked",
+                        "blocker": "typed run argument facts",
+                        "missingFacts": ["typed run argument facts"],
+                        "appliesToModes": ["run", "test"],
+                    },
+                },
+                "presentationInputs": {
+                    "entry": {
+                        "status": "presentation-only",
+                        "blocker": "canonical function-entry facts",
+                        "missingFacts": ["canonical function-entry facts"],
+                        "stableProductionApi": false,
+                    },
+                },
+            })),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -276,247 +395,207 @@ mod tests {
         }
     }
 
-    #[test]
-    fn catalog_marks_saved_roots_as_root_only_presentation_helper() {
-        let tools = tools();
-        let tools = tools.as_array().unwrap();
-        let saved_tool = |name: &str| {
-            tools
-                .iter()
-                .find(|tool| tool["name"] == name)
-                .unwrap_or_else(|| panic!("missing saved-data tool {name}"))
-        };
+    fn tool<'a>(tools: &'a [Json], name: &str) -> &'a Json {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("missing MCP tool {name}"))
+    }
 
-        let description = saved_tool("mw_saved_roots")["description"]
-            .as_str()
-            .unwrap();
-        let lower = description.to_ascii_lowercase();
-        assert!(
-            lower.contains("presentation-only"),
-            "mw_saved_roots must advertise the presentation-only contract: {description}"
+    fn contract<'a>(tools: &'a [Json], name: &str) -> &'a Json {
+        tool(tools, name)
+            .get("_meta")
+            .and_then(|meta| meta.get("marrow/contract"))
+            .unwrap_or_else(|| panic!("{name} must expose _meta[\"marrow/contract\"]"))
+    }
+
+    fn strings(value: &Json) -> Vec<String> {
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|item| item.as_str().expect("string").to_string())
+            .collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn catalog_exposes_production_tool_contracts() {
+        let catalog = tools();
+        let tools = catalog.as_array().unwrap();
+
+        let check = contract(tools, "mw_check");
+        assert_eq!(check["status"], "ready");
+        assert_eq!(check["stableProductionApi"], true);
+        assert_eq!(check["description"], "compile feedback");
+        assert_eq!(strings(&check["missingFacts"]), Vec::<String>::new());
+
+        let type_at = contract(tools, "mw_type_at");
+        assert_eq!(type_at["status"], "ready");
+        assert_eq!(type_at["stableProductionApi"], true);
+        assert_eq!(type_at["description"], "type inspection");
+        assert_eq!(type_at["basis"], "Marrow checked type_at facts");
+        assert_eq!(strings(&type_at["missingFacts"]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn catalog_exposes_presentation_tool_contracts() {
+        let catalog = tools();
+        let tools = catalog.as_array().unwrap();
+
+        let complete = contract(tools, "mw_complete");
+        assert_eq!(complete["status"], "presentation-only");
+        assert_eq!(complete["stableProductionApi"], false);
+        assert_eq!(complete["description"], "development helper");
+        assert_eq!(
+            strings(&complete["missingFacts"]),
+            vec!["canonical completion-context facts"]
         );
-        assert!(
-            lower.contains("root-only data helper"),
-            "mw_saved_roots must advertise saved-data access: {description}"
+
+        let schema = contract(tools, "mw_resource_schema");
+        assert_eq!(schema["status"], "presentation-only");
+        assert_eq!(schema["stableProductionApi"], false);
+        assert_eq!(schema["description"], "development inspection helper");
+        assert_eq!(schema["basis"], "current checked schema facts");
+        assert_eq!(
+            strings(&schema["missingFacts"]),
+            vec![
+                "catalog-bound resource/store/member identity",
+                "presence/default facts",
+                "typed protocol DTOs"
+            ]
         );
-        assert!(
-            lower.contains("no child paths") && lower.contains("no editor-authored saved path"),
-            "mw_saved_roots must not imply saved-path traversal: {description}"
+        assert_eq!(schema["boundedness"]["requiresNamedResource"], true);
+        assert_eq!(schema["boundedness"]["wholeCatalog"], "blocked");
+        assert_eq!(
+            schema["boundedness"]["blocker"],
+            "paged catalog/schema DTOs"
         );
-        assert!(
-            lower.contains("not a stable typed production api"),
-            "mw_saved_roots must not present a stable typed production API: {description}"
+
+        let saved_roots = contract(tools, "mw_saved_roots");
+        assert_eq!(saved_roots["status"], "presentation-only");
+        assert_eq!(saved_roots["stableProductionApi"], false);
+        assert_eq!(saved_roots["description"], "root-only data helper");
+        assert_eq!(
+            strings(&saved_roots["missingFacts"]),
+            vec![
+                "catalog-bound saved-place identity",
+                "typed children",
+                "cursor/page facts",
+                "snapshot/store generation",
+                "stable data DTOs"
+            ]
         );
-        assert!(
-            !lower.contains("schema-typed"),
-            "mw_saved_roots must not claim schema-typed saved-data semantics: {description}"
+        assert_eq!(saved_roots["dataAccess"], "gated");
+        assert_eq!(saved_roots["pathSurface"]["rootOnly"], true);
+        assert_eq!(saved_roots["pathSurface"]["childPaths"], "absent");
+        assert_eq!(
+            saved_roots["pathSurface"]["editorAuthoredSavedPath"],
+            "blocked"
         );
+
         let names: Vec<&str> = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        let removed_get = "mw_saved_get";
-        let removed_children = "mw_saved_children";
+        assert!(names.iter().all(|name| *name != "mw_saved_get"));
         assert!(
-            !names.contains(&removed_get) && !names.contains(&removed_children),
-            "saved-data tools that accept client-authored paths stay absent until Marrow exposes typed path facts"
+            names.iter().all(|name| *name != "mw_saved_children"),
+            "saved-data tools that accept client-authored paths stay absent"
+        );
+
+        assert_eq!(
+            tool(tools, "mw_resource_schema")["inputSchema"]["required"],
+            json!(["file", "name"])
         );
     }
 
     #[test]
-    fn catalog_marks_active_helpers_as_presentation_only() {
-        let tools = tools();
-        let tools = tools.as_array().unwrap();
-        let tool = |name: &str| {
-            tools
-                .iter()
-                .find(|tool| tool["name"] == name)
-                .unwrap_or_else(|| panic!("missing MCP tool {name}"))
-        };
-        let description = |name: &str| {
-            tool(name)["description"]
-                .as_str()
-                .unwrap_or_else(|| panic!("missing description for {name}"))
-                .to_ascii_lowercase()
-        };
+    fn catalog_exposes_data_integrity_advisory_contract() {
+        let catalog = tools();
+        let tools = catalog.as_array().unwrap();
 
-        let complete = description("mw_complete");
-        assert!(
-            complete.contains("development helper"),
-            "mw_complete must advertise that completion is a development helper: {complete}"
+        let integrity = contract(tools, "mw_data_integrity");
+        assert_eq!(integrity["status"], "presentation-only");
+        assert_eq!(integrity["stableProductionApi"], false);
+        assert_eq!(integrity["description"], "debug/admin advisory");
+        assert_eq!(integrity["basis"], "current schema and real store");
+        assert_eq!(
+            strings(&integrity["missingFacts"]),
+            vec![
+                "catalog/store identity",
+                "store generation",
+                "catalog epoch/digest",
+                "typed repair or drift facts"
+            ]
         );
-        assert!(
-            complete.contains("presentation-only"),
-            "mw_complete must advertise presentation-only helper status: {complete}"
-        );
-        assert!(
-            complete.contains("canonical completion-context facts"),
-            "mw_complete must point to the missing Marrow completion-context facts: {complete}"
-        );
-        assert!(
-            complete.contains("not a stable production completion api"),
-            "mw_complete must not present a stable production completion API: {complete}"
-        );
-
-        let schema = description("mw_resource_schema");
-        assert!(
-            schema.contains("development inspection helper"),
-            "mw_resource_schema must advertise inspection-helper status: {schema}"
-        );
-        assert!(
-            schema.contains("presentation-only"),
-            "mw_resource_schema must advertise presentation-only helper status: {schema}"
-        );
-        assert!(
-            schema.contains("current checked schema facts"),
-            "mw_resource_schema must say it renders current checked schema facts: {schema}"
-        );
-        assert!(
-            schema.contains("cannot materialize the whole catalog"),
-            "mw_resource_schema must not expose all-resource materialization: {schema}"
-        );
-        assert!(
-            schema.contains("catalog-bound resource/store/member identity"),
-            "mw_resource_schema must name the missing catalog-bound identities: {schema}"
-        );
-        assert!(
-            schema.contains("presence/default facts"),
-            "mw_resource_schema must name missing presence/default facts: {schema}"
-        );
-        assert!(
-            schema.contains("typed protocol dtos"),
-            "mw_resource_schema must name missing typed protocol DTOs: {schema}"
-        );
-        assert!(
-            schema.contains("not a stable production schema api"),
-            "mw_resource_schema must not present a stable production schema API: {schema}"
-        );
-
-        let schema_name =
-            tool("mw_resource_schema")["inputSchema"]["properties"]["name"]["description"]
-                .as_str()
-                .unwrap();
-        let schema_name = schema_name.to_ascii_lowercase();
-        assert!(
-            schema_name.contains("development inspection helper"),
-            "mw_resource_schema.name must not imply a stable resource identity protocol: {schema_name}"
-        );
-        assert!(
-            schema_name.contains("required") && schema_name.contains("paged catalog/schema dtos"),
-            "mw_resource_schema.name must require a named query until paged DTOs exist: {schema_name}"
-        );
-
-        let integrity = description("mw_data_integrity");
-        assert!(
-            integrity.contains("debug/admin advisory"),
-            "mw_data_integrity must advertise advisory debug/admin status: {integrity}"
-        );
-        assert!(
-            !integrity.contains("every saved record"),
-            "mw_data_integrity must not overclaim complete saved-record coverage: {integrity}"
-        );
-        assert!(
-            integrity.contains("current schema") && integrity.contains("real store"),
-            "mw_data_integrity must name its current-schema/real-store basis: {integrity}"
-        );
-        assert!(
-            integrity.contains("capped/current-schema advisory findings"),
-            "mw_data_integrity must describe capped current-schema advisory findings: {integrity}"
-        );
-        assert!(
-            integrity.contains("gated behind data access"),
-            "mw_data_integrity must advertise the data-access gate: {integrity}"
-        );
-        assert!(
-            integrity.contains(
-                "not catalog-epoch/store-generation-bound production validation or repair"
-            ),
-            "mw_data_integrity must not present production validation or repair: {integrity}"
-        );
+        assert_eq!(integrity["dataAccess"], "gated");
+        assert_eq!(integrity["scope"], "capped-current-schema-advisory");
+        assert_eq!(integrity["advisory"], true);
+        assert_eq!(integrity["debugAdmin"], true);
+        assert_eq!(integrity["productionValidation"], false);
+        assert_eq!(integrity["repair"], false);
     }
 
     #[test]
-    fn catalog_marks_mw_run_args_as_blocked() {
-        let tools = tools();
-        let tools = tools.as_array().unwrap();
-        let run_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == "mw_run")
-            .expect("mw_run tool");
+    fn catalog_exposes_run_contracts() {
+        let catalog = tools();
+        let tools = catalog.as_array().unwrap();
 
-        let description = run_tool["description"].as_str().unwrap();
-        let lower = description.to_ascii_lowercase();
-        assert!(
-            !lower.contains(&["allow", "proto", "type", "args"].concat()),
-            "mw_run must not advertise an argument opt-in: {description}"
+        let run = contract(tools, "mw_run");
+        assert_eq!(run["status"], "presentation-only");
+        assert_eq!(run["stableProductionApi"], false);
+        assert_eq!(run["description"], "sandboxed execution helper");
+        assert_eq!(
+            strings(&run["missingFacts"]),
+            vec![
+                "canonical function-entry facts",
+                "transitive effect facts",
+                "durable-scope facts",
+                "transaction facts",
+                "runtime generation facts",
+                "typed run protocol DTOs"
+            ]
         );
-        assert!(
-            lower.contains("typed run argument facts"),
-            "mw_run must point argument decoding back to Marrow facts: {description}"
+        assert_eq!(run["sandbox"], "fresh-in-memory-store");
+        assert_eq!(run["host"], "locked-down");
+        assert_eq!(run["realStore"], "never-touched");
+        assert_eq!(run["catalogState"], "not-established");
+        assert_eq!(run["blockedInputs"]["args"]["status"], "blocked");
+        assert_eq!(
+            run["blockedInputs"]["args"]["blocker"],
+            "typed run argument facts"
         );
-        assert!(
-            lower.contains("blocked in every mode"),
-            "mw_run must block non-empty args for test mode as well as run mode: {description}"
+        assert_eq!(
+            strings(&run["blockedInputs"]["args"]["missingFacts"]),
+            vec!["typed run argument facts"]
         );
-        assert!(
-            lower.contains("accepted catalog identity")
-                && lower.contains("will not establish durable catalog state"),
-            "mw_run must advertise pending catalog identity refusal: {description}"
+        assert_eq!(
+            run["blockedInputs"]["args"]["appliesToModes"],
+            json!(["run", "test"])
+        );
+        assert_eq!(
+            run["presentationInputs"]["entry"]["status"],
+            "presentation-only"
+        );
+        assert_eq!(
+            run["presentationInputs"]["entry"]["blocker"],
+            "canonical function-entry facts"
+        );
+        assert_eq!(
+            strings(&run["presentationInputs"]["entry"]["missingFacts"]),
+            vec!["canonical function-entry facts"]
+        );
+        assert_eq!(
+            run["presentationInputs"]["entry"]["stableProductionApi"],
+            false
         );
 
-        let properties = &run_tool["inputSchema"]["properties"];
         let removed_args_opt_in = ["allow", "Prototype", "Args"].concat();
         assert!(
-            properties.get(&removed_args_opt_in).is_none(),
-            "mw_run schema must not expose an argument opt-in: {properties}"
-        );
-        let args_description = properties["args"]["description"].as_str().unwrap();
-        let lower = args_description.to_ascii_lowercase();
-        assert!(
-            lower.contains("blocked in every mode") && lower.contains("typed run argument facts"),
-            "mw_run.args must name the Marrow blocker: {args_description}"
-        );
-    }
-
-    #[test]
-    fn catalog_marks_mw_run_entry_as_presentation_only() {
-        let tools = tools();
-        let tools = tools.as_array().unwrap();
-        let run_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == "mw_run")
-            .expect("mw_run tool");
-
-        let description = run_tool["description"].as_str().unwrap();
-        let lower = description.to_ascii_lowercase();
-        assert!(
-            lower.contains("presentation-only"),
-            "mw_run must advertise presentation-only status: {description}"
-        );
-        assert!(
-            lower.contains("canonical function-entry facts"),
-            "mw_run must point entry strings back to Marrow function-entry facts: {description}"
-        );
-        assert!(
-            lower.contains("not a stable production entry api"),
-            "mw_run must not present entry strings as a stable production API: {description}"
-        );
-
-        let entry_description = run_tool["inputSchema"]["properties"]["entry"]["description"]
-            .as_str()
-            .unwrap();
-        let lower = entry_description.to_ascii_lowercase();
-        assert!(
-            lower.contains("entry string"),
-            "mw_run.entry must describe the entry string: {entry_description}"
-        );
-        assert!(
-            lower.contains("canonical function-entry facts"),
-            "mw_run.entry must point entry strings back to Marrow function-entry facts: {entry_description}"
-        );
-        assert!(
-            lower.contains("not a stable production entry api"),
-            "mw_run.entry must not present entry strings as a stable production API: {entry_description}"
+            tool(tools, "mw_run")["inputSchema"]["properties"]
+                .get(&removed_args_opt_in)
+                .is_none(),
+            "mw_run schema must not expose an argument opt-in"
         );
     }
 
@@ -592,9 +671,8 @@ mod tests {
             policy,
         )
         .unwrap();
-        let message = result["diagnostics"][0]["message"].as_str().unwrap();
-        assert!(
-            message.contains("typed run argument facts from Marrow"),
+        assert_eq!(
+            result["diagnostics"][0]["code"], "mcp.run.args",
             "mw_run args must be blocked before project loading: {result}"
         );
     }
