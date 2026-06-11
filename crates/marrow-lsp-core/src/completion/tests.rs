@@ -60,7 +60,7 @@ pub fn run(count: int): int
     )
     .unwrap();
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     std::mem::forget(dir);
     (snapshot.program, app)
 }
@@ -128,7 +128,7 @@ pub fn run()
     )
     .unwrap();
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     std::mem::forget(dir);
     (snapshot.program, app)
 }

@@ -65,7 +65,7 @@ fn decoded_for_checked(source: &str) -> (LineIndex, DecodedTokens) {
     std::fs::write(&file, source).unwrap();
 
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     let binding_index = build_binding_index(&snapshot);
     let parsed = snapshot
         .files
@@ -109,7 +109,7 @@ fn decoded_for_checked_file(
         .expect("active source file should be in the fixture");
     let active_file = src.join(active_relative);
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     let binding_index = build_binding_index(&snapshot);
     let parsed = snapshot
         .files

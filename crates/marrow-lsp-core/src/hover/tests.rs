@@ -14,7 +14,7 @@ fn analyze(source: &str) -> (AnalysisSnapshot, std::path::PathBuf) {
     let file = src.join("a.mw");
     std::fs::write(&file, source).unwrap();
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     // Keep the temp dir alive for the snapshot's lifetime by leaking it; the
     // OS reclaims it when the test process exits.
     std::mem::forget(dir);
@@ -32,7 +32,7 @@ fn analyze_files(files: &[(&str, &str)], target: &str) -> (AnalysisSnapshot, std
         std::fs::write(file, source).unwrap();
     }
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     let file = src.join(target);
     std::mem::forget(dir);
     (snapshot, file)

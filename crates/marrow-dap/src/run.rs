@@ -109,21 +109,25 @@ fn run_with_store(
         .with_system_clock()
         .with_log_sink(std::rc::Rc::clone(&log));
     let runtime = program.runtime();
+    let mut output = String::new();
     let result = CheckedEntryCall::new(&runtime, entry, args.to_vec())
-        .and_then(|call| run_entry_with_debugger(&store, &host, &mut debugger, &call));
-    Some(outcome(result, &log.borrow()))
+        .and_then(|call| run_entry_with_debugger(&store, &host, &mut debugger, &call, &mut output));
+    Some(outcome(result, output, &log.borrow()))
 }
 
 /// Build the [`Outcome`] from the run's result and the captured log. A debugger
 /// terminate is a clean stop, not a fault. The run's `print`/`write` output is in
-/// `RunOutput::output`; the log sink carries `std::log` lines, appended after.
-fn outcome(result: Result<marrow_run::RunOutput, RuntimeError>, log: &str) -> Outcome {
+/// `output`; the log sink carries `std::log` lines, appended after.
+fn outcome(
+    result: Result<marrow_run::RunOutput, RuntimeError>,
+    mut output: String,
+    log: &str,
+) -> Outcome {
+    if !log.is_empty() {
+        output.push_str(log);
+    }
     match result {
         Ok(run) => {
-            let mut output = run.output;
-            if !log.is_empty() {
-                output.push_str(log);
-            }
             let rendered = run
                 .value
                 .map(|value| value.display_debug())
@@ -135,12 +139,53 @@ fn outcome(result: Result<marrow_run::RunOutput, RuntimeError>, log: &str) -> Ou
         }
         // The debugger's own terminate fault is a clean stop, not a program error.
         Err(error) if error.code == crate::debugger::RUN_TERMINATED => Outcome {
-            output: log.to_string(),
+            output,
             result: Ok(String::new()),
         },
         Err(error) => Outcome {
-            output: log.to_string(),
+            output,
             result: Err(format!("{}: {}", error.code, error.message)),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use marrow_syntax::SourceSpan;
+
+    use super::*;
+
+    fn runtime_error(code: &'static str) -> RuntimeError {
+        RuntimeError {
+            code,
+            message: "boom".to_string(),
+            span: SourceSpan::default(),
+            throw: None,
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn outcome_preserves_output_and_logs_on_runtime_fault() {
+        let outcome = outcome(
+            Err(runtime_error("run.assertion")),
+            "before fault\n".to_string(),
+            "log line\n",
+        );
+
+        assert_eq!(outcome.output, "before fault\nlog line\n");
+        assert!(outcome.result.unwrap_err().contains("run.assertion"));
+    }
+
+    #[test]
+    fn outcome_preserves_output_and_logs_on_debugger_termination() {
+        let outcome = outcome(
+            Err(runtime_error(crate::debugger::RUN_TERMINATED)),
+            "before terminate\n".to_string(),
+            "log line\n",
+        );
+
+        assert_eq!(outcome.output, "before terminate\nlog line\n");
+        assert_eq!(outcome.result, Ok(String::new()));
     }
 }

@@ -463,9 +463,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "marrow-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "marrow-check"
 version = "0.1.0"
 dependencies = [
+ "marrow-catalog",
  "marrow-project",
  "marrow-schema",
  "marrow-store",
@@ -539,6 +549,7 @@ dependencies = [
 name = "marrow-run"
 version = "0.1.0"
 dependencies = [
+ "marrow-catalog",
  "marrow-check",
  "marrow-schema",
  "marrow-store",
@@ -558,6 +569,7 @@ dependencies = [
 name = "marrow-store"
 version = "0.1.0"
 dependencies = [
+ "marrow-catalog",
  "redb",
 ]
 

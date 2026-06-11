@@ -83,6 +83,10 @@ pub fn greet(name: string): string
 
 pub fn shout()
     print(\"loud\")
+
+pub fn explode()
+    print(\"before fault\")
+    std::assert::isTrue(false)
 ",
     )
     .unwrap();
@@ -360,6 +364,21 @@ fn run_contract_marks_entry_string_as_presentation_only() {
             "runtime generation facts",
             "typed run protocol DTOs",
         ],
+    );
+}
+
+#[test]
+fn run_fault_preserves_output_printed_before_the_fault() {
+    let (_dir, file) = pure_project();
+    let result = run(&file, Some("shelf::books::explode"), &[], RunMode::Run);
+
+    assert_eq!(
+        result["diagnostics"][0]["code"], "run.assertion",
+        "{result}"
+    );
+    assert!(
+        result["output"].as_str().unwrap().contains("before fault"),
+        "faulting run should keep output emitted before the fault: {result}"
     );
 }
 

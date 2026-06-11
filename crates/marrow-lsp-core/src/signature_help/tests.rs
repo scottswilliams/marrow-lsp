@@ -81,7 +81,7 @@ pub fn run(): int
     )
     .unwrap();
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     (snapshot, app)
 }
 
@@ -703,7 +703,7 @@ resource Id
     )
     .unwrap();
     let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new()).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
 
     let help = help_at(
         &snapshot.program,

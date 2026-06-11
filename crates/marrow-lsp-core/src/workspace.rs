@@ -202,7 +202,7 @@ impl Workspace {
 
         let latest_open_analysis_paths = open_analysis_paths(project, documents);
         let sources = overlay(&project.root, documents);
-        let snapshot = analyze_project(&project.root, &project.config, &sources)
+        let snapshot = analyze_project(&project.root, &project.config, &sources, None)
             .map_err(WorkspaceError::Discover)?;
 
         // Retain the last program that had modules, so a later recompute whose

@@ -600,11 +600,12 @@ fn run_entry(program: &CheckedProgram, entry: Option<&str>) -> Json {
     let runtime = program.runtime();
     let call = match CheckedEntryCall::new(&runtime, entry, Vec::new()) {
         Ok(call) => call,
-        Err(error) => return runtime_error_json(&error),
+        Err(error) => return runtime_error_json(&error, String::new()),
     };
-    match run_entry_with_host(&store, &host, &call) {
-        Ok(output) => run_output_json(output),
-        Err(error) => runtime_error_json(&error),
+    let mut output = String::new();
+    match run_entry_with_host(&store, &host, &call, &mut output) {
+        Ok(result) => run_output_json(result, output),
+        Err(error) => runtime_error_json(&error, output),
     }
 }
 
@@ -658,8 +659,9 @@ fn run_tests(
         // another's writes and none touches the project's real store.
         let store = TreeStore::memory();
         let entry = json!({ "name": name, "file": source_file.display().to_string() });
+        let mut output = String::new();
         let result = match CheckedEntryCall::new(&runtime, name, Vec::new())
-            .and_then(|call| run_entry_with_host(&store, &host, &call))
+            .and_then(|call| run_entry_with_host(&store, &host, &call, &mut output))
         {
             Ok(_) => merge(entry, json!({ "outcome": "passed" })),
             Err(error) if error.code == marrow_run::RUN_ASSERT => merge(
@@ -693,8 +695,8 @@ fn locked_host() -> Host {
 
 /// A successful run's JSON: its returned value (when it returned one) and the
 /// captured `print`/`write` output, truncated at [`OUTPUT_CAP`].
-fn run_output_json(output: RunOutput) -> Json {
-    let RunOutput { value, output } = output;
+fn run_output_json(result: RunOutput, output: String) -> Json {
+    let RunOutput { value } = result;
     json!({
         "value": value.map(value_to_json),
         "output": truncate(output),
@@ -705,7 +707,7 @@ fn run_output_json(output: RunOutput) -> Json {
 /// A runtime fault's JSON: its stable `run.*` code, message, and source position.
 /// A fault is reported in the result envelope (not as a transport error) so an
 /// agent reads the same shape whether the run succeeded or faulted.
-fn runtime_error_json(error: &RuntimeError) -> Json {
+fn runtime_error_json(error: &RuntimeError, output: String) -> Json {
     json!({
         "diagnostics": [{
             "code": error.code,
@@ -713,7 +715,7 @@ fn runtime_error_json(error: &RuntimeError) -> Json {
             "line": error.span.line,
             "character": error.span.column,
         }],
-        "output": "",
+        "output": truncate(output),
     })
 }
 

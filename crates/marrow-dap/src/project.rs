@@ -111,7 +111,7 @@ pub fn prepare(project_dir: &Path, entry: Option<&str>) -> Result<Launch, Launch
         .map_err(|error| LaunchError::Config(error.to_string()))?;
     let config = parse_config(&text).map_err(|error| LaunchError::Config(error.message))?;
 
-    let snapshot = analyze_project(project_dir, &config, &ProjectSources::new())
+    let snapshot = analyze_project(project_dir, &config, &ProjectSources::new(), None)
         .map_err(|error| LaunchError::Analyze(error.to_string()))?;
 
     // Do not debug a project that does not check: stepping through code the
