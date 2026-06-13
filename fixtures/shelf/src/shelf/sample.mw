@@ -20,16 +20,13 @@ store ^books(id: int): Book
     index byShelf(shelf, id)
 
 pub fn add(title: string, author: string, shelf: string, changedAt: instant): Id(^books)
-    var book: Book
-    book.title = title
-    book.author = author
-    book.shelf = shelf
-    book.currentVersion = 1
-
     const id: Id(^books) = nextId(^books)
 
     transaction
-        ^books(id) = book
+        ^books(id).title = title
+        ^books(id).author = author
+        ^books(id).shelf = shelf
+        ^books(id).currentVersion = 1
         ^books(id).versions(1).title = title
         ^books(id).versions(1).shelf = shelf
         ^books(id).versions(1).changedAt = changedAt
@@ -38,10 +35,10 @@ pub fn add(title: string, author: string, shelf: string, changedAt: instant): Id
 
 pub fn moveToShelf(id: Id(^books), shelf: string, changedAt: instant)
     transaction
-        const version: int = ^books(id).currentVersion + 1
+        const version: int = (^books(id).currentVersion ?? 0) + 1
         ^books(id).shelf = shelf
         ^books(id).currentVersion = version
-        ^books(id).versions(version).title = ^books(id).title
+        ^books(id).versions(version).title = ^books(id).title ?? ""
         ^books(id).versions(version).shelf = shelf
         ^books(id).versions(version).changedAt = changedAt
 
@@ -62,8 +59,8 @@ pub fn remove(id: Id(^books))
     delete ^books(id)
 
 pub fn printShelf(shelf: string)
-    for id in ^books.byShelf(shelf)
-        print($"{id}: {^books(id).title}")
+    for id, book in ^books.byShelf(shelf)
+        print($"{id}: {book.title}")
 
 pub fn main()
     const now: instant = std::clock::now()

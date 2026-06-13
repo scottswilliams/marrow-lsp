@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use marrow_check::{
-    AnalysisSnapshot, CheckedFunction, CheckedParamMode, CheckedProgram, Def, DefItem, Resolution,
-    ResolvableKind, resolve,
+    AnalysisSnapshot, CheckedFunction, CheckedProgram, Def, DefItem, Resolution, ResolvableKind,
+    resolve,
 };
 use marrow_schema::{NodeKind, ResourceSchema, stdlib};
 use marrow_syntax::{Declaration, FunctionDecl, SourceSpan};
@@ -125,17 +125,13 @@ fn checked_function_signature(
         .iter()
         .enumerate()
         .map(|(index, param)| {
-            let mode = match param.mode {
-                Some(CheckedParamMode::InOut) => "inout ",
-                None => "",
-            };
             let documentation = docs
                 .and_then(|function| function.params.get(index))
                 .filter(|decl| decl.name == param.name)
                 .and_then(|decl| join_docs(&decl.docs));
             Parameter {
                 name: Some(param.name.clone()),
-                label: format!("{mode}{}: {}", param.name, render_type(&param.ty)),
+                label: format!("{}: {}", param.name, render_type(&param.ty)),
                 documentation,
             }
         })
@@ -226,6 +222,7 @@ fn joined_param_labels(params: &[Parameter]) -> String {
 fn std_param_label(param: &stdlib::ParamType) -> String {
     match param {
         stdlib::ParamType::Scalar(scalar) => scalar.name().to_string(),
+        stdlib::ParamType::Sequence(scalar) => format!("sequence[{}]", scalar.name()),
         stdlib::ParamType::Error => "Error".to_string(),
         stdlib::ParamType::Path => "path".to_string(),
     }

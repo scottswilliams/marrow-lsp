@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Url};
-use marrow_check::{AnalysisSnapshot, CheckDiagnostic};
+use marrow_check::{AnalysisSnapshot, CheckDiagnostic, CheckReport};
 use marrow_syntax::{Severity, SourceSpan};
 
 use crate::positions::LineIndex;
@@ -59,6 +59,14 @@ pub fn snapshot_to_diagnostics<'a>(
     open_urls: impl IntoIterator<Item = &'a Url>,
     index_for: impl Fn(&Url) -> Option<&'a LineIndex>,
 ) -> HashMap<Url, Vec<Diagnostic>> {
+    report_to_diagnostics(&snapshot.report, open_urls, index_for)
+}
+
+fn report_to_diagnostics<'a>(
+    report: &CheckReport,
+    open_urls: impl IntoIterator<Item = &'a Url>,
+    index_for: impl Fn(&Url) -> Option<&'a LineIndex>,
+) -> HashMap<Url, Vec<Diagnostic>> {
     let mut result: HashMap<Url, Vec<Diagnostic>> = open_urls
         .into_iter()
         .map(|url| (url.clone(), Vec::new()))
@@ -68,7 +76,7 @@ pub fn snapshot_to_diagnostics<'a>(
     // open, so its diagnostics still land on the right characters.
     let mut disk_indices: HashMap<Url, LineIndex> = HashMap::new();
 
-    for diagnostic in &snapshot.report.diagnostics {
+    for diagnostic in &report.diagnostics {
         let Some(url) = path_to_url(&diagnostic.file) else {
             continue;
         };
@@ -195,25 +203,21 @@ mod tests {
         let bad_url = path_to_url(&bad).unwrap();
         let clean_url = path_to_url(&clean).unwrap();
 
-        let snapshot = AnalysisSnapshot {
-            report: marrow_check::CheckReport {
-                diagnostics: vec![CheckDiagnostic {
-                    code: "check.unknown_type",
-                    severity: Severity::Error,
-                    file: bad.clone(),
-                    message: "unknown type `Foo`".to_string(),
-                    payload: marrow_check::DiagnosticPayload::None,
-                    span: span(11, 17, 1, 0),
-                }],
-            },
-            program: marrow_check::CheckedProgram::default(),
-            files: Vec::new(),
+        let report = CheckReport {
+            diagnostics: vec![CheckDiagnostic {
+                code: "check.unknown_type",
+                severity: Severity::Error,
+                file: bad.clone(),
+                message: "unknown type `Foo`".to_string(),
+                payload: marrow_check::DiagnosticPayload::None,
+                span: span(11, 17, 1, 0),
+            }],
         };
 
         // Both files are open; neither supplies an in-memory index, so the disk
         // text backs the range.
         let open = [bad_url.clone(), clean_url.clone()];
-        let result = snapshot_to_diagnostics(&snapshot, &open, |_| None);
+        let result = report_to_diagnostics(&report, &open, |_| None);
 
         assert_eq!(result[&bad_url].len(), 1);
         assert_eq!(
@@ -226,21 +230,17 @@ mod tests {
 
     #[test]
     fn relative_path_is_skipped() {
-        let snapshot = AnalysisSnapshot {
-            report: marrow_check::CheckReport {
-                diagnostics: vec![CheckDiagnostic {
-                    code: "check.unknown_type",
-                    severity: Severity::Error,
-                    file: PathBuf::from("relative.mw"),
-                    message: "unknown type".to_string(),
-                    payload: marrow_check::DiagnosticPayload::None,
-                    span: span(0, 1, 0, 0),
-                }],
-            },
-            program: marrow_check::CheckedProgram::default(),
-            files: Vec::new(),
+        let report = CheckReport {
+            diagnostics: vec![CheckDiagnostic {
+                code: "check.unknown_type",
+                severity: Severity::Error,
+                file: PathBuf::from("relative.mw"),
+                message: "unknown type".to_string(),
+                payload: marrow_check::DiagnosticPayload::None,
+                span: span(0, 1, 0, 0),
+            }],
         };
-        let result = snapshot_to_diagnostics(&snapshot, std::iter::empty(), |_| None);
+        let result = report_to_diagnostics(&report, std::iter::empty(), |_| None);
         assert!(result.is_empty());
     }
 }

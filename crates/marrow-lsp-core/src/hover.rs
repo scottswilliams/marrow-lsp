@@ -11,8 +11,8 @@ use std::path::Path;
 use lsp_types::Hover;
 use marrow_check::{
     AnalysisSnapshot, BindingIndex, CheckedConst, CheckedFacts, CheckedFunction, CheckedParam,
-    CheckedParamMode, DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution,
-    ResolvableKind, SavedPlaceEffect, SymbolKind, SymbolRef, build_binding_index, resolve, type_at,
+    DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution, ResolvableKind,
+    SavedPlaceEffect, SymbolKind, SymbolRef, build_binding_index, resolve, type_at,
 };
 use marrow_schema::{EnumSchema, ResourceSchema, stdlib};
 use marrow_syntax::{
@@ -274,7 +274,8 @@ fn function_hover(
 
     let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
     let parsed_function = parsed_function_at(&parsed_file.parsed.file, symbol.span)?;
-    let checked_function = checked_function_at(snapshot, &symbol)?;
+    let checked_function =
+        checked_function_for_parsed(snapshot, &symbol, &parsed_file.parsed.file, parsed_function)?;
     let mut value = marrow_code_block(&function_signature(checked_function));
 
     if let Some(docs) = join_docs(&parsed_function.docs) {
@@ -414,12 +415,11 @@ fn saved_place_display(facts: &CheckedFacts, place: &SavedPlaceEffect) -> Option
 
 fn capability_label(capability: stdlib::Capability) -> &'static str {
     match capability {
-        stdlib::Capability::Pure => "pure",
         stdlib::Capability::Clock => "clock",
-        stdlib::Capability::Env => "env",
+        stdlib::Capability::Environment => "environment",
         stdlib::Capability::Log => "log",
-        stdlib::Capability::Io => "io",
-        stdlib::Capability::Assert => "assert",
+        stdlib::Capability::Filesystem => "filesystem",
+        stdlib::Capability::Maintenance => "maintenance",
     }
 }
 
@@ -434,20 +434,17 @@ fn parameter_hover(
         return None;
     }
 
+    let parameter = index.parameter_definition(&symbol)?;
+    let function_fact = snapshot.program.facts.function(parameter.function);
     let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let parsed_function = parsed_function_at(&parsed_file.parsed.file, symbol.span)?;
+    let parsed_function = parsed_function_at(&parsed_file.parsed.file, function_fact.span)?;
     let name = parameter_use_name(snapshot, file, offset, parsed_function)?;
-    let checked_function = checked_function_at(snapshot, &symbol)?;
-    let checked_param = checked_function
-        .params
-        .iter()
-        .rev()
-        .find(|param| param.name == name)?;
-    let parsed_param = parsed_function
-        .params
-        .iter()
-        .rev()
-        .find(|param| param.name == name)?;
+    let checked_function = checked_function_for_fact(snapshot, function_fact)?;
+    let checked_param = checked_function.params.get(parameter.index)?;
+    if checked_param.name != name {
+        return None;
+    }
+    let parsed_param = parsed_function.params.get(parameter.index)?;
 
     let mut value = marrow_code_block(&parameter_signature(checked_param));
     if let Some(docs) = join_docs(&parsed_param.docs) {
@@ -606,8 +603,7 @@ fn operator_spelling(kind: TokenKind, text: &str) -> Option<&str> {
         | TokenKind::Minus
         | TokenKind::Star
         | TokenKind::Slash
-        | TokenKind::Percent
-        | TokenKind::Underscore => Some(text),
+        | TokenKind::Percent => Some(text),
         _ => None,
     }
 }
@@ -930,23 +926,53 @@ fn parsed_function_at(
         .declarations
         .iter()
         .find_map(|declaration| match declaration {
-            Declaration::Function(function) if function.span == span => Some(function),
+            Declaration::Function(function) if span_contains_span(function.span, span) => {
+                Some(function)
+            }
             _ => None,
         })
 }
 
-fn checked_function_at<'a>(
+fn checked_function_for_parsed<'a>(
     snapshot: &'a AnalysisSnapshot,
     symbol: &SymbolRef,
+    source: &marrow_syntax::SourceFile,
+    parsed_function: &FunctionDecl,
 ) -> Option<&'a CheckedFunction> {
+    let function_index = source
+        .declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            Declaration::Function(function) => Some(function),
+            _ => None,
+        })
+        .position(|function| function.span == parsed_function.span)?;
     snapshot
         .program
         .modules
         .iter()
         .find(|module| module.source_file == symbol.file)?
         .functions
+        .get(function_index)
+}
+
+fn checked_function_for_fact<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    fact: &FunctionFact,
+) -> Option<&'a CheckedFunction> {
+    let module_fact = snapshot
+        .program
+        .facts
+        .modules()
         .iter()
-        .find(|function| function.span == symbol.span)
+        .find(|module| module.id == fact.module)?;
+    snapshot
+        .program
+        .modules
+        .iter()
+        .find(|module| module.source_file == module_fact.source_file)?
+        .functions
+        .get(fact.source_index as usize)
 }
 
 fn parsed_const_at(
@@ -957,7 +983,9 @@ fn parsed_const_at(
         .declarations
         .iter()
         .find_map(|declaration| match declaration {
-            Declaration::Const(constant) if constant.span == span => Some(constant),
+            Declaration::Const(constant) if span_contains_span(constant.span, span) => {
+                Some(constant)
+            }
             _ => None,
         })
 }
@@ -973,7 +1001,7 @@ fn checked_const_at<'a>(
         .find(|module| module.source_file == symbol.file)?
         .constants
         .iter()
-        .find(|constant| constant.span == symbol.span)
+        .find(|constant| span_contains_span(constant.span, symbol.span))
 }
 
 fn name_span(name: &str, span: SourceSpan, source: &str) -> Option<(usize, usize)> {
@@ -1029,17 +1057,15 @@ fn span_covers(span: SourceSpan, offset: usize) -> bool {
     span.start_byte <= offset && offset <= span.end_byte
 }
 
+fn span_contains_span(outer: SourceSpan, inner: SourceSpan) -> bool {
+    span_covers(outer, inner.start_byte) && span_covers(outer, inner.end_byte)
+}
+
 fn function_signature(function: &CheckedFunction) -> String {
     let params = function
         .params
         .iter()
-        .map(|param| {
-            let mode = match param.mode {
-                Some(CheckedParamMode::InOut) => "inout ",
-                None => "",
-            };
-            format!("{mode}{}: {}", param.name, render_type(&param.ty))
-        })
+        .map(|param| format!("{}: {}", param.name, render_type(&param.ty)))
         .collect::<Vec<_>>()
         .join(", ");
     match &function.return_type {
@@ -1049,11 +1075,7 @@ fn function_signature(function: &CheckedFunction) -> String {
 }
 
 fn parameter_signature(param: &CheckedParam) -> String {
-    let mode = match param.mode {
-        Some(CheckedParamMode::InOut) => "inout ",
-        None => "",
-    };
-    format!("{mode}{}: {}", param.name, render_type(&param.ty))
+    format!("{}: {}", param.name, render_type(&param.ty))
 }
 
 fn module_const_signature(constant: &CheckedConst) -> String {
@@ -1193,7 +1215,8 @@ fn enum_member_path_at(
 fn enum_member_path_in(members: &[EnumMember], span: SourceSpan, path: &mut Vec<String>) -> bool {
     for member in members {
         path.push(member.name.clone());
-        if member.span == span || enum_member_path_in(&member.members, span, path) {
+        if span_contains_span(member.span, span) || enum_member_path_in(&member.members, span, path)
+        {
             return true;
         }
         path.pop();
@@ -1444,7 +1467,9 @@ fn declaration_docs<'a>(
                 .declarations
                 .iter()
                 .find_map(|declaration| match declaration {
-                    Declaration::Function(function) if function.span == symbol.span => {
+                    Declaration::Function(function)
+                        if span_contains_span(function.span, symbol.span) =>
+                    {
                         Some(function.docs.as_slice())
                     }
                     _ => None,
@@ -1455,7 +1480,9 @@ fn declaration_docs<'a>(
                 .declarations
                 .iter()
                 .find_map(|declaration| match declaration {
-                    Declaration::Const(constant) if constant.span == symbol.span => {
+                    Declaration::Const(constant)
+                        if span_contains_span(constant.span, symbol.span) =>
+                    {
                         Some(constant.docs.as_slice())
                     }
                     _ => None,
@@ -1492,7 +1519,7 @@ fn declaration_docs<'a>(
                 Declaration::Store(store) => store
                     .indexes
                     .iter()
-                    .find(|index| index.span == symbol.span)
+                    .find(|index| span_contains_span(index.span, symbol.span))
                     .map(|index| index.docs.as_slice()),
                 _ => None,
             }),
@@ -1507,7 +1534,9 @@ fn resource_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&
         .declarations
         .iter()
         .find_map(|declaration| match declaration {
-            Declaration::Resource(resource) if resource.span == span => Some(resource),
+            Declaration::Resource(resource) if span_contains_span(resource.span, span) => {
+                Some(resource)
+            }
             _ => None,
         })
 }
@@ -1518,7 +1547,9 @@ fn enum_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&Enum
         .declarations
         .iter()
         .find_map(|declaration| match declaration {
-            Declaration::Enum(enum_decl) if enum_decl.span == span => Some(enum_decl),
+            Declaration::Enum(enum_decl) if span_contains_span(enum_decl.span, span) => {
+                Some(enum_decl)
+            }
             _ => None,
         })
 }
@@ -1527,7 +1558,7 @@ fn enum_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&Enum
 /// or `None`.
 fn enum_member_docs(members: &[EnumMember], span: SourceSpan) -> Option<&[String]> {
     for member in members {
-        if member.span == span {
+        if span_contains_span(member.span, span) {
             return Some(&member.docs);
         }
         if let Some(docs) = enum_member_docs(&member.members, span) {
@@ -1552,7 +1583,7 @@ fn enum_member_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Optio
 
 fn enum_member_in(members: &[EnumMember], span: SourceSpan) -> Option<&EnumMember> {
     for member in members {
-        if member.span == span {
+        if span_contains_span(member.span, span) {
             return Some(member);
         }
         if let Some(member) = enum_member_in(&member.members, span) {
@@ -1580,8 +1611,12 @@ fn resource_member_at(
 fn resource_member_in(members: &[ResourceMember], span: SourceSpan) -> Option<&ResourceMember> {
     for member in members {
         match member {
-            ResourceMember::Field(field) if field.span == span => return Some(member),
-            ResourceMember::Group(group) if group.span == span => return Some(member),
+            ResourceMember::Field(field) if span_contains_span(field.span, span) => {
+                return Some(member);
+            }
+            ResourceMember::Group(group) if span_contains_span(group.span, span) => {
+                return Some(member);
+            }
             ResourceMember::Group(group) => {
                 if let Some(member) = resource_member_in(&group.members, span) {
                     return Some(member);
@@ -1617,7 +1652,10 @@ fn store_index_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Optio
         .declarations
         .iter()
         .find_map(|declaration| match declaration {
-            Declaration::Store(store) => store.indexes.iter().find(|index| index.span == span),
+            Declaration::Store(store) => store
+                .indexes
+                .iter()
+                .find(|index| span_contains_span(index.span, span)),
             _ => None,
         })
 }
@@ -1634,8 +1672,12 @@ fn resource_member_name(member: &ResourceMember) -> &str {
 fn member_docs(members: &[ResourceMember], span: SourceSpan) -> Option<&[String]> {
     for member in members {
         match member {
-            ResourceMember::Field(field) if field.span == span => return Some(&field.docs),
-            ResourceMember::Group(group) if group.span == span => return Some(&group.docs),
+            ResourceMember::Field(field) if span_contains_span(field.span, span) => {
+                return Some(&field.docs);
+            }
+            ResourceMember::Group(group) if span_contains_span(group.span, span) => {
+                return Some(&group.docs);
+            }
             // A nested group can hold the named member; descend before moving on.
             ResourceMember::Group(group) => {
                 if let Some(docs) = member_docs(&group.members, span) {

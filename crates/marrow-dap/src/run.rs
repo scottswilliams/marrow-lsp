@@ -9,7 +9,9 @@ use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
-use marrow_run::{CheckedEntryCall, Host, RuntimeError, Value, run_entry_with_debugger};
+use marrow_run::{
+    CheckedEntryCall, Host, RuntimeError, SystemNondeterminism, Value, run_entry_with_debugger,
+};
 use marrow_store::tree::TreeStore;
 
 use crate::debugger::{Control, Debugger, RunEvent};
@@ -106,7 +108,7 @@ fn run_with_store(
     // `std::log` work; it gets no filesystem and no maintenance.
     let log = std::rc::Rc::new(RefCell::new(String::new()));
     let host = Host::new()
-        .with_system_clock()
+        .with_nondeterminism(&SystemNondeterminism::new())
         .with_log_sink(std::rc::Rc::clone(&log));
     let runtime = program.runtime();
     let mut output = String::new();
@@ -161,6 +163,8 @@ mod tests {
             message: "boom".to_string(),
             span: SourceSpan::default(),
             throw: None,
+            catchable: false,
+            transaction_escape: false,
             origin: None,
         }
     }

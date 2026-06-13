@@ -35,7 +35,6 @@ const KEYWORDS: &[&str] = &[
     "transaction",
     "try",
     "catch",
-    "finally",
     "throw",
     "match",
     "true",
@@ -440,6 +439,7 @@ fn std_signature(op: &stdlib::StdOp) -> String {
 fn param_type_name(param: &stdlib::ParamType) -> String {
     match param {
         stdlib::ParamType::Scalar(scalar) => scalar.name().to_string(),
+        stdlib::ParamType::Sequence(scalar) => format!("sequence[{}]", scalar.name()),
         stdlib::ParamType::Error => "Error".to_string(),
         stdlib::ParamType::Path => "path".to_string(),
     }

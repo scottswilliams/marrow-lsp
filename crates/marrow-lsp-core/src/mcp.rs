@@ -619,7 +619,8 @@ fn run_tests(
     program: &CheckedProgram,
 ) -> Json {
     let source_module_count = program.modules.len();
-    let (report, combined) = match marrow_check::check_tests_program(root, config, program) {
+    let (report, combined) = match marrow_check::check_tests_program(root, config, program.clone())
+    {
         Ok(result) => result,
         Err(error) => {
             return json!({ "diagnostics": [{ "code": error.code, "message": error.message }], "output": "", "tests": [] });

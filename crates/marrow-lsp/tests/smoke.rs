@@ -469,14 +469,17 @@ fn hover_over_function_call_reports_checked_direct_effects_over_stdio() {
     let clean = "\
 module shelf::sample
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     required visits: int
 
+store ^books(id: int): Book
+
 pub fn touch(id: int): string
-    const title: string = ^books(id).title
+    const title: string = ^books(id).title ?? \"\"
+    const visits: int = ^books(id).visits ?? 0
     transaction
-        ^books(id).visits = ^books(id).visits + 1
+        ^books(id).visits = visits + 1
     print(title)
     return title
 
@@ -513,7 +516,7 @@ pub fn caller(): string
             "method": "textDocument/hover",
             "params": {
                 "textDocument": { "uri": uri },
-                "position": { "line": 14, "character": 12 }
+                "position": { "line": 17, "character": 12 }
             }
         }),
     );
@@ -1229,11 +1232,11 @@ fn completion_after_caret_drops_saved_roots_without_fresh_checked_facts() {
         &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
 
-    // Open a clean buffer declaring the saved resource `Book at ^books`, so the
+    // Open a clean buffer declaring the saved resource and store, so the
     // analysis caches a program carrying that resource.
     let file = fixture_root().join("src/shelf/sample.mw");
     let uri = url::Url::from_file_path(&file).unwrap().to_string();
-    let clean = "module shelf::sample\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn drop()\n    return\n";
+    let clean = "module shelf::sample\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n\npub fn drop()\n    return\n";
     send(
         &mut stdin,
         &json!({
@@ -1254,7 +1257,7 @@ fn completion_after_caret_drops_saved_roots_without_fresh_checked_facts() {
     // Now the user types a `delete ^` — the file no longer parses cleanly, which
     // drops its module from a fresh analysis. Completion stays lexical, but must
     // not list saved roots from the previous checked program.
-    let erroring = "module shelf::sample\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn drop()\n    delete ^\n";
+    let erroring = "module shelf::sample\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n\npub fn drop()\n    delete ^\n";
     send(
         &mut stdin,
         &json!({
@@ -1268,7 +1271,7 @@ fn completion_after_caret_drops_saved_roots_without_fresh_checked_facts() {
     );
     let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
 
-    // The `^` is the last non-newline character: line 6 (zero-based), after `delete `.
+    // The `^` is the last non-newline character: line 8 (zero-based), after `delete `.
     send(
         &mut stdin,
         &json!({
@@ -1277,7 +1280,7 @@ fn completion_after_caret_drops_saved_roots_without_fresh_checked_facts() {
             "method": "textDocument/completion",
             "params": {
                 "textDocument": { "uri": uri },
-                "position": { "line": 6, "character": 12 }
+                "position": { "line": 8, "character": 12 }
             }
         }),
     );
@@ -1374,7 +1377,7 @@ fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::create_dir_all(root.join("data")).unwrap();
-    let source = "module shelf\n\nresource Book at ^books(id: int)\n    required title: string\n\npub fn f()\n    return\n";
+    let source = "module shelf\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n\npub fn f()\n    return\n";
     let file = src.join("shelf.mw");
     std::fs::write(&file, source).unwrap();
 

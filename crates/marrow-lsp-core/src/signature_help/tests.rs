@@ -61,15 +61,13 @@ fn add(
 ): int
     return left + right
 
-fn books(id: int): int
+fn localBooks(id: int): int
     return id
 
 fn id(value: int): int
     return value
 
-fn parse(text: string, inout value: int, inout count: int): bool
-    value = 0
-    count = count + 1
+fn parse(text: string, value: int, count: int): bool
     return true
 
 fn title(value: string): string
@@ -297,7 +295,7 @@ fn qualified_imported_function_call_resolves_through_checker() {
 }
 
 #[test]
-fn user_function_signature_includes_parameter_modes() {
+fn user_function_signature_includes_multiple_parameters() {
     let (program, file) = project();
     let help = help_at(
         &program,
@@ -308,14 +306,14 @@ fn user_function_signature_includes_parameter_modes() {
 
     assert_eq!(
         signature_label(&help),
-        "parse(text: string, inout value: int, inout count: int): bool"
+        "parse(text: string, value: int, count: int): bool"
     );
     assert_eq!(
         parameter_labels(&help),
         vec![
             "text: string".to_string(),
-            "inout value: int".to_string(),
-            "inout count: int".to_string(),
+            "value: int".to_string(),
+            "count: int".to_string(),
         ]
     );
     assert_eq!(help.active_parameter, Some(1));
@@ -519,7 +517,7 @@ fn resource_member_key_list_returns_no_signature_help() {
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\nresource Counter at ^counters\n    count(|): string\n",
+        "module shelf::app\n\nresource Counter\n    count(|): string\n\nstore ^counters: Counter\n",
     );
 
     assert!(help.is_none());
@@ -531,7 +529,7 @@ fn resource_group_key_list_returns_no_signature_help() {
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\nresource Counter at ^counters\n    count(|)\n",
+        "module shelf::app\n\nresource Counter\n    count(|)\n\nstore ^counters: Counter\n",
     );
 
     assert!(help.is_none());
@@ -543,7 +541,7 @@ fn required_resource_member_key_list_returns_no_signature_help() {
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\nresource Counter at ^counters\n    required count(|): string\n",
+        "module shelf::app\n\nresource Counter\n    required count(|): string\n\nstore ^counters: Counter\n",
     );
 
     assert!(help.is_none());
@@ -555,7 +553,7 @@ fn resource_index_argument_list_returns_no_signature_help() {
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\nresource Counter at ^counters\n    index count(|)\n",
+        "module shelf::app\n\nresource Counter\n    index count(|)\n\nstore ^counters: Counter\n",
     );
 
     assert!(help.is_none());
@@ -579,7 +577,7 @@ fn stable_id_metadata_returns_no_signature_help() {
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\nresource Counter at ^counters\n    @id(|\n    amount: int\n",
+        "module shelf::app\n\nresource Counter\n    @id(|\n    amount: int\n\nstore ^counters: Counter\n",
     );
 
     assert!(help.is_none());
@@ -591,7 +589,7 @@ fn builtin_call_inside_stable_id_metadata_parens_returns_no_signature_help() {
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\nresource Counter at ^counters\n    @id(count(|\n    amount: int\n",
+        "module shelf::app\n\nresource Counter\n    @id(count(|\n    amount: int\n\nstore ^counters: Counter\n",
     );
 
     assert!(help.is_none());

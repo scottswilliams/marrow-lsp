@@ -157,6 +157,12 @@ fn add_statement_type_annotation_overrides(
             else_ifs,
             else_block,
             ..
+        }
+        | Statement::IfConst {
+            then_block,
+            else_ifs,
+            else_block,
+            ..
         } => {
             add_block_type_annotation_overrides(overrides, lexed, source, then_block);
             for else_if in else_ifs {
@@ -171,21 +177,13 @@ fn add_statement_type_annotation_overrides(
         | Statement::Transaction { body, .. } => {
             add_block_type_annotation_overrides(overrides, lexed, source, body);
         }
-        Statement::Try {
-            body,
-            catch,
-            finally,
-            ..
-        } => {
+        Statement::Try { body, catch, .. } => {
             add_block_type_annotation_overrides(overrides, lexed, source, body);
             if let Some(catch) = catch {
                 if let Some(ty) = &catch.ty {
                     add_type_annotation_overrides(overrides, lexed, source, ty);
                 }
                 add_block_type_annotation_overrides(overrides, lexed, source, &catch.block);
-            }
-            if let Some(finally) = finally {
-                add_block_type_annotation_overrides(overrides, lexed, source, finally);
             }
         }
         Statement::Match { arms, .. } => {
@@ -196,6 +194,7 @@ fn add_statement_type_annotation_overrides(
         Statement::Assign { .. }
         | Statement::Delete { .. }
         | Statement::Return { .. }
+        | Statement::ReturnAbsent { .. }
         | Statement::Break { .. }
         | Statement::Continue { .. }
         | Statement::Throw { .. }

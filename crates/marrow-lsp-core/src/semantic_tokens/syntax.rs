@@ -62,7 +62,6 @@ pub(super) fn token_type(kind: TokenKind) -> Option<u32> {
         | TokenKind::Star
         | TokenKind::Slash
         | TokenKind::Percent
-        | TokenKind::Underscore
         | TokenKind::At => Some(TYPE_OPERATOR),
         _ => None,
     }

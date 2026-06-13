@@ -154,10 +154,6 @@ const OPERATOR_FACTS: &[OperatorFact] = &[
         description: "remainder.",
     },
     OperatorFact {
-        spelling: "_",
-        description: "string concatenation.",
-    },
-    OperatorFact {
         spelling: "??",
         description: "fallback value selection.",
     },
@@ -222,7 +218,7 @@ pub(crate) fn std_module_hover(module: &str) -> Option<String> {
     let ops = stdlib::all()
         .iter()
         .filter(|op| op.module == module)
-        .map(|op| format!("{} ({})", op.op, capability_label(op.capability)))
+        .map(|op| format!("{} ({})", op.op, capability_label(op.requires_capability)))
         .collect::<Vec<_>>();
     if ops.is_empty() {
         return None;
@@ -238,7 +234,7 @@ pub(crate) fn std_operation_hover(module: &str, op: &str) -> Option<String> {
     Some(format!(
         "{}\n\ndefault library std operation.\n\nCapability: {}",
         std_signature(op),
-        capability_label(op.capability)
+        capability_label(op.requires_capability)
     ))
 }
 
@@ -312,6 +308,7 @@ fn std_signature(op: &stdlib::StdOp) -> String {
 fn param_type_name(param: &stdlib::ParamType) -> String {
     match param {
         stdlib::ParamType::Scalar(scalar) => scalar.name().to_string(),
+        stdlib::ParamType::Sequence(scalar) => format!("sequence[{}]", scalar.name()),
         stdlib::ParamType::Error => "Error".to_string(),
         stdlib::ParamType::Path => "path".to_string(),
     }
@@ -325,13 +322,13 @@ fn return_type_name(ret: &stdlib::ReturnType) -> Option<String> {
     }
 }
 
-fn capability_label(capability: stdlib::Capability) -> &'static str {
+fn capability_label(capability: Option<stdlib::Capability>) -> &'static str {
     match capability {
-        stdlib::Capability::Pure => "pure",
-        stdlib::Capability::Clock => "clock",
-        stdlib::Capability::Env => "env",
-        stdlib::Capability::Log => "log",
-        stdlib::Capability::Io => "io",
-        stdlib::Capability::Assert => "assert",
+        None => "pure",
+        Some(stdlib::Capability::Clock) => "clock",
+        Some(stdlib::Capability::Environment) => "environment",
+        Some(stdlib::Capability::Log) => "log",
+        Some(stdlib::Capability::Filesystem) => "filesystem",
+        Some(stdlib::Capability::Maintenance) => "maintenance",
     }
 }

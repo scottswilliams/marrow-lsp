@@ -292,12 +292,12 @@ fn f(): bool
 }
 
 #[test]
-fn concat_underscore_colors_as_operator() {
+fn coalesce_colors_as_operator() {
     let source = "\
 module m
 
 fn f(a: string, b: string): string
-    return a _ b
+    return a ?? b
 ";
     let (index, decoded) = decoded_for(source);
 
@@ -305,8 +305,8 @@ fn f(a: string, b: string): string
         source,
         &index,
         &decoded,
-        "    return a _ b",
-        "_",
+        "    return a ?? b",
+        "??",
         legend_index(&SemanticTokenType::OPERATOR),
         0,
     );
@@ -358,11 +358,13 @@ fn declaration_identifiers_use_role_specific_token_types() {
 module shelf::catalog
 use shared::imports
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     notes(note_id: string)
         text: string
     tags(pos: int): string
+
+store ^books(id: int): Book
     index byTitle(title, id)
 
 pub fn paint(book_id: int, label: string): int
@@ -413,7 +415,7 @@ pub enum Genre
         source,
         &index,
         &decoded,
-        "resource Book at ^books(id: int)",
+        "resource Book",
         "Book",
         legend_index(&SemanticTokenType::STRUCT),
     );
@@ -507,7 +509,7 @@ pub enum Genre
         source,
         &index,
         &decoded,
-        "resource Book at ^books(id: int)",
+        "store ^books(id: int): Book",
         "id",
         parameter,
     );
@@ -762,9 +764,11 @@ fn resolved_reference_uses_take_their_symbol_roles() {
     let source = "\
 module m
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     tags(pos: int): string
+
+store ^books(id: int): Book
     index byTitle(title)
 
 enum Status
@@ -775,10 +779,10 @@ fn helper(id: int): int
     return id
 
 fn paint(id: int, title: string): int
-    const book = Book(id)
+    const book = Book(title: title)
     const status = Status::archived
-    const found = ^books(id).title
-    const tag = ^books(id).tags(1)
+    const found = ^books(id).title ?? \"\"
+    const tag = ^books(id).tags(1) ?? \"\"
     const lookup = ^books.byTitle(title)
     return helper(id)
 ";
@@ -804,7 +808,7 @@ fn paint(id: int, title: string): int
         source,
         &index,
         &decoded,
-        "    const book = Book(id)",
+        "    const book = Book(title: title)",
         "Book",
         legend_index(&SemanticTokenType::STRUCT),
     );
@@ -822,7 +826,7 @@ fn paint(id: int, title: string): int
         source,
         &index,
         &decoded,
-        "    const found = ^books(id).title",
+        "    const found = ^books(id).title ?? \"\"",
         "title",
         property,
     );
@@ -830,7 +834,7 @@ fn paint(id: int, title: string): int
         source,
         &index,
         &decoded,
-        "    const tag = ^books(id).tags(1)",
+        "    const tag = ^books(id).tags(1) ?? \"\"",
         "tags",
         property,
     );
@@ -849,9 +853,11 @@ fn declaration_header_type_tokens_are_not_recolored_by_definition_spans() {
     let source = "\
 module m
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     tags(pos: int): string
+
+store ^books(id: int): Book
 
 fn helper(id: int): int
     return id
@@ -863,7 +869,7 @@ fn helper(id: int): int
         source,
         &index,
         &decoded,
-        "resource Book at ^books(id: int)",
+        "store ^books(id: int): Book",
         "int",
         ty,
     );
@@ -1058,8 +1064,10 @@ fn known_default_library_calls_carry_default_library_modifier() {
     let source = "\
 module m
 
-resource Book at ^books(id: int)
+resource Book
     tags(pos: int): string
+
+store ^books(id: int): Book
 
 fn f(): bool
     const clock_value = std::clock::now()
@@ -1205,16 +1213,20 @@ fn checked_qualified_resource_constructor_prefix_is_namespace_while_leaf_stays_s
     let state_source = "\
 module shelf::state
 
-resource Book at ^state_books(id: int)
+resource Book
     required title: string
+
+store ^state_books(id: int): Book
 ";
     let app_source = "\
 module shelf::app
 
 use shelf::state
 
-resource Book at ^app_books(code: string)
+resource Book
     required label: string
+
+store ^app_books(code: string): Book
 
 pub fn make()
     const book = state::Book(title: \"x\")
@@ -1469,8 +1481,10 @@ fn checker_single_name_builtins_are_default_library_calls() {
     let source = "\
 module m
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+store ^books(id: int): Book
 
 fn f()
     const items = keys(^books)
@@ -1504,8 +1518,10 @@ fn builtin_call_leaf_wins_over_user_function_binding_reference() {
     let source = "\
 module m
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+store ^books(id: int): Book
 
 fn exists(value: unknown): bool
     return false

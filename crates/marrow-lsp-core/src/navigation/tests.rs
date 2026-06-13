@@ -95,11 +95,13 @@ fn definition_from_saved_root_use_is_blocked_without_canonical_fact() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): string
-    return ^books(1).title
+    return ^books(1).title ?? \"\"
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
@@ -113,11 +115,13 @@ fn definition_from_saved_root_use_caret_is_blocked_without_canonical_fact() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): string
-    return ^books(1).title
+    return ^books(1).title ?? \"\"
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
@@ -131,16 +135,18 @@ fn definition_from_saved_root_declaration_is_blocked_without_canonical_fact() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): string
-    return ^books(1).title
+    return ^books(1).title ?? \"\"
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
 
-    let declaration = offset_of(source, "resource Book at ^books") + "resource Book at ^".len();
+    let declaration = offset_of(source, "store ^books") + "store ^".len();
     assert!(definition(&snapshot, &index, &indices, &file, declaration + 1).is_none());
 }
 
@@ -149,17 +155,18 @@ fn definition_from_saved_root_declaration_caret_is_blocked_without_canonical_fac
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): string
-    return ^books(1).title
+    return ^books(1).title ?? \"\"
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
 
-    let declaration_caret =
-        offset_of(source, "resource Book at ^books") + "resource Book at ".len();
+    let declaration_caret = offset_of(source, "store ^books") + "store ".len();
     assert!(definition(&snapshot, &index, &indices, &file, declaration_caret).is_none());
 }
 
@@ -248,11 +255,13 @@ fn rename_of_a_saved_field_is_refused() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): string
-    return ^books(1).title
+    return ^books(1).title ?? \"\"
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
@@ -301,8 +310,6 @@ fn rename_rejects_invalid_replacement_text() {
         "at",
         "index",
         "unique",
-        "out",
-        "inout",
         "ErrorCode",
         "store",
         "evolve",
@@ -468,16 +475,20 @@ fn definition_from_qualified_resource_constructor_leaf_jumps_to_foreign_resource
     let state_source = "\
 module shelf::state
 
-resource Book at ^state_books(id: int)
+resource Book
     required title: string
+
+store ^state_books(id: int): Book
 ";
     let app_source = "\
 module shelf::app
 
 use shelf::state
 
-resource Book at ^app_books(code: string)
+resource Book
     required label: string
+
+store ^app_books(code: string): Book
 
 pub fn make()
     const book = state::Book(title: \"x\")
@@ -507,16 +518,20 @@ fn definition_from_same_named_local_and_foreign_resource_uses_the_qualified_targ
     let state_source = "\
 module shelf::state
 
-resource Book at ^state_books(id: int)
+resource Book
     required title: string
+
+store ^state_books(id: int): Book
 ";
     let app_source = "\
 module shelf::app
 
 use shelf::state
 
-resource Book at ^app_books(code: string)
+resource Book
     required label: string
+
+store ^app_books(code: string): Book
 
 pub fn make_foreign()
     const book = state::Book(title: \"x\")
@@ -793,8 +808,10 @@ module app
 
 use shelf::book
 
-resource book at ^books(id: int)
+resource book
     required title: string
+
+store ^books(id: int): book
 
 pub fn run(): int
     return book::Id()
@@ -874,8 +891,10 @@ module app
 
 use shelf::book
 
-resource book at ^books(id: int)
+resource book
     required title: string
+
+store ^books(id: int): book
 
 pub fn wrap(value: int): int
     return value
@@ -1056,7 +1075,7 @@ fn f(): b::Status
 }
 
 #[test]
-fn rename_from_enum_type_annotation_rewrites_leaf_enum_occurrences_only() {
+fn rename_from_enum_type_annotation_rejects_saved_data_backed_renames() {
     let status_source = "\
 module a::b
 pub enum Status
@@ -1073,7 +1092,6 @@ fn f(): b::Status
 ";
     let (snapshot, paths, indices) =
         analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
-    let status_file = &paths[0];
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
     let app_index = indices.0.get(app_file).unwrap();
@@ -1083,27 +1101,9 @@ fn f(): b::Status
         .expect("enum annotation can prepare rename");
     assert_eq!(range_text(app_source, app_index, prepared), "Status");
 
-    let edit = rename(&index, &indices, app_file, annotation + 1, "State")
-        .expect("enum annotation rename succeeds");
-    let changes = edit.changes.expect("changes present");
-    let mut replaced = Vec::new();
-    for (url, edits) in &changes {
-        let path = url.to_file_path().unwrap();
-        let (source, line_index) = if path == *status_file {
-            (status_source, indices.0.get(status_file).unwrap())
-        } else {
-            (app_source, app_index)
-        };
-        for edit in edits {
-            replaced.push(range_text(source, line_index, edit.range));
-            assert_eq!(edit.new_text, "State");
-        }
-    }
-    replaced.sort_unstable();
-
-    assert_eq!(
-        replaced,
-        vec!["Status", "Status", "Status", "Status"],
-        "rename touches the declaration, annotations, and literal enum prefix"
+    let result = rename(&index, &indices, app_file, annotation + 1, "State");
+    assert!(
+        matches!(result, Err(RenameError::SavedDataBacked)),
+        "enum names are catalog-backed and must not be source-renamed: {result:?}"
     );
 }

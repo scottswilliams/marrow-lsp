@@ -88,6 +88,12 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
             else_ifs,
             else_block,
             ..
+        }
+        | Statement::IfConst {
+            then_block,
+            else_ifs,
+            else_block,
+            ..
         } => {
             block_type_annotation_at(then_block, offset)
                 || else_ifs
@@ -100,12 +106,7 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
         Statement::While { body, .. }
         | Statement::For { body, .. }
         | Statement::Transaction { body, .. } => block_type_annotation_at(body, offset),
-        Statement::Try {
-            body,
-            catch,
-            finally,
-            ..
-        } => {
+        Statement::Try { body, catch, .. } => {
             block_type_annotation_at(body, offset)
                 || catch.as_ref().is_some_and(|catch| {
                     catch
@@ -114,9 +115,6 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
                         .is_some_and(|ty| type_ref_covers(ty, offset))
                         || block_type_annotation_at(&catch.block, offset)
                 })
-                || finally
-                    .as_ref()
-                    .is_some_and(|block| block_type_annotation_at(block, offset))
         }
         Statement::Match { arms, .. } => arms
             .iter()
@@ -124,6 +122,7 @@ fn statement_type_annotation_at(statement: &Statement, offset: usize) -> bool {
         Statement::Assign { .. }
         | Statement::Delete { .. }
         | Statement::Return { .. }
+        | Statement::ReturnAbsent { .. }
         | Statement::Break { .. }
         | Statement::Continue { .. }
         | Statement::Throw { .. }

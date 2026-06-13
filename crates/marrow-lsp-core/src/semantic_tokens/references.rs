@@ -73,7 +73,7 @@ fn token_is_prefix_before_resolved_namespace_tail(
         let candidate = &lexed.tokens[candidate_index];
         if index
             .definition(path, candidate.span.start_byte)
-            .is_some_and(|definition| resolved_tail_allows_namespace_prefix(definition.kind))
+            .is_some_and(|definition| symbol_kind_can_have_namespace_prefix(definition.kind))
         {
             return true;
         }
@@ -178,10 +178,6 @@ fn symbol_kind_can_have_namespace_prefix(kind: SymbolKind) -> bool {
         kind,
         SymbolKind::Function | SymbolKind::Resource | SymbolKind::Enum
     )
-}
-
-fn resolved_tail_allows_namespace_prefix(kind: SymbolKind) -> bool {
-    matches!(kind, SymbolKind::Resource | SymbolKind::Enum)
 }
 
 fn style_for_symbol_kind(kind: SymbolKind) -> Option<TokenStyle> {

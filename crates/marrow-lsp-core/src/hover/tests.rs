@@ -103,21 +103,21 @@ pub fn f(first: int, second: string): string
 }
 
 #[test]
-fn hover_over_a_moded_parameter_use_shows_its_mode() {
+fn hover_over_a_parameter_use_in_function_body_shows_its_signature_fragment() {
     let source = "\
 module a
 
-pub fn fill(inout value: int)
-    value = 1
+pub fn fill(value: int): int
+    return value
 ";
     let (snapshot, file) = analyze(source);
-    let offset = offset_of(source, "value = 1") + 1;
+    let offset = offset_of(source, "return value") + "return ".len();
 
     let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `value`");
     let HoverContents::Markup(markup) = hover.contents else {
         panic!("expected markup contents");
     };
-    assert_eq!(markup.value, "```marrow\ninout value: int\n```");
+    assert_eq!(markup.value, "```marrow\nvalue: int\n```");
 }
 
 #[test]
@@ -334,14 +334,17 @@ fn hover_over_a_function_call_shows_direct_effects_from_checked_facts() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
     required visits: int
 
+store ^books(id: int): Book
+
 pub fn touch(id: int): string
-    const title: string = ^books(id).title
+    const title: string = ^books(id).title ?? \"\"
+    const visits: int = ^books(id).visits ?? 0
     transaction
-        ^books(id).visits = ^books(id).visits + 1
+        ^books(id).visits = visits + 1
     print(title)
     return title
 
@@ -401,8 +404,10 @@ fn hover_over_bare_builtin_call_shows_default_library_signature() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+store ^books(id: int): Book
 
 pub fn f(): bool
     return exists(^books(1))
@@ -894,8 +899,10 @@ pub fn code(): int
 module app
 
 ;; Saved books.
-resource book at ^books(id: int)
+resource book
     required title: string
+
+store ^books(id: int): book
 
 pub fn load(): book::Id
     return book::Id(1)
@@ -975,9 +982,6 @@ pub fn sum(x: int, y: int): int
 
 pub fn both(left: bool, right: bool): bool
     return left and right
-
-pub fn joined(left: string, right: string): string
-    return left _ right
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
@@ -1008,16 +1012,6 @@ pub fn joined(left: string, right: string): string
     assert!(
         and_value.contains("logical"),
         "and hover should describe logical behavior: {and_value}"
-    );
-
-    let concat = hover_value(&snapshot, &index, &file, source, "_");
-    assert!(
-        concat.starts_with("```marrow\noperator _\n```"),
-        "concat operator hover should lead with the operator: {concat}"
-    );
-    assert!(
-        concat.contains("concatenation"),
-        "underscore hover should describe concatenation behavior: {concat}"
     );
 }
 
@@ -1105,11 +1099,13 @@ fn hover_over_operator_keyword_resource_fields_does_not_show_operator_docs() {
     let source = "\
 module app
 
-resource Thing at ^things(id: int)
+resource Thing
     required and: int
     required or: int
     required is: bool
     required not: bool
+
+store ^things(id: int): Thing
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
@@ -1131,8 +1127,10 @@ fn builtin_call_hover_wins_over_same_named_user_function_but_not_declaration() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
+
+store ^books(id: int): Book
 
 fn exists(value: unknown): bool
     return false
@@ -1259,13 +1257,12 @@ pub fn n(): int
 }
 
 #[test]
-fn hover_over_a_function_with_moded_params_shows_modes() {
+fn hover_over_a_function_with_multiple_params_shows_signature() {
     let source = "\
 module a
 
-pub fn fill(inout value: int, inout count: int)
-    value = count
-    count = count + 1
+pub fn fill(value: int, count: int): int
+    return value + count
 ";
     let (snapshot, file) = analyze(source);
     let offset = offset_of(source, "fill") + 1;
@@ -1276,7 +1273,7 @@ pub fn fill(inout value: int, inout count: int)
     };
     assert_eq!(
         markup.value,
-        "```marrow\nfn fill(inout value: int, inout count: int)\n```"
+        "```marrow\nfn fill(value: int, count: int): int\n```"
     );
 }
 
@@ -2027,9 +2024,11 @@ fn hover_over_resource_field_declaration_name_shows_member_signature() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     ;; The displayed title.
     required title: string
+
+store ^books(id: int): Book
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
@@ -2490,11 +2489,13 @@ fn hover_without_docs_is_type_only() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): string
-    return ^books(1).title
+    return ^books(1).title ?? \"\"
 ";
     let (snapshot, file) = analyze(source);
     let offset = source.rfind(").title").unwrap() + ").".len() + 1;
@@ -2596,16 +2597,18 @@ fn symbol_docs_for_a_resource_name_returns_its_description() {
 module a
 
 ;; A book on a shelf.
-resource Book at ^books(id: int)
+resource Book
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): Book
-    return Book(id: 1, title: \"x\")
+    return Book(title: \"x\")
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
     // Hover over the constructor use `Book(...)`.
-    let offset = source.rfind("Book(id: 1").unwrap();
+    let offset = source.rfind("Book(title:").unwrap();
     let docs = symbol_docs(&snapshot, &index, &file, offset).expect("resource docs");
     assert_eq!(docs, "A book on a shelf.");
 }
@@ -2615,12 +2618,14 @@ fn symbol_docs_for_a_saved_field_returns_its_description() {
     let source = "\
 module a
 
-resource Book at ^books(id: int)
+resource Book
     ;; The book's title.
     required title: string
 
+store ^books(id: int): Book
+
 pub fn f(): string
-    return ^books(1).title
+    return ^books(1).title ?? \"\"
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
