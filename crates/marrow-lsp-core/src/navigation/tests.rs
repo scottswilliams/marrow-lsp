@@ -801,7 +801,7 @@ fn module_path_prefix_definition_does_not_steal_imported_module_named_like_local
     let book_source = "\
 module shelf::book
 
-pub fn Id(): int
+pub fn lookup(): int
     return 1
 ";
     let app_source = "\
@@ -815,7 +815,7 @@ resource book
 store ^books(id: int): book
 
 pub fn run(): int
-    return book::Id()
+    return book::lookup()
 ";
     let (snapshot, paths, indices) =
         analyze_files(&[("shelf/book.mw", book_source), ("app.mw", app_source)]);
@@ -824,19 +824,19 @@ pub fn run(): int
     let index = build_binding_index(&snapshot);
     let book_index = indices.0.get(book_file).unwrap();
 
-    let prefix = offset_of(app_source, "return book::Id") + "return ".len();
+    let prefix = offset_of(app_source, "return book::lookup") + "return ".len();
     assert_eq!(
         definition(&snapshot, &index, &indices, app_file, prefix + 1),
         None
     );
 
-    let leaf = offset_of(app_source, "return book::Id") + "return book::".len();
+    let leaf = offset_of(app_source, "return book::lookup") + "return book::".len();
     let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
         .expect("aliased leaf resolves to the imported function");
     assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
     assert_eq!(
         range_text(book_source, book_index, leaf_location.range),
-        "Id"
+        "lookup"
     );
 }
 
@@ -845,7 +845,7 @@ fn module_path_definition_keeps_imported_function_without_identity_binding_fact(
     let book_source = "\
 module shelf::book
 
-pub fn Id(): int
+pub fn lookup(): int
     return 1
 ";
     let app_source = "\
@@ -854,7 +854,7 @@ module app
 use shelf::book
 
 pub fn run(): int
-    return book::Id()
+    return book::lookup()
 ";
     let (snapshot, paths, indices) =
         analyze_files(&[("shelf/book.mw", book_source), ("app.mw", app_source)]);
@@ -863,19 +863,19 @@ pub fn run(): int
     let index = build_binding_index(&snapshot);
     let book_index = indices.0.get(book_file).unwrap();
 
-    let prefix = offset_of(app_source, "return book::Id") + "return ".len();
+    let prefix = offset_of(app_source, "return book::lookup") + "return ".len();
     assert_eq!(
         definition(&snapshot, &index, &indices, app_file, prefix + 1),
         None
     );
 
-    let leaf = offset_of(app_source, "book::Id") + "book::".len();
+    let leaf = offset_of(app_source, "book::lookup") + "book::".len();
     let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
         .expect("leaf call resolves to the imported function");
     assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
     assert_eq!(
         range_text(book_source, book_index, leaf_location.range),
-        "Id"
+        "lookup"
     );
 }
 
@@ -884,7 +884,7 @@ fn module_path_prefix_definition_named_argument_colon_is_not_type_annotation() {
     let book_source = "\
 module shelf::book
 
-pub fn Id(): int
+pub fn lookup(): int
     return 1
 ";
     let app_source = "\
@@ -901,7 +901,7 @@ pub fn wrap(value: int): int
     return value
 
 pub fn run(): int
-    return wrap(value: book::Id())
+    return wrap(value: book::lookup())
 ";
     let (snapshot, paths, indices) =
         analyze_files(&[("shelf/book.mw", book_source), ("app.mw", app_source)]);
@@ -910,20 +910,21 @@ pub fn run(): int
     let index = build_binding_index(&snapshot);
     let book_index = indices.0.get(book_file).unwrap();
 
-    let prefix = offset_of(app_source, "return wrap(value: book::Id") + "return wrap(value: ".len();
+    let prefix =
+        offset_of(app_source, "return wrap(value: book::lookup") + "return wrap(value: ".len();
     assert_eq!(
         definition(&snapshot, &index, &indices, app_file, prefix + 1),
         None
     );
 
-    let leaf =
-        offset_of(app_source, "return wrap(value: book::Id") + "return wrap(value: book::".len();
+    let leaf = offset_of(app_source, "return wrap(value: book::lookup")
+        + "return wrap(value: book::".len();
     let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
         .expect("named argument aliased call leaf resolves to the imported function");
     assert_eq!(leaf_location.uri, Url::from_file_path(book_file).unwrap());
     assert_eq!(
         range_text(book_source, book_index, leaf_location.range),
-        "Id"
+        "lookup"
     );
 }
 

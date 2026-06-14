@@ -34,7 +34,7 @@ resource Settings
 
 store ^settings: Settings
 
-resource Id
+resource Badge
     required value: int
 
 ;; Resolves the display title for a book.
@@ -346,31 +346,31 @@ fn resource_constructor_uses_named_plain_fields() {
 }
 
 #[test]
-fn imported_module_resource_named_id_keeps_constructor_signature_help() {
+fn imported_module_resource_constructor_keeps_signature_help() {
     let (program, file) = project();
     let help = help_at(
-            &program,
-            &file,
-            "module shelf::app\n\nuse shelf::books\n\npub fn run(): books::Id\n    return books::Id(|\n",
-        )
-        .expect("signature help");
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn run(): books::Badge\n    return books::Badge(|\n",
+    )
+    .expect("signature help");
 
-    assert_eq!(signature_label(&help), "Id(value: int): Id");
+    assert_eq!(signature_label(&help), "Badge(value: int): Badge");
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
 }
 
 #[test]
-fn fully_qualified_resource_named_id_keeps_constructor_signature_help() {
+fn fully_qualified_resource_constructor_keeps_signature_help() {
     let (program, file) = project();
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\npub fn run(): shelf::books::Id\n    return shelf::books::Id(|\n",
+        "module shelf::app\n\npub fn run(): shelf::books::Badge\n    return shelf::books::Badge(|\n",
     )
     .expect("signature help");
 
-    assert_eq!(signature_label(&help), "Id(value: int): Id");
+    assert_eq!(signature_label(&help), "Badge(value: int): Badge");
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
 }
@@ -704,7 +704,7 @@ store ^settings: Settings
         "\
 module Settings
 
-resource Id
+resource Badge
     required value: int
 ",
     )
@@ -716,11 +716,11 @@ resource Id
     let help = help_at(
         &snapshot.program,
         &app,
-        "module app\n\npub fn run(): Settings::Id\n    return Settings::Id(|\n",
+        "module app\n\npub fn run(): Settings::Badge\n    return Settings::Badge(|\n",
     )
     .expect("module resource constructor signature help");
 
-    assert_eq!(signature_label(&help), "Id(value: int): Id");
+    assert_eq!(signature_label(&help), "Badge(value: int): Badge");
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
 }

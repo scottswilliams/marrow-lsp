@@ -1431,7 +1431,7 @@ fn bad_extra(x: Id(^authors)::Extra)
     return
 ";
     let (index, decoded) = decoded_for(source);
-    let variable = legend_index(&SemanticTokenType::VARIABLE);
+    let keyword = legend_index(&SemanticTokenType::KEYWORD);
 
     assert_token(
         source,
@@ -1439,7 +1439,7 @@ fn bad_extra(x: Id(^authors)::Extra)
         &decoded,
         "fn bad_extra(x: Id(^authors)::Extra)",
         "Id",
-        variable,
+        keyword,
         0,
     );
 }
