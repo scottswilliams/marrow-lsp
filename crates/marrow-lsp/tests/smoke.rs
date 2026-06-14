@@ -727,7 +727,11 @@ fn definition_returns_null_when_open_buffer_is_newer_than_cached_snapshot() {
 fn definition_returns_null_when_open_source_overlay_closes_before_recompute() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let defs_file = src.join("defs.mw");
@@ -865,7 +869,11 @@ pub fn call(): int
 fn symbols_do_not_return_stale_snapshot_names_after_an_edit() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let file = src.join("app.mw");
@@ -977,7 +985,11 @@ fn symbols_do_not_return_stale_snapshot_names_after_an_edit() {
 fn completion_drops_project_roots_when_checked_program_is_stale() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let file = src.join("app.mw");
@@ -1082,7 +1094,11 @@ pub fn call(): int
 fn semantic_tokens_drop_binding_facts_when_open_sibling_is_newer_than_cached_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let defs_file = src.join("defs.mw");

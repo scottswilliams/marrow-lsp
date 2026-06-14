@@ -7,7 +7,11 @@ use marrow_syntax::lex_source;
 fn project_snapshot() -> (AnalysisSnapshot, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let pkg = root.join("src/shelf");
     std::fs::create_dir_all(&pkg).unwrap();
     std::fs::write(
@@ -78,7 +82,8 @@ pub fn run(): int
 ",
     )
     .unwrap();
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     (snapshot, app)
 }
@@ -674,7 +679,11 @@ fn field_access_call_returns_no_signature_help() {
 fn keyless_store_does_not_suppress_module_resource_constructor() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let app = src.join("app.mw");
@@ -700,7 +709,8 @@ resource Id
 ",
     )
     .unwrap();
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
 
     let help = help_at(

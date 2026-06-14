@@ -479,11 +479,17 @@ evolve
     fn analyze(source: &str) -> CheckedProgram {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("a.mw"), source).unwrap();
-        let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let config =
+            parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#)
+                .unwrap();
         let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
         std::mem::forget(dir);
         snapshot.program

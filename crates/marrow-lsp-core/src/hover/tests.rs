@@ -8,12 +8,17 @@ use marrow_project::parse_config;
 fn analyze(source: &str) -> (AnalysisSnapshot, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let file = src.join("a.mw");
     std::fs::write(&file, source).unwrap();
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     // Keep the temp dir alive for the snapshot's lifetime by leaking it; the
     // OS reclaims it when the test process exits.
@@ -24,14 +29,19 @@ fn analyze(source: &str) -> (AnalysisSnapshot, std::path::PathBuf) {
 fn analyze_files(files: &[(&str, &str)], target: &str) -> (AnalysisSnapshot, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     for (path, source) in files {
         let file = src.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, source).unwrap();
     }
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     let file = src.join(target);
     std::mem::forget(dir);

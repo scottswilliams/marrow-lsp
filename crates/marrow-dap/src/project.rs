@@ -204,7 +204,7 @@ pub fn main(): int
     fn an_explicit_entry_is_blocked_until_marrow_exposes_entry_facts() {
         let dir = write_project(
             "module m\n\npub fn main(): int\n    return 1\n\npub fn other(): int\n    return 2\n",
-            "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" } }",
+            "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" }, \"store\": { \"backend\": \"memory\" } }",
         );
         let error = expect_error(prepare(dir.path(), Some("m::other")));
         assert!(
@@ -229,7 +229,7 @@ pub fn main(): int
     fn a_project_with_check_errors_will_not_launch() {
         let dir = write_project(
             "module m\n\npub fn main(): int\n    return \"nope\"\n",
-            "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" } }",
+            "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" }, \"store\": { \"backend\": \"memory\" } }",
         );
         let error = expect_error(prepare(dir.path(), None));
         assert!(matches!(error, LaunchError::CheckErrors(_)), "{error}");
@@ -239,7 +239,7 @@ pub fn main(): int
     fn missing_entry_error_frames_the_blocked_entry_contract() {
         let dir = write_project(
             "module m\n\npub fn main(): int\n    return 1\n",
-            "{ \"sourceRoots\": [\"src\"] }",
+            "{ \"sourceRoots\": [\"src\"], \"store\": { \"backend\": \"memory\" } }",
         );
         let error = expect_error(prepare(dir.path(), None));
         assert!(matches!(error, LaunchError::NoEntry), "{error}");

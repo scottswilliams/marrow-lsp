@@ -21,7 +21,11 @@ impl FileIndex for Indices {
 fn analyze_files(files: &[(&str, &str)]) -> (AnalysisSnapshot, Vec<PathBuf>, Indices) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let mut paths = Vec::new();
@@ -35,7 +39,8 @@ fn analyze_files(files: &[(&str, &str)]) -> (AnalysisSnapshot, Vec<PathBuf>, Ind
         indices.insert(file.clone(), LineIndex::new((*source).to_string()));
         paths.push(file);
     }
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     std::mem::forget(dir);
     (snapshot, paths, Indices(indices))
@@ -296,6 +301,10 @@ fn rename_rejects_invalid_replacement_text() {
         rename(&index, &indices, &file, def_offset, "count2").is_ok(),
         "a normal identifier remains a valid rename target"
     );
+    assert!(
+        rename(&index, &indices, &file, def_offset, "at").is_ok(),
+        "non-keyword identifiers remain valid rename targets"
+    );
     assert_eq!(
         rename(&index, &indices, &file, def_offset, "two words"),
         Err(RenameError::InvalidName)
@@ -306,15 +315,7 @@ fn rename_rejects_invalid_replacement_text() {
     );
     // Marrow keywords are not valid identifiers; renaming a symbol to one
     // would produce source that no longer parses.
-    for keyword in [
-        "at",
-        "index",
-        "unique",
-        "ErrorCode",
-        "store",
-        "evolve",
-        "is",
-    ] {
+    for keyword in ["index", "unique", "ErrorCode", "store", "evolve", "is"] {
         assert_eq!(
             rename(&index, &indices, &file, def_offset, keyword),
             Err(RenameError::InvalidName),

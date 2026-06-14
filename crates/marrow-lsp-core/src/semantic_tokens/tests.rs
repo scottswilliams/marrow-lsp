@@ -58,13 +58,18 @@ fn decoded_for(source: &str) -> (LineIndex, DecodedTokens) {
 fn decoded_for_checked(source: &str) -> (LineIndex, DecodedTokens) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let file = src.join("m.mw");
     std::fs::write(&file, source).unwrap();
 
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     let binding_index = build_binding_index(&snapshot);
     let parsed = snapshot
@@ -92,7 +97,11 @@ fn decoded_for_checked_file(
 ) -> (LineIndex, DecodedTokens) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
     for (relative, source) in files {
@@ -108,7 +117,8 @@ fn decoded_for_checked_file(
         .find_map(|(relative, source)| (*relative == active_relative).then_some(*source))
         .expect("active source file should be in the fixture");
     let active_file = src.join(active_relative);
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     let binding_index = build_binding_index(&snapshot);
     let parsed = snapshot

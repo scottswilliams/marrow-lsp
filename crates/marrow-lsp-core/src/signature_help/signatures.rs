@@ -222,6 +222,7 @@ fn joined_param_labels(params: &[Parameter]) -> String {
 fn std_param_label(param: &stdlib::ParamType) -> String {
     match param {
         stdlib::ParamType::Scalar(scalar) => scalar.name().to_string(),
+        stdlib::ParamType::ScalarAny => "scalar".to_string(),
         stdlib::ParamType::Sequence(scalar) => format!("sequence[{}]", scalar.name()),
         stdlib::ParamType::Error => "Error".to_string(),
         stdlib::ParamType::Path => "path".to_string(),

@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
-use marrow_check::{ProjectSources, analyze_project, build_binding_index};
+use marrow_check::{AnalysisIdentity, ProjectSources, analyze_project, build_binding_index};
 use marrow_project::{ProjectConfig, parse_config, test_module_file};
 
 pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
@@ -77,13 +77,29 @@ pub struct Workspace {
     last_program: Option<CheckedProgram>,
     /// The binding index for [`Self::latest`], built lazily on the first
     /// navigation request and reused by go-to-definition, find-references, and
-    /// rename. A recompute replaces the snapshot and clears this, so it is rebuilt
-    /// at most once per recompute and never on a request that only reads it.
+    /// rename. A recompute keeps this only when the analysis identity and project
+    /// root still match, so unchanged diagnostics publishes do not rebuild it.
     binding_index: Option<BindingIndex>,
+    binding_index_key: Option<BindingIndexKey>,
     /// Open analysis files that overlaid the latest snapshot. If the editor's
     /// open project-file set changes, the cached snapshot no longer names the
     /// same source world even when the remaining open buffers still match.
     latest_open_analysis_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindingIndexKey {
+    root: PathBuf,
+    identity: AnalysisIdentity,
+}
+
+impl BindingIndexKey {
+    fn new(project: &Project, snapshot: &AnalysisSnapshot) -> Self {
+        Self {
+            root: project.root.clone(),
+            identity: snapshot.content_identity().clone(),
+        }
+    }
 }
 
 impl Workspace {
@@ -123,6 +139,8 @@ impl Workspace {
     pub fn binding_index(&mut self) -> Option<&BindingIndex> {
         if self.binding_index.is_none() {
             let snapshot = self.latest.as_ref()?;
+            let project = self.project.as_ref()?;
+            self.binding_index_key = Some(BindingIndexKey::new(project, snapshot));
             self.binding_index = Some(build_binding_index(snapshot));
         }
         self.binding_index.as_ref()
@@ -204,6 +222,7 @@ impl Workspace {
         let sources = overlay(&project.root, documents);
         let snapshot = analyze_project(&project.root, &project.config, &sources, None)
             .map_err(WorkspaceError::Discover)?;
+        let binding_index_key = BindingIndexKey::new(project, &snapshot);
 
         // Retain the last program that had modules, so a later recompute whose
         // active buffer errors (dropping its module) does not erase the schema and
@@ -211,10 +230,12 @@ impl Workspace {
         if !snapshot.program.modules.is_empty() {
             self.last_program = Some(snapshot.program.clone());
         }
+        let keep_binding_index = self.binding_index_key.as_ref() == Some(&binding_index_key);
         self.latest = Some(snapshot);
-        // The cached index belongs to the snapshot just replaced; drop it so the
-        // next navigation request rebuilds it against the fresh analysis.
-        self.binding_index = None;
+        if !keep_binding_index {
+            self.binding_index = None;
+            self.binding_index_key = None;
+        }
         self.latest_open_analysis_paths = latest_open_analysis_paths;
         Ok(self.latest.as_ref().expect("just stored a snapshot"))
     }
@@ -287,7 +308,11 @@ mod tests {
     fn open_buffer_overlay_surfaces_an_error_the_disk_file_does_not() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let file = src.join("a.mw");
@@ -339,8 +364,10 @@ mod tests {
         let root = dir.path();
         let project = Project {
             root: root.to_path_buf(),
-            config: parse_config(r#"{ "sourceRoots": ["src"], "tests": ["tests/**/*.mw"] }"#)
-                .unwrap(),
+            config: parse_config(
+                r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" }, "tests": ["tests"] }"#,
+            )
+            .unwrap(),
         };
 
         assert!(project.analyzes_file(&root.join("src/app.mw")));
@@ -354,7 +381,11 @@ mod tests {
     fn latest_open_document_match_rejects_a_closed_analysis_overlay() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let defs = src.join("defs.mw");
@@ -406,7 +437,11 @@ mod tests {
     fn recompute_switches_projects_when_the_file_moves_outside_the_cached_root() {
         fn project(dir: &tempfile::TempDir, module: &str) -> PathBuf {
             let root = dir.path();
-            std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+            std::fs::write(
+                root.join("marrow.json"),
+                r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+            )
+            .unwrap();
             let src = root.join("src");
             std::fs::create_dir_all(&src).unwrap();
             let file = src.join(format!("{module}.mw"));
@@ -435,6 +470,116 @@ mod tests {
         assert_eq!(
             workspace.project().map(|project| project.root.as_path()),
             Some(second_dir.path())
+        );
+    }
+
+    #[test]
+    fn binding_index_survives_same_root_same_analysis_identity_recompute() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        let source = "module app\n\npub fn answer(): int\n    return 1\n";
+        std::fs::write(&file, source).unwrap();
+
+        let mut workspace = Workspace::new();
+        let documents = Documents::new();
+        workspace.recompute(&file, &documents).unwrap();
+        let first_identity = workspace.latest().unwrap().content_identity().clone();
+        workspace.binding_index().unwrap();
+
+        workspace.recompute(&file, &documents).unwrap();
+        let second_identity = workspace.latest().unwrap().content_identity();
+
+        assert_eq!(
+            second_identity, &first_identity,
+            "same root and unchanged source should keep the same analysis identity"
+        );
+        assert!(
+            workspace.binding_index.is_some(),
+            "unchanged analysis identity should keep the derived binding index"
+        );
+    }
+
+    #[test]
+    fn binding_index_clears_when_analysis_identity_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        std::fs::write(&file, "module app\n\npub fn answer(): int\n    return 1\n").unwrap();
+
+        let mut workspace = Workspace::new();
+        let documents = Documents::new();
+        workspace.recompute(&file, &documents).unwrap();
+        let first_identity = workspace.latest().unwrap().content_identity().clone();
+        workspace.binding_index().unwrap();
+
+        std::fs::write(&file, "module app\n\npub fn answer(): int\n    return 2\n").unwrap();
+        workspace.recompute(&file, &documents).unwrap();
+        let second_identity = workspace.latest().unwrap().content_identity();
+
+        assert_ne!(
+            second_identity, &first_identity,
+            "changed source should produce a different analysis identity"
+        );
+        assert!(
+            workspace.binding_index.is_none(),
+            "changed analysis identity should discard the derived binding index"
+        );
+    }
+
+    #[test]
+    fn binding_index_clears_when_project_root_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_root = dir.path().join("first");
+        let second_root = dir.path().join("second");
+        for root in [&first_root, &second_root] {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(
+                root.join("marrow.json"),
+                r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("src/app.mw"),
+                "module app\n\npub fn answer(): int\n    return 1\n",
+            )
+            .unwrap();
+        }
+
+        let mut workspace = Workspace::new();
+        let documents = Documents::new();
+        workspace
+            .recompute(&first_root.join("src/app.mw"), &documents)
+            .unwrap();
+        let first_identity = workspace.latest().unwrap().content_identity().clone();
+        workspace.binding_index().unwrap();
+
+        workspace
+            .recompute(&second_root.join("src/app.mw"), &documents)
+            .unwrap();
+        let second_identity = workspace.latest().unwrap().content_identity();
+
+        assert_eq!(
+            second_identity, &first_identity,
+            "matching source under different roots should keep the same content identity"
+        );
+        assert!(
+            workspace.binding_index.is_none(),
+            "same content identity under a different root must not reuse pathful binding facts"
         );
     }
 }

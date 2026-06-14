@@ -23,7 +23,7 @@ impl LiveStore {
     /// The live store for `project`, or `None` when the project has no native
     /// on-disk store to inspect.
     pub fn for_project(project: &Project) -> Option<Self> {
-        let StoreConfig { backend, data_dir } = project.config.store.as_ref()?;
+        let StoreConfig { backend, data_dir } = &project.config.store;
         match backend {
             StoreBackend::Native => {
                 let dir = data_dir.as_deref()?;
@@ -72,15 +72,6 @@ mod tests {
         let root = dir.path().to_path_buf();
         let config_text = r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#;
         let config = parse_config(config_text).unwrap();
-        let project = Project { root, config };
-        assert!(LiveStore::for_project(&project).is_none());
-    }
-
-    #[test]
-    fn no_store_config_has_no_reader() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
         let project = Project { root, config };
         assert!(LiveStore::for_project(&project).is_none());
     }

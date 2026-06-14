@@ -706,7 +706,11 @@ mod tests {
     fn snapshot_source_match_rejects_freshly_edited_document_text() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let file = src.join("m.mw");
@@ -735,7 +739,11 @@ mod tests {
     fn snapshot_open_document_match_rejects_a_stale_sibling_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let a = src.join("a.mw");
@@ -770,7 +778,11 @@ mod tests {
     fn snapshot_open_document_match_rejects_a_new_source_file_absent_from_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["a", "z"] }"#).unwrap();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["a", "z"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
         let a_src = root.join("a");
         let z_src = root.join("z");
         std::fs::create_dir_all(&a_src).unwrap();

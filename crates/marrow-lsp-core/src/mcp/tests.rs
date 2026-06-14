@@ -28,7 +28,7 @@ fn project() -> (tempfile::TempDir, PathBuf) {
     let root = dir.path();
     std::fs::write(
             root.join("marrow.json"),
-            r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" }, "tests": ["tests/**/*.mw"] }"#,
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" }, "tests": ["tests"] }"#,
         )
         .unwrap();
     let src = root.join("src/shelf");
@@ -65,7 +65,7 @@ fn pure_project() -> (tempfile::TempDir, PathBuf) {
     let root = dir.path();
     std::fs::write(
         root.join("marrow.json"),
-        r#"{ "sourceRoots": ["src"], "tests": ["tests/**/*.mw"] }"#,
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" }, "tests": ["tests"] }"#,
     )
     .unwrap();
     let src = root.join("src/shelf");

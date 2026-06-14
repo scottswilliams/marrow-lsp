@@ -9,7 +9,11 @@ use marrow_syntax::{lex_source, parse_source};
 fn project() -> (CheckedProgram, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let pkg = root.join("src/shelf");
     std::fs::create_dir_all(&pkg).unwrap();
     std::fs::write(
@@ -59,7 +63,8 @@ pub fn run(count: int): int
 ",
     )
     .unwrap();
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     std::mem::forget(dir);
     (snapshot.program, app)
@@ -106,7 +111,11 @@ fn same_named_enum_project() -> (CheckedProgram, std::path::PathBuf) {
 fn current_enum_project() -> (CheckedProgram, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
     let pkg = root.join("src/shelf");
     std::fs::create_dir_all(&pkg).unwrap();
     let app = pkg.join("app.mw");
@@ -127,7 +136,8 @@ pub fn run()
 ",
     )
     .unwrap();
-    let config = parse_config(r#"{ "sourceRoots": ["src"] }"#).unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
     std::mem::forget(dir);
     (snapshot.program, app)

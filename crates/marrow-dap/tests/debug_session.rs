@@ -124,7 +124,7 @@ fn write_fixture(dir: &Path) -> std::path::PathBuf {
     std::fs::write(&file, source).unwrap();
     std::fs::write(
         dir.join("marrow.json"),
-        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" } }",
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
     )
     .unwrap();
     file
@@ -184,7 +184,7 @@ fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
     std::fs::write(&file, source).unwrap();
     std::fs::write(
         dir.join("marrow.json"),
-        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" } }",
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
     )
     .unwrap();
     file
