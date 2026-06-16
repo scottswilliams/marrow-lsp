@@ -416,10 +416,10 @@ fn saved_place_display(facts: &CheckedFacts, place: &SavedPlaceEffect) -> Option
 fn capability_label(capability: stdlib::Capability) -> &'static str {
     match capability {
         stdlib::Capability::Clock => "clock",
+        stdlib::Capability::Context => "context",
         stdlib::Capability::Environment => "environment",
         stdlib::Capability::Log => "log",
         stdlib::Capability::Filesystem => "filesystem",
-        stdlib::Capability::Maintenance => "maintenance",
     }
 }
 

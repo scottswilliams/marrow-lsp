@@ -665,13 +665,13 @@ fn run_tests(
             .and_then(|call| run_entry_with_host(&store, &host, &call, &mut output))
         {
             Ok(_) => merge(entry, json!({ "outcome": "passed" })),
-            Err(error) if error.code == marrow_run::RUN_ASSERT => merge(
+            Err(error) if error.code() == marrow_run::RUN_ASSERT => merge(
                 entry,
-                json!({ "outcome": "failed", "code": error.code, "message": error.message, "line": error.span.line, "character": error.span.column }),
+                json!({ "outcome": "failed", "code": error.code(), "message": error.message, "line": error.span.line, "character": error.span.column }),
             ),
             Err(error) => merge(
                 entry,
-                json!({ "outcome": "errored", "code": error.code, "message": error.message, "line": error.span.line, "character": error.span.column }),
+                json!({ "outcome": "errored", "code": error.code(), "message": error.message, "line": error.span.line, "character": error.span.column }),
             ),
         };
         tests.push(result);
@@ -711,7 +711,7 @@ fn run_output_json(result: RunOutput, output: String) -> Json {
 fn runtime_error_json(error: &RuntimeError, output: String) -> Json {
     json!({
         "diagnostics": [{
-            "code": error.code,
+            "code": error.code(),
             "message": error.message,
             "line": error.span.line,
             "character": error.span.column,

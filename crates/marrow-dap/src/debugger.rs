@@ -224,15 +224,11 @@ impl StepHook for Debugger {
 /// protocol thread. It carries the [`RUN_TERMINATED`] code so the surfaced fault
 /// is recognizable and any open transaction rolls back as the stack unwinds.
 fn terminated() -> RuntimeError {
-    RuntimeError {
-        code: RUN_TERMINATED,
-        message: "run terminated by the debugger".to_string(),
-        span: marrow_syntax::SourceSpan::default(),
-        throw: None,
-        catchable: false,
-        transaction_escape: false,
-        origin: None,
-    }
+    RuntimeError::fatal(
+        RUN_TERMINATED,
+        "run terminated by the debugger",
+        marrow_syntax::SourceSpan::default(),
+    )
 }
 
 #[cfg(test)]
@@ -241,6 +237,6 @@ mod tests {
 
     #[test]
     fn terminated_fault_carries_the_terminated_code() {
-        assert_eq!(terminated().code, RUN_TERMINATED);
+        assert_eq!(terminated().code(), RUN_TERMINATED);
     }
 }

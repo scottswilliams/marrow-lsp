@@ -140,13 +140,13 @@ fn outcome(
             }
         }
         // The debugger's own terminate fault is a clean stop, not a program error.
-        Err(error) if error.code == crate::debugger::RUN_TERMINATED => Outcome {
+        Err(error) if error.code() == crate::debugger::RUN_TERMINATED => Outcome {
             output,
             result: Ok(String::new()),
         },
         Err(error) => Outcome {
             output,
-            result: Err(format!("{}: {}", error.code, error.message)),
+            result: Err(format!("{}: {}", error.code(), error.message)),
         },
     }
 }
@@ -158,15 +158,7 @@ mod tests {
     use super::*;
 
     fn runtime_error(code: &'static str) -> RuntimeError {
-        RuntimeError {
-            code,
-            message: "boom".to_string(),
-            span: SourceSpan::default(),
-            throw: None,
-            catchable: false,
-            transaction_escape: false,
-            origin: None,
-        }
+        RuntimeError::fatal(code, "boom", SourceSpan::default())
     }
 
     #[test]

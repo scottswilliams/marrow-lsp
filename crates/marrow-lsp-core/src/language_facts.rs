@@ -1,4 +1,4 @@
-use marrow_schema::{ScalarType, stdlib};
+use marrow_schema::{scalar_type_from_name, stdlib};
 use marrow_syntax::Keyword;
 
 pub(crate) struct BareBuiltin {
@@ -189,7 +189,7 @@ pub(crate) fn scalar_conversion_detail(name: &str) -> Option<String> {
     if name == "ErrorCode" {
         return Some("ErrorCode(value): ErrorCode".to_string());
     }
-    ScalarType::from_scalar_name(name).map(|scalar| format!("{name}(value): {}", scalar.name()))
+    scalar_type_from_name(name).map(|scalar| format!("{name}(value): {}", scalar.name()))
 }
 
 pub(crate) fn bare_builtin_hover(name: &str) -> Option<String> {
@@ -251,7 +251,7 @@ pub(crate) fn operator_hover(spelling: &str) -> Option<String> {
 }
 
 pub(crate) fn bare_builtin_kind(name: &str) -> Option<BareBuiltinKind> {
-    if ScalarType::from_scalar_name(name).is_some() {
+    if scalar_type_from_name(name).is_some() {
         return Some(BareBuiltinKind::ScalarConversion);
     }
     bare_function_builtins()
@@ -327,9 +327,9 @@ fn capability_label(capability: Option<stdlib::Capability>) -> &'static str {
     match capability {
         None => "pure",
         Some(stdlib::Capability::Clock) => "clock",
+        Some(stdlib::Capability::Context) => "context",
         Some(stdlib::Capability::Environment) => "environment",
         Some(stdlib::Capability::Log) => "log",
         Some(stdlib::Capability::Filesystem) => "filesystem",
-        Some(stdlib::Capability::Maintenance) => "maintenance",
     }
 }
