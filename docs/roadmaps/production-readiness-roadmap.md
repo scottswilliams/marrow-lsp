@@ -89,6 +89,24 @@ Review focus:
 Goal: audit every LSP, MCP, DAP, and VS Code surface and ensure each surface has
 one honest contract.
 
+Start this lane by rebasing the ledger against current public Marrow APIs. Do
+not carry old `blocked-on-marrow` labels forward just because the LSP has not
+adopted the API yet. A surface is `blocked-on-marrow` only when the needed fact
+is still absent from Marrow after checking `marrow-check`, `marrow-run`,
+`marrow-store`, `marrow-project`, and the language docs.
+
+Current Marrow APIs that must be checked before declaring a blocker:
+
+- `marrow_run::ProjectSession`, `ProjectOpen`, `SessionEntry`,
+  `CheckedEntryCall`, and read-only expression evaluation.
+- `marrow_check::CheckedProgram` entry facts, source digests, evolution digests,
+  read-only context digests, entry footprints, entry cost shapes, and store open
+  modes.
+- `marrow_check::tooling` data query, data children, data walk, value rendering,
+  record counting, and integrity sampling APIs.
+- `marrow_store::CommitMetadata`, catalog snapshot digest, store UID, and
+  read-only snapshot access.
+
 For each surface, choose exactly one ledger verdict:
 
 - `ready`: production-ready, backed by canonical Marrow facts, and tested through a
@@ -116,6 +134,8 @@ Required outputs:
 
 - A refreshed surface verdict table in
   `docs/roadmaps/lsp-fact-consumption-ledger.md`.
+- A separate adoption table for surfaces where Marrow exposes enough API but
+  `marrow-lsp` still blocks, deletes, or presents only a narrowed helper.
 - Tests or source scans proving deleted or blocked surfaces cannot still be
   invoked through stale commands, snippets, handlers, or TypeScript views.
 - A blocker table naming each Marrow fact required to graduate blocked features.
