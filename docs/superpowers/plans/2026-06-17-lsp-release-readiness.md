@@ -111,39 +111,53 @@ git diff --check
 
 Expected: all commands exit 0 and only `package.json` plus `package-lock.json` changed.
 
-### Task 3: Adopt Marrow Session APIs For MCP Run
+### Task 3: Gate MCP Run Against Stable Session Facts
 
 **Files:**
 - Modify: `crates/marrow-lsp-core/src/mcp.rs`
 - Modify: `crates/marrow-lsp-core/src/mcp/tests.rs`
 - Conditional modify: `crates/marrow-mcp/src/server.rs` only when the typed MCP envelope changes; otherwise this file is outside the lane write set.
 
-- [ ] **Step 1: Write a failing MCP test for explicit entry selection through Marrow session APIs**
+- [ ] **Step 1: Verify the MCP run session boundary before code changes**
 
-In lane `marrow-lsp-mcp-session`, add a focused test named `run_entry_override_uses_session_path` in `mcp/tests.rs`. The test must run a project with an explicit entry through the Marrow session path and assert a typed result envelope, not a prose fragment. If the Marrow entry API is still only string-based for this surface, keep the explicit-entry path blocked and instead test the stable unavailable contract.
+In lane `marrow-lsp-mcp-session`, inspect Marrow's session API before writing production code. MCP `mw_run` may adopt a session path only if Marrow exposes a mode that forces checked zero-argument execution over a fresh in-memory store without opening, reading, copying, or writing the configured project store. Entry identity must also have a stable canonical DTO before the explicit `entry` string can graduate beyond presentation-only.
 
-- [ ] **Step 2: Run the focused test and confirm it fails for the current blocker**
+- [ ] **Step 2: Stop if the stable boundary is absent**
 
-Run:
+If the stable boundary is absent, do not add a passing test that merely blesses current behavior. Record the blocker in the fact ledger and leave MCP run code unchanged.
+
+Required blocker evidence:
+
+- whether entry override remains string-based;
+- whether argument input remains text-only rather than typed protocol DTOs;
+- whether session open can open, read, copy, or write the configured project store;
+- which exact Marrow API would unblock MCP without weakening its sandbox.
+
+- [ ] **Step 3: Write a failing MCP test only when safe adoption exists**
+
+If Marrow exposes the required stable boundary, add a focused test named `run_entry_override_uses_session_path` in `mcp/tests.rs`. The test must run a project through the safe session path and assert typed result fields, sandbox metadata, and the unchanged presentation-only entry contract.
+
+- [ ] **Step 4: Replace manual run setup only where the API covers the contract**
+
+Use Marrow session APIs only where they preserve fresh in-memory execution, the locked host, no project-store access, presentation-only entry strings, and blocked non-empty args unless typed run argument facts exist.
+
+- [ ] **Step 5: Verify MCP run behavior**
+
+If implementation proceeds, run:
 
 ```sh
 CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/marrow-lsp-mcp-session cargo test --manifest-path /Users/scottwilliams/Dev/marrow-lsp-mcp-session/Cargo.toml -p marrow-lsp-core run_entry_override_uses_session_path
-```
-
-Expected: the test fails against the current manual run path or proves the explicit-entry path must stay blocked because Marrow still lacks a stable canonical entry DTO.
-
-- [ ] **Step 3: Replace manual run setup with `ProjectSession` where the API covers the contract**
-
-Use `ProjectSession`, `ProjectOpen`, and `SessionEntry` for entry selection, checked args, isolated writes, and store/session metadata. Keep any remaining unavailable path explicitly blocked with a typed status.
-
-- [ ] **Step 4: Verify MCP run behavior**
-
-Run:
-
-```sh
 CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/marrow-lsp-mcp-session cargo test --manifest-path /Users/scottwilliams/Dev/marrow-lsp-mcp-session/Cargo.toml -p marrow-lsp-core mcp::tests
 CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/marrow-lsp-mcp-session cargo test --manifest-path /Users/scottwilliams/Dev/marrow-lsp-mcp-session/Cargo.toml --workspace --all-features
 CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/marrow-lsp-mcp-session cargo clippy --manifest-path /Users/scottwilliams/Dev/marrow-lsp-mcp-session/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+If the lane is blocked before code changes, run:
+
+```sh
+git diff --check
+rg -n 'MCP `mw_run`|Forced-memory run session|fresh in-memory store' docs/roadmaps/lsp-fact-consumption-ledger.md docs/superpowers/plans/2026-06-17-lsp-release-readiness.md
+CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/marrow-lsp-mcp-session cargo test --manifest-path /Users/scottwilliams/Dev/marrow-lsp-mcp-session/Cargo.toml -p marrow-lsp-core mcp::tests
 ```
 
 ### Task 4: Adopt Marrow Data Query APIs In Core
