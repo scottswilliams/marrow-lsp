@@ -1,18 +1,17 @@
 //! Spawn and own the run-thread.
 //!
-//! The interpreter is single-threaded, so the whole run — program, store, host,
+//! The interpreter is single-threaded, so the whole run — project session, host,
 //! and the [`Debugger`] hook — lives on one dedicated thread. The protocol thread
-//! holds only channel ends and a join handle. The store moves onto the run-thread
-//! (it is `Send`); nothing that borrows the interpreter env ever leaves it.
+//! holds only channel ends and a join handle. Nothing that borrows the interpreter
+//! env ever leaves the run-thread.
 
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
 use marrow_run::{
-    CheckedEntryCall, Host, RuntimeError, SystemNondeterminism, Value, run_entry_with_debugger,
+    Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry, SystemNondeterminism,
 };
-use marrow_store::tree::TreeStore;
 
 use crate::debugger::{Control, Debugger, RunEvent};
 
@@ -34,13 +33,11 @@ pub struct RunHandle {
     pub events: Receiver<RunEvent>,
 }
 
-/// Start the run on a dedicated thread. Project preparation creates the in-memory
-/// store on that same thread, so store internals never cross the protocol/run
-/// boundary.
+/// Start the run on a dedicated thread. Project preparation and invocation happen
+/// there, so session internals never cross the protocol/run boundary.
 pub fn spawn(
     project_dir: std::path::PathBuf,
     entry: Option<String>,
-    args: Vec<Value>,
     stop_on_entry: bool,
 ) -> Result<RunHandle, String> {
     let (event_tx, event_rx) = channel::<RunEvent>();
@@ -48,16 +45,7 @@ pub fn spawn(
 
     let handle = thread::Builder::new()
         .name("marrow-dap-run".to_string())
-        .spawn(move || {
-            run_on_thread(
-                project_dir,
-                entry,
-                args,
-                stop_on_entry,
-                event_tx,
-                control_rx,
-            )
-        })
+        .spawn(move || run_on_thread(project_dir, entry, stop_on_entry, event_tx, control_rx))
         .map_err(|error| format!("could not start the run thread: {error}"))?;
 
     Ok(RunHandle {
@@ -67,13 +55,13 @@ pub fn spawn(
     })
 }
 
-/// The run-thread body: own the store for the whole run, install the [`Debugger`],
-/// and run the entry. The live frame the hook serves never escapes this thread.
+/// The run-thread body: own the session for the whole run, install the
+/// [`Debugger`], and run the entry. The live frame the hook serves never escapes
+/// this thread.
 /// Returns the [`Outcome`].
 fn run_on_thread(
     project_dir: std::path::PathBuf,
     requested_entry: Option<String>,
-    args: Vec<Value>,
     stop_on_entry: bool,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
@@ -87,21 +75,15 @@ fn run_on_thread(
             });
         }
     };
-    let crate::project::Launch {
-        program,
-        entry,
-        store,
-    } = launch;
+    let crate::project::Launch { session, entry } = launch;
     let debugger = Debugger::new(stop_on_entry, events, control);
-    run_with_store(store, &program, &entry, &args, debugger)
+    run_with_session(&session, &entry, debugger)
 }
 
-/// Run the entry over the launch store, threading the debugger.
-fn run_with_store(
-    store: TreeStore,
-    program: &marrow_check::CheckedProgram,
+/// Run the entry through the project session, threading the debugger.
+fn run_with_session(
+    session: &ProjectSession,
     entry: &str,
-    args: &[Value],
     mut debugger: Debugger,
 ) -> Option<Outcome> {
     // A debug run gets a real clock and a captured log sink, so `std::clock`/
@@ -110,10 +92,12 @@ fn run_with_store(
     let host = Host::new()
         .with_nondeterminism(&SystemNondeterminism::new())
         .with_log_sink(std::rc::Rc::clone(&log));
-    let runtime = program.runtime();
     let mut output = String::new();
-    let result = CheckedEntryCall::new(&runtime, entry, args.to_vec())
-        .and_then(|call| run_entry_with_debugger(&store, &host, &mut debugger, &call, &mut output));
+    let result = session.invoke(
+        SessionEntry::new(entry, &host, &mut output)
+            .with_hook(&mut debugger)
+            .with_isolated_writes(),
+    );
     Some(outcome(result, output, &log.borrow()))
 }
 
@@ -121,7 +105,7 @@ fn run_with_store(
 /// terminate is a clean stop, not a fault. The run's `print`/`write` output is in
 /// `output`; the log sink carries `std::log` lines, appended after.
 fn outcome(
-    result: Result<marrow_run::RunOutput, RuntimeError>,
+    result: Result<RunOutput, ProjectInvokeError>,
     mut output: String,
     log: &str,
 ) -> Outcome {
@@ -140,19 +124,24 @@ fn outcome(
             }
         }
         // The debugger's own terminate fault is a clean stop, not a program error.
-        Err(error) if error.code() == crate::debugger::RUN_TERMINATED => Outcome {
-            output,
-            result: Ok(String::new()),
-        },
+        Err(ProjectInvokeError::Runtime(error))
+            if error.code() == crate::debugger::RUN_TERMINATED =>
+        {
+            Outcome {
+                output,
+                result: Ok(String::new()),
+            }
+        }
         Err(error) => Outcome {
             output,
-            result: Err(format!("{}: {}", error.code(), error.message)),
+            result: Err(format!("{}: {}", error.code(), error.message())),
         },
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use marrow_run::RuntimeError;
     use marrow_syntax::SourceSpan;
 
     use super::*;
@@ -164,7 +153,7 @@ mod tests {
     #[test]
     fn outcome_preserves_output_and_logs_on_runtime_fault() {
         let outcome = outcome(
-            Err(runtime_error("run.assertion")),
+            Err(ProjectInvokeError::Runtime(runtime_error("run.assertion"))),
             "before fault\n".to_string(),
             "log line\n",
         );
@@ -176,7 +165,9 @@ mod tests {
     #[test]
     fn outcome_preserves_output_and_logs_on_debugger_termination() {
         let outcome = outcome(
-            Err(runtime_error(crate::debugger::RUN_TERMINATED)),
+            Err(ProjectInvokeError::Runtime(runtime_error(
+                crate::debugger::RUN_TERMINATED,
+            ))),
             "before terminate\n".to_string(),
             "log line\n",
         );

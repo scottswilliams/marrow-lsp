@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+use marrow_run::{Host, ProjectOpen, ProjectSession, SessionEntry};
 use serde_json::{Value as Json, json};
 
 /// A minimal DAP client over a child process's stdio.
@@ -147,7 +148,7 @@ fn write_blocked_arg_fixture(dir: &Path) {
     .unwrap();
 }
 
-fn write_catalog_identity_fixture(dir: &Path) {
+fn write_native_identity_fixture(dir: &Path) {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let source = "module shelf\n\
@@ -157,14 +158,45 @@ fn write_catalog_identity_fixture(dir: &Path) {
                   \n\
                   store ^books(id: int): Book\n\
                   \n\
-                  pub fn main(): int\n\
-                  \x20   return 1\n";
+                  pub fn main()\n\
+                  \x20   ^books(1).title = \"Dune\"\n\
+                  \x20   print(\"seeded\")\n";
     std::fs::write(src.join("shelf.mw"), source).unwrap();
     std::fs::write(
         dir.join("marrow.json"),
         "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
     )
     .unwrap();
+}
+
+fn remove_catalog_after_native_seed(dir: &Path) {
+    let session = ProjectSession::open(dir, ProjectOpen::run()).expect("seed session");
+    let host = Host::new();
+    let mut output = String::new();
+    session
+        .invoke(SessionEntry::new("shelf::main", &host, &mut output))
+        .expect("seed run");
+
+    let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
+    assert!(catalog.exists(), "seed run should write accepted catalog");
+    assert!(
+        dir.join("data").join("marrow.redb").exists(),
+        "seed run should create the native store"
+    );
+    std::fs::remove_file(catalog).expect("remove accepted catalog");
+}
+
+fn corrupt_catalog_utf8_after_native_seed(dir: &Path) {
+    let session = ProjectSession::open(dir, ProjectOpen::run()).expect("seed session");
+    let host = Host::new();
+    let mut output = String::new();
+    session
+        .invoke(SessionEntry::new("shelf::main", &host, &mut output))
+        .expect("seed run");
+
+    let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
+    assert!(catalog.exists(), "seed run should write accepted catalog");
+    std::fs::write(catalog, [0xff]).expect("write invalid UTF-8 catalog");
 }
 
 /// Write a fixture with an expandable local sequence so DAP value responses
@@ -364,9 +396,56 @@ fn launch_rejects_missing_project_config_with_typed_contract() {
 }
 
 #[test]
-fn launch_blocks_catalog_identity_without_typed_admission_facts() {
+fn launch_accepts_configured_default_entry_with_isolated_writes() {
     let dir = tempfile::tempdir().unwrap();
-    write_catalog_identity_fixture(dir.path());
+    write_native_identity_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+        }),
+    );
+    let response = client.response_for(launch);
+    assert_eq!(response["success"], true, "{response}");
+    assert!(
+        response["body"].get("marrowError").is_none(),
+        "successful launch must not expose a blocked Marrow contract: {response}"
+    );
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+
+    let output = client.event("output");
+    assert!(
+        output["body"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("seeded"),
+        "configured entry should run through the session path: {output}"
+    );
+    client.event("terminated");
+
+    assert!(
+        !dir.path().join("marrow.catalog.json").exists(),
+        "isolated DAP launch must not write the accepted catalog"
+    );
+    assert!(
+        !dir.path().join("data").join("marrow.redb").exists(),
+        "isolated DAP launch must not open or create the native store"
+    );
+}
+
+#[test]
+fn launch_blocks_native_store_catalog_repair_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    write_native_identity_fixture(dir.path());
+    remove_catalog_after_native_seed(dir.path());
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
@@ -382,8 +461,42 @@ fn launch_blocks_catalog_identity_without_typed_admission_facts() {
     let blocked = client.response_for(launch);
     assert_blocked_response(
         &blocked,
-        "dap.launchCatalogIdentity.blocked",
-        "accepted catalog identity facts",
+        "dap.launchCatalogRepair.blocked",
+        "read-only debug catalog admission facts",
+    );
+    assert!(
+        !dir.path().join(marrow_project::CATALOG_FILE_NAME).exists(),
+        "DAP launch must not repair the accepted catalog artifact"
+    );
+}
+
+#[test]
+fn launch_blocks_invalid_utf8_catalog_repair_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    write_native_identity_fixture(dir.path());
+    corrupt_catalog_utf8_after_native_seed(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+        }),
+    );
+    let blocked = client.response_for(launch);
+    assert_blocked_response(
+        &blocked,
+        "dap.launchCatalogRepair.blocked",
+        "read-only debug catalog admission facts",
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join(marrow_project::CATALOG_FILE_NAME)).unwrap(),
+        [0xff],
+        "DAP launch must not repair the invalid catalog artifact"
     );
 }
 

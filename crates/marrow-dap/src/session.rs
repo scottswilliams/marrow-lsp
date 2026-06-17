@@ -136,7 +136,7 @@ pub struct Session<W: Write> {
     seq: i64,
     /// The run-thread, present once launched and configurationDone-d.
     running: Option<Running>,
-    /// Pending launch arguments captured between `launch` and `configurationDone`.
+    /// Pending launch captured between `launch` and `configurationDone`.
     pending: Option<PendingLaunch>,
     /// The dynamic reference registry for the current stop, cleared on resume.
     expandables: HashMap<i64, Expandable>,
@@ -145,10 +145,9 @@ pub struct Session<W: Write> {
     done: bool,
 }
 
-/// Launch arguments held until `configurationDone` starts the run.
+/// Launch state held until `configurationDone` starts the run.
 struct PendingLaunch {
     project_dir: PathBuf,
-    args: Vec<marrow_run::Value>,
     stop_on_entry: bool,
 }
 
@@ -297,8 +296,8 @@ impl<W: Write> Session<W> {
             .get("entry")
             .and_then(Json::as_str)
             .map(str::to_string);
-        let args = match parse_args(arguments.get("args")) {
-            Ok(args) => args,
+        match validate_args(arguments.get("args")) {
+            Ok(()) => {}
             Err(error) => {
                 self.respond_error(request, error.message, error.contract);
                 return;
@@ -314,7 +313,6 @@ impl<W: Write> Session<W> {
             Ok(_) => {
                 self.pending = Some(PendingLaunch {
                     project_dir,
-                    args,
                     stop_on_entry,
                 });
                 self.respond(request, true, json!({}));
@@ -382,12 +380,7 @@ impl<W: Write> Session<W> {
             );
             return;
         };
-        match crate::run::spawn(
-            pending.project_dir,
-            None,
-            pending.args,
-            pending.stop_on_entry,
-        ) {
+        match crate::run::spawn(pending.project_dir, None, pending.stop_on_entry) {
             Ok(running) => {
                 self.running = Some(Running {
                     handle: running.handle,
@@ -757,9 +750,9 @@ fn debug_admin_presentation_hint() -> Json {
 
 /// Parse the optional launch `args` array. Non-empty values are blocked until
 /// Marrow exposes typed launch argument facts.
-fn parse_args(args: Option<&Json>) -> Result<Vec<marrow_run::Value>, LaunchArgsError> {
+fn validate_args(args: Option<&Json>) -> Result<(), LaunchArgsError> {
     let Some(array) = args else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     let Some(items) = array.as_array() else {
         return Err(LaunchArgsError {
@@ -773,7 +766,7 @@ fn parse_args(args: Option<&Json>) -> Result<Vec<marrow_run::Value>, LaunchArgsE
             contract: ERROR_LAUNCH_ARGS_BLOCKED,
         });
     }
-    Ok(Vec::new())
+    Ok(())
 }
 
 struct LaunchArgsError {

@@ -5,7 +5,7 @@
 //! ## The rendezvous
 //! The interpreter is single-threaded and synchronous, so the run owns its store
 //! and locals for as long as it executes. We run the run on a dedicated
-//! *run-thread* via [`run_entry_with_debugger`]. [`StepHook::before_statement`] is
+//! *run-thread* with Marrow's debugger hook. [`StepHook::before_statement`] is
 //! the rendezvous point: it records the current span and depth, asks the shared
 //! [`step`](crate::step) policy whether this statement is a stop, and if so:
 //!
