@@ -1,5 +1,6 @@
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema};
+use marrow_check::{CheckedFacts, DirectEffectFacts, HostEffect, SavedPlaceEffect};
+use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema, stdlib};
 use marrow_syntax::{IndexDecl, KeyParam, ResourceMember};
 
 pub(super) fn markdown_hover(value: String) -> Hover {
@@ -67,6 +68,104 @@ pub(super) fn index_markdown(index: &IndexDecl) -> String {
     let mut value = marrow_code_block(&index_signature(index));
     append_docs(&mut value, join_docs(&index.docs));
     value
+}
+
+pub(super) fn direct_effects_markdown(
+    facts: &CheckedFacts,
+    effects: &DirectEffectFacts,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    if let Some(line) = saved_effects_line(facts, "saved reads", &effects.saved_reads) {
+        lines.push(line);
+    }
+    if let Some(line) = saved_effects_line(facts, "saved writes", &effects.saved_writes) {
+        lines.push(line);
+    }
+    if effects.transactions {
+        lines.push("- transaction".to_string());
+    }
+    if let Some(line) = host_effects_line(&effects.host_calls) {
+        lines.push(line);
+    }
+    if effects.throws {
+        lines.push("- throws".to_string());
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!("**Direct effects**\n{}", lines.join("\n")))
+    }
+}
+
+fn saved_effects_line(
+    facts: &CheckedFacts,
+    label: &str,
+    places: &[SavedPlaceEffect],
+) -> Option<String> {
+    let items = effect_items(
+        places
+            .iter()
+            .filter_map(|place| saved_place_display(facts, place)),
+    );
+    if items.is_empty() {
+        None
+    } else {
+        Some(format!("- {label}: {}", items.join(", ")))
+    }
+}
+
+fn host_effects_line(effects: &[HostEffect]) -> Option<String> {
+    let items = effect_items(effects.iter().map(|effect| match effect {
+        HostEffect::Output => "output".to_string(),
+        HostEffect::Capability(capability) => capability_label(*capability).to_string(),
+    }));
+    if items.is_empty() {
+        None
+    } else {
+        Some(format!("- host: {}", items.join(", ")))
+    }
+}
+
+fn effect_items(items: impl IntoIterator<Item = String>) -> Vec<String> {
+    const MAX_EFFECT_ITEMS: usize = 8;
+
+    let mut items = items.into_iter().collect::<Vec<_>>();
+    items.sort();
+    items.dedup();
+
+    let extra = items.len().saturating_sub(MAX_EFFECT_ITEMS);
+    items.truncate(MAX_EFFECT_ITEMS);
+    if extra > 0 {
+        items.push(format!("+{extra} more"));
+    }
+    items
+}
+
+fn saved_place_display(facts: &CheckedFacts, place: &SavedPlaceEffect) -> Option<String> {
+    let resource = facts
+        .resources()
+        .iter()
+        .find(|resource| resource.id == place.resource)?;
+    let mut path = vec![resource.name.clone()];
+    for member_id in &place.members {
+        let member = facts
+            .resource_members()
+            .iter()
+            .find(|member| member.id == *member_id)?;
+        path.push(member.name.clone());
+    }
+    Some(path.join("."))
+}
+
+fn capability_label(capability: stdlib::Capability) -> &'static str {
+    match capability {
+        stdlib::Capability::Clock => "clock",
+        stdlib::Capability::Context => "context",
+        stdlib::Capability::Environment => "environment",
+        stdlib::Capability::Log => "log",
+        stdlib::Capability::Filesystem => "filesystem",
+    }
 }
 
 pub(super) fn append_docs(value: &mut String, docs: Option<String>) {

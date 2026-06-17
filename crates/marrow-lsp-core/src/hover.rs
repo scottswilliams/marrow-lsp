@@ -10,11 +10,11 @@ use std::path::Path;
 
 use lsp_types::Hover;
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedConst, CheckedFacts, CheckedFunction, CheckedParam,
-    DefItem, DirectEffectFacts, FunctionFact, HostEffect, Resolution, ResolvableKind,
-    SavedPlaceEffect, SymbolKind, SymbolRef, build_binding_index, resolve, type_at,
+    AnalysisSnapshot, BindingIndex, CheckedConst, CheckedFunction, CheckedParam, DefItem,
+    FunctionFact, Resolution, ResolvableKind, SymbolKind, SymbolRef, build_binding_index, resolve,
+    type_at,
 };
-use marrow_schema::{EnumSchema, ResourceSchema, stdlib};
+use marrow_schema::{EnumSchema, ResourceSchema};
 use marrow_syntax::{
     Declaration, EnumDecl, EnumMember, FunctionDecl, IndexDecl, Keyword, ResourceDecl,
     ResourceMember, SourceSpan, StoreDecl, TokenKind, lex_source,
@@ -26,8 +26,8 @@ use crate::types::render_type;
 mod render;
 
 use self::render::{
-    append_docs, enum_hover, enum_member_hover, index_markdown, join_docs, markdown_hover,
-    marrow_code_block, resource_hover, resource_member_markdown, store_hover,
+    append_docs, direct_effects_markdown, enum_hover, enum_member_hover, index_markdown, join_docs,
+    markdown_hover, marrow_code_block, resource_hover, resource_member_markdown, store_hover,
 };
 
 /// The hover for byte `offset` in `file`, or `None` when no known symbol or type
@@ -326,101 +326,6 @@ fn function_fact_for_symbol<'a>(
             && fact.name == checked_function.name
             && fact.span == checked_function.span
     })
-}
-
-fn direct_effects_markdown(facts: &CheckedFacts, effects: &DirectEffectFacts) -> Option<String> {
-    let mut lines = Vec::new();
-    if let Some(line) = saved_effects_line(facts, "saved reads", &effects.saved_reads) {
-        lines.push(line);
-    }
-    if let Some(line) = saved_effects_line(facts, "saved writes", &effects.saved_writes) {
-        lines.push(line);
-    }
-    if effects.transactions {
-        lines.push("- transaction".to_string());
-    }
-    if let Some(line) = host_effects_line(&effects.host_calls) {
-        lines.push(line);
-    }
-    if effects.throws {
-        lines.push("- throws".to_string());
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(format!("**Direct effects**\n{}", lines.join("\n")))
-    }
-}
-
-fn saved_effects_line(
-    facts: &CheckedFacts,
-    label: &str,
-    places: &[SavedPlaceEffect],
-) -> Option<String> {
-    let items = effect_items(
-        places
-            .iter()
-            .filter_map(|place| saved_place_display(facts, place)),
-    );
-    if items.is_empty() {
-        None
-    } else {
-        Some(format!("- {label}: {}", items.join(", ")))
-    }
-}
-
-fn host_effects_line(effects: &[HostEffect]) -> Option<String> {
-    let items = effect_items(effects.iter().map(|effect| match effect {
-        HostEffect::Output => "output".to_string(),
-        HostEffect::Capability(capability) => capability_label(*capability).to_string(),
-    }));
-    if items.is_empty() {
-        None
-    } else {
-        Some(format!("- host: {}", items.join(", ")))
-    }
-}
-
-fn effect_items(items: impl IntoIterator<Item = String>) -> Vec<String> {
-    const MAX_EFFECT_ITEMS: usize = 8;
-
-    let mut items = items.into_iter().collect::<Vec<_>>();
-    items.sort();
-    items.dedup();
-
-    let extra = items.len().saturating_sub(MAX_EFFECT_ITEMS);
-    items.truncate(MAX_EFFECT_ITEMS);
-    if extra > 0 {
-        items.push(format!("+{extra} more"));
-    }
-    items
-}
-
-fn saved_place_display(facts: &CheckedFacts, place: &SavedPlaceEffect) -> Option<String> {
-    let resource = facts
-        .resources()
-        .iter()
-        .find(|resource| resource.id == place.resource)?;
-    let mut path = vec![resource.name.clone()];
-    for member_id in &place.members {
-        let member = facts
-            .resource_members()
-            .iter()
-            .find(|member| member.id == *member_id)?;
-        path.push(member.name.clone());
-    }
-    Some(path.join("."))
-}
-
-fn capability_label(capability: stdlib::Capability) -> &'static str {
-    match capability {
-        stdlib::Capability::Clock => "clock",
-        stdlib::Capability::Context => "context",
-        stdlib::Capability::Environment => "environment",
-        stdlib::Capability::Log => "log",
-        stdlib::Capability::Filesystem => "filesystem",
-    }
 }
 
 fn parameter_hover(
