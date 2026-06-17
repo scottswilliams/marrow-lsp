@@ -1,5 +1,9 @@
 use super::*;
 
+use marrow_check::test_support::{commit_then_check, root_place, store_id_of};
+use marrow_store::key::SavedKey;
+use marrow_store::tree::TreeStore;
+
 fn assert_contract(result: &Json, status: &str, description: &str, missing_facts: &[&str]) {
     let contract = &result["contract"];
     assert_eq!(contract["status"], status, "contract status for {result}");
@@ -92,6 +96,77 @@ pub fn explode()
     .unwrap();
     let file = src.join("books.mw");
     (dir, file)
+}
+
+fn native_counter_project(ids: impl IntoIterator<Item = i64>) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" }, "tests": ["tests"] }"#,
+    )
+    .unwrap();
+    let src = root.join("src/app");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("counter.mw"),
+        "\
+module app::counter
+
+resource Counter
+    required value: int
+
+store ^counter(id: int): Counter
+",
+    )
+    .unwrap();
+
+    let program = commit_then_check(root).unwrap();
+    let file = src.join("counter.mw");
+    let place = root_place(&program, "counter").unwrap();
+    let store_id = store_id_of(&place).unwrap();
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    for id in ids {
+        store
+            .write_record_presence(&store_id, &[SavedKey::Int(id)])
+            .unwrap();
+    }
+    drop(store);
+
+    (dir, file)
+}
+
+fn native_settings_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" }, "tests": ["tests"] }"#,
+    )
+    .unwrap();
+    let src = root.join("src/app");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("settings.mw"),
+        "\
+module app::settings
+
+resource Settings
+    required theme: string
+
+store ^settings: Settings
+",
+    )
+    .unwrap();
+
+    commit_then_check(root).unwrap();
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    drop(TreeStore::open(&data_dir.join("marrow.redb")).unwrap());
+
+    (dir, src.join("settings.mw"))
 }
 
 #[test]
@@ -546,6 +621,140 @@ fn data_tools_refuse_when_not_enabled() {
             "store generation",
             "catalog epoch/digest",
             "typed repair or drift facts",
+        ],
+    );
+
+    let children = data_children(
+        Path::new("/nope/project/src/main.mw"),
+        crate::data_explorer::DataChildrenRequest {
+            segments: vec![crate::data_explorer::DataQuerySegmentDto::Root(
+                "counter".into(),
+            )],
+            limit: 1,
+            cursor: None,
+        },
+        false,
+    );
+    assert_eq!(children["dataAccess"], "disabled");
+    assert_contract(
+        &children,
+        "presentation-only",
+        "bounded typed data helper",
+        &[
+            "catalog-bound saved-place identity",
+            "snapshot/store generation",
+        ],
+    );
+}
+
+#[test]
+fn data_children_returns_paged_typed_segments_when_enabled() {
+    let (_dir, file) = native_counter_project(1..=3);
+
+    let result = data_children(
+        &file,
+        crate::data_explorer::DataChildrenRequest {
+            segments: vec![crate::data_explorer::DataQuerySegmentDto::Root(
+                "counter".into(),
+            )],
+            limit: 2,
+            cursor: None,
+        },
+        true,
+    );
+
+    assert_eq!(
+        result["children"],
+        json!([
+            { "kind": "key", "value": { "kind": "int", "value": 1 } },
+            { "kind": "key", "value": { "kind": "int", "value": 2 } },
+        ]),
+        "{result}"
+    );
+    assert_eq!(result["truncated"], true, "{result}");
+    assert_eq!(
+        result["cursor"],
+        json!({ "kind": "int", "value": 2 }),
+        "{result}"
+    );
+    assert_contract(
+        &result,
+        "presentation-only",
+        "bounded typed data helper",
+        &[
+            "catalog-bound saved-place identity",
+            "snapshot/store generation",
+        ],
+    );
+}
+
+#[test]
+fn data_children_blocks_member_expansion_paths() {
+    let (_dir, file) = native_counter_project(1..=1);
+
+    let result = data_children(
+        &file,
+        crate::data_explorer::DataChildrenRequest {
+            segments: vec![
+                crate::data_explorer::DataQuerySegmentDto::Root("counter".into()),
+                crate::data_explorer::DataQuerySegmentDto::Key(
+                    crate::data_explorer::DataKeyDto::Int(1),
+                ),
+            ],
+            limit: 1,
+            cursor: None,
+        },
+        true,
+    );
+
+    assert_eq!(result["available"], false, "{result}");
+    assert!(
+        result["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "member expansion should be blocked before any value reads: {result}"
+    );
+    assert_contract(
+        &result,
+        "presentation-only",
+        "bounded typed data helper",
+        &[
+            "catalog-bound saved-place identity",
+            "snapshot/store generation",
+        ],
+    );
+}
+
+#[test]
+fn data_children_blocks_keyless_roots_before_member_scans() {
+    let (_dir, file) = native_settings_project();
+
+    let result = data_children(
+        &file,
+        crate::data_explorer::DataChildrenRequest {
+            segments: vec![crate::data_explorer::DataQuerySegmentDto::Root(
+                "settings".into(),
+            )],
+            limit: 1,
+            cursor: None,
+        },
+        true,
+    );
+
+    assert_eq!(result["available"], false, "{result}");
+    assert!(
+        result["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "keyless roots would require member scans and must stay blocked: {result}"
+    );
+    assert_contract(
+        &result,
+        "presentation-only",
+        "bounded typed data helper",
+        &[
+            "catalog-bound saved-place identity",
+            "snapshot/store generation",
         ],
     );
 }

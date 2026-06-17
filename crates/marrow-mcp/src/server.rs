@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use marrow_lsp_core::data_explorer::DataChildrenRequest;
 use marrow_lsp_core::mcp::{self, RunMode};
 use serde_json::{Value as Json, json};
 
@@ -45,6 +46,32 @@ fn string_prop(description: &str) -> Json {
 /// An integer property (a zero-based line/character).
 fn int_prop(description: &str) -> Json {
     json!({ "type": "integer", "description": description })
+}
+
+fn data_key_schema(description: &str) -> Json {
+    json!({
+        "description": description,
+        "oneOf": [
+            { "type": "object", "properties": { "kind": { "const": "int" }, "value": { "type": "integer" } }, "required": ["kind", "value"] },
+            { "type": "object", "properties": { "kind": { "const": "bool" }, "value": { "type": "boolean" } }, "required": ["kind", "value"] },
+            { "type": "object", "properties": { "kind": { "const": "string" }, "value": { "type": "string" } }, "required": ["kind", "value"] },
+            { "type": "object", "properties": { "kind": { "const": "date" }, "value": { "type": "integer" } }, "required": ["kind", "value"] },
+            { "type": "object", "properties": { "kind": { "const": "instant" }, "value": { "type": "string" } }, "required": ["kind", "value"] },
+            { "type": "object", "properties": { "kind": { "const": "duration" }, "value": { "type": "string" } }, "required": ["kind", "value"] },
+            { "type": "object", "properties": { "kind": { "const": "bytes" }, "value": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } } }, "required": ["kind", "value"] },
+        ],
+    })
+}
+
+fn data_root_segment_schema() -> Json {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "const": "root" },
+            "value": { "type": "string" },
+        },
+        "required": ["kind", "value"],
+    })
 }
 
 fn production_contract(description: &str) -> Json {
@@ -181,6 +208,51 @@ pub fn tools() -> Json {
             },
         },
         {
+            "name": "mw_data_children",
+            "description": "Presentation-only bounded typed data helper: return one page of first identity-key children under a keyed saved root from the project's real store when data access is enabled. It accepts one typed root segment and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Member expansion is blocked until Marrow exposes value-free member-presence facts. Missing catalog-bound saved-place identity and snapshot/store generation facts; not a stable production data API.",
+            "_meta": marrow_meta(json!({
+                "status": "presentation-only",
+                "stableProductionApi": false,
+                "description": "bounded typed data helper",
+                "missingFacts": [
+                    "catalog-bound saved-place identity",
+                    "snapshot/store generation",
+                ],
+                "dataAccess": "gated",
+                "basis": "Marrow typed data children tooling",
+                "boundedness": {
+                    "page": "limit-clamped",
+                    "unboundedWalk": false,
+                },
+                "pathSurface": {
+                    "segments": "typed-root-only",
+                    "cursor": "typed",
+                    "memberExpansion": "blocked",
+                    "savedPathString": "absent",
+                },
+            })),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": string_prop("Absolute path to any .mw file inside the project."),
+                    "segments": {
+                        "type": "array",
+                        "description": "Exactly one typed saved-root segment, for example [{\"kind\":\"root\",\"value\":\"books\"}].",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": data_root_segment_schema(),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum first identity keys to return; the core clamps oversized requests.",
+                    },
+                    "cursor": data_key_schema("Optional typed cursor returned by the previous page."),
+                },
+                "required": ["file", "segments", "limit"],
+            },
+        },
+        {
             "name": "mw_data_integrity",
             "description": "Debug/admin advisory over the current schema and real store: scan the project's real stored data and report capped/current-schema advisory findings such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation. Gated behind data access; returns a refusal envelope and reads nothing when disabled. This is not catalog-epoch/store-generation-bound production validation or repair.",
             "_meta": marrow_meta(json!({
@@ -294,6 +366,11 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
             let file = required_path(arguments, "file")?;
             Ok(mcp::saved_roots(&file, policy.allow_data))
         }
+        "mw_data_children" => {
+            let file = required_path(arguments, "file")?;
+            let request = data_children_request(arguments)?;
+            Ok(mcp::data_children(&file, request, policy.allow_data))
+        }
         "mw_data_integrity" => {
             let file = required_path(arguments, "file")?;
             Ok(mcp::data_integrity(&file, policy.allow_data))
@@ -339,6 +416,11 @@ fn optional_array(arguments: &Json, key: &str) -> Result<Vec<Json>, String> {
     }
 }
 
+fn data_children_request(arguments: &Json) -> Result<DataChildrenRequest, String> {
+    serde_json::from_value(arguments.clone())
+        .map_err(|error| format!("invalid mw_data_children arguments: {error}"))
+}
+
 /// A required path argument as a `PathBuf`.
 fn required_path(arguments: &Json, key: &str) -> Result<PathBuf, String> {
     required_str(arguments, key).map(PathBuf::from)
@@ -377,6 +459,7 @@ mod tests {
             "mw_complete",
             "mw_resource_schema",
             "mw_saved_roots",
+            "mw_data_children",
             "mw_data_integrity",
             "mw_run",
         ] {
@@ -493,6 +576,23 @@ mod tests {
             "blocked"
         );
 
+        let data_children = contract(tools, "mw_data_children");
+        assert_eq!(data_children["status"], "presentation-only");
+        assert_eq!(data_children["stableProductionApi"], false);
+        assert_eq!(data_children["description"], "bounded typed data helper");
+        assert_eq!(
+            strings(&data_children["missingFacts"]),
+            vec![
+                "catalog-bound saved-place identity",
+                "snapshot/store generation"
+            ]
+        );
+        assert_eq!(data_children["dataAccess"], "gated");
+        assert_eq!(data_children["boundedness"]["page"], "limit-clamped");
+        assert_eq!(data_children["pathSurface"]["segments"], "typed-root-only");
+        assert_eq!(data_children["pathSurface"]["cursor"], "typed");
+        assert_eq!(data_children["pathSurface"]["memberExpansion"], "blocked");
+
         let names: Vec<&str> = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -507,6 +607,14 @@ mod tests {
             tool(tools, "mw_resource_schema")["inputSchema"]["required"],
             json!(["file", "name"])
         );
+        assert_eq!(
+            tool(tools, "mw_data_children")["inputSchema"]["required"],
+            json!(["file", "segments", "limit"])
+        );
+        let segments = &tool(tools, "mw_data_children")["inputSchema"]["properties"]["segments"];
+        assert_eq!(segments["minItems"], 1);
+        assert_eq!(segments["maxItems"], 1);
+        assert_eq!(segments["items"]["properties"]["kind"]["const"], "root");
     }
 
     #[test]
@@ -620,6 +728,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
+        let result = call(
+            "mw_data_children",
+            &json!({
+                "file": "/nope/x.mw",
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "limit": 1,
+            }),
+            policy,
+        )
+        .unwrap();
+        assert_eq!(result["dataAccess"], "disabled");
     }
 
     #[test]
@@ -636,6 +755,25 @@ mod tests {
         assert!(
             error.contains("name"),
             "missing resource name should be a protocol argument error: {error}"
+        );
+    }
+
+    #[test]
+    fn mw_data_children_rejects_invalid_typed_arguments() {
+        let policy = Policy { allow_data: true };
+        let error = call(
+            "mw_data_children",
+            &json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": "counter",
+                "limit": 1,
+            }),
+            policy,
+        )
+        .expect_err("mw_data_children must deserialize typed request arguments");
+        assert!(
+            error.contains("mw_data_children"),
+            "invalid data children args should name the tool: {error}"
         );
     }
 

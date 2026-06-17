@@ -159,8 +159,8 @@ fn summarize(name: &str, result: &Json) -> String {
     // A surfaced refusal or fault speaks for itself, regardless of which tool ran.
     let base = if result.get("dataAccess").and_then(Json::as_str) == Some("disabled") {
         "data access disabled".to_string()
-    } else if let Some(error) = result.get("error").and_then(Json::as_str) {
-        format!("error: {}", clip(error))
+    } else if let Some(error) = error_summary(result) {
+        error
     } else {
         match name {
             "mw_check" => count_summary(result, "diagnostics", "no diagnostics", "diagnostic"),
@@ -175,6 +175,23 @@ fn summarize(name: &str, result: &Json) -> String {
                     "data unavailable".to_string()
                 } else {
                     count_summary(result, "roots", "no saved roots", "saved root")
+                }
+            }
+            "mw_data_children" => {
+                if result.get("available").and_then(Json::as_bool) != Some(true) {
+                    "data unavailable".to_string()
+                } else {
+                    let count = array_len(result, "children");
+                    let base = match count {
+                        0 => "no children".to_string(),
+                        1 => "1 child".to_string(),
+                        _ => format!("{count} children"),
+                    };
+                    if result.get("truncated").and_then(Json::as_bool) == Some(true) {
+                        format!("{base} (truncated)")
+                    } else {
+                        base
+                    }
                 }
             }
             "mw_data_integrity" => {
@@ -203,6 +220,15 @@ fn summarize(name: &str, result: &Json) -> String {
         }
     };
     prefix_contract(result, base)
+}
+
+fn error_summary(result: &Json) -> Option<String> {
+    let error = result.get("error")?;
+    let detail = error
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| compact(error));
+    Some(format!("error: {}", clip(&detail)))
 }
 
 fn prefix_contract(result: &Json, base: String) -> String {
@@ -462,6 +488,34 @@ mod tests {
                 "data unavailable",
             ),
             (
+                "mw_data_children",
+                json!({ "available": true, "children": [{}, {}], "truncated": false }),
+                "2 children",
+            ),
+            (
+                "mw_data_children",
+                json!({ "available": true, "children": [{}], "truncated": true }),
+                "1 child (truncated)",
+            ),
+            (
+                "mw_data_children",
+                json!({ "available": false, "children": [], "truncated": false }),
+                "data unavailable",
+            ),
+            (
+                "mw_data_children",
+                json!({
+                    "available": true,
+                    "children": [],
+                    "truncated": false,
+                    "error": {
+                        "kind": "query",
+                        "value": { "code": "zero_limit" },
+                    },
+                }),
+                "error: {\"kind\":\"query\",\"value\":{\"code\":\"zero_limit\"}}",
+            ),
+            (
                 "mw_data_integrity",
                 json!({ "available": true, "findings": [], "scanned": 5, "truncated": false }),
                 "clean, 5 scanned",
@@ -580,6 +634,23 @@ mod tests {
                 "debug/admin advisory (presentation-only: catalog/store identity +3): clean, 10 scanned",
             ),
             (
+                "mw_data_children",
+                json!({
+                    "available": true,
+                    "children": [{}, {}],
+                    "truncated": true,
+                    "contract": contract(
+                        "presentation-only",
+                        "bounded typed data helper",
+                        &[
+                            "catalog-bound saved-place identity",
+                            "snapshot/store generation",
+                        ],
+                    ),
+                }),
+                "bounded typed data helper (presentation-only: catalog-bound saved-place identity +1): 2 children (truncated)",
+            ),
+            (
                 "mw_run",
                 json!({
                     "value": 42,
@@ -625,7 +696,7 @@ mod tests {
             "dataAccess": "disabled",
             "message": "data access not enabled; relaunch ...",
         });
-        for tool in ["mw_saved_roots", "mw_data_integrity"] {
+        for tool in ["mw_saved_roots", "mw_data_children", "mw_data_integrity"] {
             assert_eq!(summarize(tool, &result), "data access disabled");
         }
     }

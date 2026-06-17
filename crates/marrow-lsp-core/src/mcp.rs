@@ -22,13 +22,14 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use marrow_check::{CheckedProgram, type_at};
+use marrow_check::{CheckedProgram, checked_saved_root_place, type_at};
 use marrow_run::{CheckedEntryCall, Host, RunOutput, RuntimeError, Value, run_entry_with_host};
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
 use serde_json::{Value as Json, json};
 
 use crate::completion::completion;
+use crate::data_explorer::{DataChildrenRequest, DataQuerySegmentDto};
 use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
@@ -53,6 +54,10 @@ const SAVED_DATA_MISSING_FACTS: &[&str] = &[
     "cursor/page facts",
     "snapshot/store generation",
     "stable data DTOs",
+];
+const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
+    "catalog-bound saved-place identity",
+    "snapshot/store generation",
 ];
 const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "catalog/store identity",
@@ -88,6 +93,10 @@ fn resource_schema_contract() -> Json {
 
 fn saved_data_contract() -> Json {
     presentation_contract("root-only data helper", SAVED_DATA_MISSING_FACTS)
+}
+
+fn data_children_contract() -> Json {
+    presentation_contract("bounded typed data helper", DATA_CHILDREN_MISSING_FACTS)
 }
 
 fn data_integrity_contract() -> Json {
@@ -424,6 +433,100 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
     let result = serde_json::to_value(crate::data_explorer::saved_roots(reader.as_ref(), program))
         .unwrap_or_else(|_| json!({ "available": false, "roots": [] }));
     with_contract(result, contract)
+}
+
+/// `mw_data_children`: a bounded page of typed identity-key children under one
+/// saved root. Gated like [`saved_roots`]: disabled data access refuses before
+/// project loading, while enabled access checks the project and opens the native
+/// store read-only for one shared Marrow tooling query.
+pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool) -> Json {
+    let contract = data_children_contract();
+    if !allow_data {
+        return data_disabled(contract);
+    }
+    let unavailable = json!({
+        "available": false,
+        "children": [],
+        "truncated": false,
+        "cursor": Json::Null,
+    });
+    let workspace = match load_project(file, None) {
+        Ok((workspace, _)) => workspace,
+        Err(error) => {
+            let mut value = unavailable.clone();
+            value["error"] = json!(error);
+            return with_contract(value, contract);
+        }
+    };
+    let reader = workspace.project().and_then(LiveStore::for_project);
+    let program = match data_program(&workspace) {
+        Ok(program) => program,
+        Err(error) => {
+            let mut value = unavailable.clone();
+            value["error"] = json!(error);
+            return with_contract(value, contract);
+        }
+    };
+    if let Err(error) = ensure_identity_key_children_request(&program, &request) {
+        let mut value = unavailable;
+        value["error"] = json!(error);
+        return with_contract(value, contract);
+    }
+    let Some(reader) = reader else {
+        return with_contract(unavailable, contract);
+    };
+    match reader.data_children_page(&program, request) {
+        crate::store::Availability::Unavailable => with_contract(unavailable, contract),
+        crate::store::Availability::Available(Ok(result)) => {
+            let mut result =
+                serde_json::to_value(result).expect("data children DTO must serialize");
+            result["available"] = json!(true);
+            with_contract(result, contract)
+        }
+        crate::store::Availability::Available(Err(error)) => with_contract(
+            json!({
+                "available": true,
+                "children": [],
+                "truncated": false,
+                "cursor": Json::Null,
+                "error": error,
+            }),
+            contract,
+        ),
+    }
+}
+
+fn ensure_identity_key_children_request(
+    program: &CheckedProgram,
+    request: &DataChildrenRequest,
+) -> Result<(), String> {
+    let [DataQuerySegmentDto::Root(root)] = request.segments.as_slice() else {
+        return Err(
+            "mw_data_children currently lists only first identity keys for a saved root; member expansion is blocked until Marrow exposes value-free member-presence facts"
+                .to_string(),
+        );
+    };
+    let Some(place) = checked_saved_root_place(program, root, marrow_syntax::SourceSpan::default())
+    else {
+        return Ok(());
+    };
+    if place.identity_keys.is_empty() {
+        return Err(
+            "mw_data_children currently lists only identity keys for keyed saved roots; keyless root member expansion is blocked until Marrow exposes value-free member-presence facts"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn data_program(workspace: &Workspace) -> Result<CheckedProgram, String> {
+    let project = workspace
+        .project()
+        .ok_or_else(|| "no project resolved for the file".to_string())?;
+    let accepted = marrow_check::read_accepted_catalog_artifact(&project.root)
+        .map_err(|error| error.message())?;
+    marrow_check::check_project_against(&project.root, &project.config, accepted.as_ref())
+        .map_err(|error| error.message())
 }
 
 /// `mw_data_integrity`: the schema-change-impact advisory — a capped, on-demand

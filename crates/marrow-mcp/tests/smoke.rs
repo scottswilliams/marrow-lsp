@@ -117,6 +117,14 @@ fn initialize_list_tools_then_call_mw_check() {
         names.contains(&"mw_data_integrity"),
         "mw_data_integrity listed, got {names:?}"
     );
+    assert!(
+        names.contains(&"mw_data_children"),
+        "mw_data_children listed, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"mw_saved_get") && !names.contains(&"mw_saved_children"),
+        "old saved-data child/get tools stay absent, got {names:?}"
+    );
 
     // tools/call mw_check against a project file overlaid with a type error.
     let file = temp_project();
@@ -200,6 +208,35 @@ fn data_tools_refuse_without_the_opt_in() {
             .unwrap()
             .starts_with("root-only data helper (presentation-only: "),
         "summary must name the root-only contract, got {response}"
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "mw_data_children",
+                "arguments": {
+                    "file": "/nope/project/src/main.mw",
+                    "segments": [{ "kind": "root", "value": "counter" }],
+                    "limit": 1
+                }
+            }
+        }),
+    );
+    let response = wait_for(&mut stdout, 3, Duration::from_secs(10));
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["dataAccess"], "disabled",
+        "without the opt-in, mw_data_children must refuse before loading the file, got {response}"
+    );
+    assert_eq!(structured["available"], false);
+    assert_eq!(structured["contract"]["status"], "presentation-only");
+    assert_eq!(
+        structured["contract"]["description"],
+        "bounded typed data helper"
     );
 
     let _ = server.0.kill();
