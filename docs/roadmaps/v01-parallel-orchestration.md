@@ -22,7 +22,7 @@ The project lead drives upstream foundation lanes in `/Users/scottwilliams/Dev/m
    evolution, and backup as each layer becomes real.
 3. Build the checked facts nucleus.
    `marrow-check` must expose typed IDs, durable places, effects, diagnostics,
-   symbol definitions, and query-native snapshots with version/digest semantics.
+   symbol definitions, and typed snapshots with version/digest semantics.
 4. Split resource/store/catalog identity.
    Resource identity, store identity, field/layer/index identity, enum member
    identity, and catalog epochs must be facts, not source-name conventions.

@@ -63,14 +63,31 @@ fn data_key_schema(description: &str) -> Json {
     })
 }
 
-fn data_root_segment_schema() -> Json {
+fn data_path_segment_schema() -> Json {
+    let named_segment = |kind: &str| {
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "const": kind },
+                "value": { "type": "string" },
+            },
+            "required": ["kind", "value"],
+        })
+    };
     json!({
-        "type": "object",
-        "properties": {
-            "kind": { "const": "root" },
-            "value": { "type": "string" },
-        },
-        "required": ["kind", "value"],
+        "oneOf": [
+            named_segment("root"),
+            named_segment("field"),
+            named_segment("layer"),
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "const": "key" },
+                    "value": data_key_schema("Typed saved-data key segment."),
+                },
+                "required": ["kind", "value"],
+            },
+        ],
     })
 }
 
@@ -180,17 +197,15 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Presentation-only root-only data helper: list saved root names from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, typed children, cursor/page facts, snapshot/store generation, and stable data DTOs; not a stable typed production API.",
+            "description": "Presentation-only saved-root listing helper: list saved root names from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, snapshot/store generation, and stable saved-data DTOs; not a stable typed production API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
-                "description": "root-only data helper",
+                "description": "saved-root listing helper",
                 "missingFacts": [
                     "catalog-bound saved-place identity",
-                    "typed children",
-                    "cursor/page facts",
                     "snapshot/store generation",
-                    "stable data DTOs",
+                    "stable saved-data DTOs",
                 ],
                 "dataAccess": "gated",
                 "pathSurface": {
@@ -209,7 +224,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_children",
-            "description": "Presentation-only bounded typed data helper: return one page of first identity-key children under a keyed saved root from the project's real store when data access is enabled. It accepts one typed root segment and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Member expansion is blocked until Marrow exposes value-free member-presence facts. Missing catalog-bound saved-place identity and snapshot/store generation facts; not a stable production data API.",
+            "description": "Presentation-only bounded typed data helper: return one page of typed child segments under a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity and snapshot/store generation facts; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -225,9 +240,9 @@ pub fn tools() -> Json {
                     "unboundedWalk": false,
                 },
                 "pathSurface": {
-                    "segments": "typed-root-only",
+                    "segments": "typed-saved-data-path",
                     "cursor": "typed",
-                    "memberExpansion": "blocked",
+                    "memberExpansion": "Marrow-owned",
                     "savedPathString": "absent",
                 },
             })),
@@ -237,10 +252,9 @@ pub fn tools() -> Json {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
                     "segments": {
                         "type": "array",
-                        "description": "Exactly one typed saved-root segment, for example [{\"kind\":\"root\",\"value\":\"books\"}].",
+                        "description": "Typed saved-data path segments, for example [{\"kind\":\"root\",\"value\":\"books\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}}].",
                         "minItems": 1,
-                        "maxItems": 1,
-                        "items": data_root_segment_schema(),
+                        "items": data_path_segment_schema(),
                     },
                     "limit": {
                         "type": "integer",
@@ -557,15 +571,13 @@ mod tests {
         let saved_roots = contract(tools, "mw_saved_roots");
         assert_eq!(saved_roots["status"], "presentation-only");
         assert_eq!(saved_roots["stableProductionApi"], false);
-        assert_eq!(saved_roots["description"], "root-only data helper");
+        assert_eq!(saved_roots["description"], "saved-root listing helper");
         assert_eq!(
             strings(&saved_roots["missingFacts"]),
             vec![
                 "catalog-bound saved-place identity",
-                "typed children",
-                "cursor/page facts",
                 "snapshot/store generation",
-                "stable data DTOs"
+                "stable saved-data DTOs"
             ]
         );
         assert_eq!(saved_roots["dataAccess"], "gated");
@@ -589,9 +601,15 @@ mod tests {
         );
         assert_eq!(data_children["dataAccess"], "gated");
         assert_eq!(data_children["boundedness"]["page"], "limit-clamped");
-        assert_eq!(data_children["pathSurface"]["segments"], "typed-root-only");
+        assert_eq!(
+            data_children["pathSurface"]["segments"],
+            "typed-saved-data-path"
+        );
         assert_eq!(data_children["pathSurface"]["cursor"], "typed");
-        assert_eq!(data_children["pathSurface"]["memberExpansion"], "blocked");
+        assert_eq!(
+            data_children["pathSurface"]["memberExpansion"],
+            "Marrow-owned"
+        );
 
         let names: Vec<&str> = tools
             .iter()
@@ -613,8 +631,14 @@ mod tests {
         );
         let segments = &tool(tools, "mw_data_children")["inputSchema"]["properties"]["segments"];
         assert_eq!(segments["minItems"], 1);
-        assert_eq!(segments["maxItems"], 1);
-        assert_eq!(segments["items"]["properties"]["kind"]["const"], "root");
+        assert_eq!(segments.get("maxItems"), None);
+        let segment_kinds = segments["items"]["oneOf"]
+            .as_array()
+            .expect("segment alternatives")
+            .iter()
+            .map(|schema| schema["properties"]["kind"]["const"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(segment_kinds, vec!["root", "field", "layer", "key"]);
     }
 
     #[test]

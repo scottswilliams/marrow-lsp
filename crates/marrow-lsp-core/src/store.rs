@@ -8,7 +8,10 @@ use marrow_project::{StoreBackend, StoreConfig};
 use marrow_store::StoreError;
 use marrow_store::tree::TreeStore;
 
-use crate::data_explorer::{DataChildrenError, DataChildrenRequest, DataChildrenResult};
+use crate::data_explorer::{
+    DataChildViewsResult, DataChildrenError, DataChildrenRequest, DataChildrenResult,
+    DataReadRequest, DataReadResult,
+};
 use crate::workspace::Project;
 
 /// The file name of a native store inside its data directory.
@@ -46,6 +49,22 @@ impl LiveStore {
         request: DataChildrenRequest,
     ) -> Availability<Result<DataChildrenResult, DataChildrenError>> {
         self.with_tree(|store| crate::data_explorer::data_children_page(program, store, request))
+    }
+
+    pub fn data_child_views_page(
+        &self,
+        program: &CheckedProgram,
+        request: DataChildrenRequest,
+    ) -> Availability<Result<DataChildViewsResult, DataChildrenError>> {
+        self.with_tree(|store| crate::data_explorer::data_child_views_page(program, store, request))
+    }
+
+    pub fn data_read(
+        &self,
+        program: &CheckedProgram,
+        request: DataReadRequest,
+    ) -> Availability<Result<DataReadResult, DataChildrenError>> {
+        self.with_tree(|store| crate::data_explorer::data_read(program, store, request))
     }
 
     fn with_tree<T>(&self, read: impl FnOnce(&TreeStore) -> T) -> Availability<T> {

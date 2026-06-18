@@ -32,6 +32,18 @@ const forbiddenPhrases = [
     phrase: "browsing the project's durable data",
   },
   {
+    file: "CHANGELOG.md",
+    phrase: "Marrow Data Roots",
+  },
+  {
+    file: "README.md",
+    phrase: "Marrow Data Roots",
+  },
+  {
+    file: "README.md",
+    phrase: "query-native",
+  },
+  {
     file: "README.md",
     phrase: "renames never silently break durable data",
   },
@@ -96,14 +108,14 @@ assertMentions(
 assertMentions(
   changelog,
   "CHANGELOG.md",
-  "Data Roots framing",
-  /Data Roots view for opt-in saved-root listing[\s\S]*typed\/catalog-bound store\s+facts/i,
+  "Saved Resource Inspector framing",
+  /Saved Resource Inspector view for opt-in committed saved-resource inspection[\s\S]*Marrow-owned store\s+facts/i,
 );
 assertMentions(
   changelog,
   "CHANGELOG.md",
   "live-data facts framing",
-  /typed\/catalog-bound store\s+facts/i,
+  /Marrow-owned store\s+facts/i,
 );
 assertMentions(
   changelogF5,
@@ -150,8 +162,8 @@ const marrowDataView = packageJson.contributes.views.marrow.find(
 );
 assert.equal(
   marrowDataView.name,
-  "Marrow Data Roots",
-  "Data Roots view title must say it lists roots only",
+  "Saved Resource Inspector",
+  "saved-resource view title must name the inspector",
 );
 const launchProperties = marrowDebugger.configurationAttributes.launch.properties;
 assert.equal(
@@ -207,8 +219,8 @@ assertMentions(
 assertMentions(
   readmeSourceIntelligence,
   "README.md source intelligence bullet",
-  "Marrow-owned query facts",
-  /query-native hover\/navigation\/completion facts stay owned by Marrow/i,
+  "Marrow-owned typed facts",
+  /typed hover\/navigation\/completion facts stay owned by Marrow/i,
 );
 assertMentions(readme, "README.md", "rename catalog-evolution caveat", /catalog-backed evolution facts/i);
 assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveData[\s\S]*advisory/i);

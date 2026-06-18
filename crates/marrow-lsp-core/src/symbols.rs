@@ -11,7 +11,7 @@ use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
 use marrow_check::CheckedProgram;
 use marrow_syntax::{
     Declaration, EnumDecl, EnumMember, EvolveDecl, EvolveStep, FieldDecl, FunctionDecl, GroupDecl,
-    IndexDecl, ResourceDecl, ResourceMember, SourceFile, SourceSpan, StoreDecl,
+    IndexDecl, ResourceDecl, ResourceMember, SourceFile, SourceSpan, StoreDecl, SurfaceDecl,
 };
 
 use crate::positions::LineIndex;
@@ -49,6 +49,7 @@ fn declaration_symbol(declaration: &Declaration, index: &LineIndex) -> DocumentS
         Declaration::Enum(enum_decl) => enum_symbol(enum_decl, index),
         Declaration::Resource(resource) => resource_symbol(resource, index),
         Declaration::Store(store) => store_symbol(store, index),
+        Declaration::Surface(surface) => surface_symbol(surface, index),
         Declaration::Evolve(evolve) => evolve_symbol(evolve, index),
     }
 }
@@ -142,6 +143,17 @@ fn store_symbol(store: &StoreDecl, index: &LineIndex) -> DocumentSymbol {
         store.span,
         index,
         Some(children),
+    )
+}
+
+fn surface_symbol(surface: &SurfaceDecl, index: &LineIndex) -> DocumentSymbol {
+    symbol(
+        &surface.name,
+        Some(format!("^{}", surface.store.root)),
+        SymbolKind::INTERFACE,
+        surface.span,
+        index,
+        None,
     )
 }
 
@@ -472,6 +484,25 @@ evolve
         let names: Vec<&str> = children.iter().map(|child| child.name.as_str()).collect();
         assert_eq!(names, ["rename", "default", "retire", "transform"]);
         assert!(children.iter().all(|child| child.kind == SymbolKind::EVENT));
+    }
+
+    #[test]
+    fn document_symbols_list_surface_declarations() {
+        let source = "\
+module shelf
+
+surface Books from ^books
+    fields title
+";
+        let index = LineIndex::new(source);
+        let symbols = document_symbols(&parse(source), &index);
+
+        let surface = symbols
+            .iter()
+            .find(|symbol| symbol.name == "Books")
+            .expect("surface declaration is listed");
+        assert_eq!(surface.kind, SymbolKind::INTERFACE);
+        assert_eq!(surface.detail.as_deref(), Some("^books"));
     }
 
     /// Analyze a one-file project on disk so the checked program has a module with

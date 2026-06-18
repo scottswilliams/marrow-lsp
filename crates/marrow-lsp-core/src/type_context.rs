@@ -21,6 +21,11 @@ fn declaration_type_annotation_at(declaration: &Declaration, offset: usize) -> b
             .keys
             .iter()
             .any(|key| type_ref_covers(&key.ty, offset)),
+        Declaration::Surface(surface) => surface
+            .store
+            .keys
+            .iter()
+            .any(|key| type_ref_covers(&key.ty, offset)),
         Declaration::Function(function) => {
             function
                 .params

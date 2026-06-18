@@ -8,6 +8,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
+use marrow_check::tooling::{DataChild, DataQuerySegment, data_children};
+use marrow_store::cell::CatalogId;
+use marrow_store::key::SavedKey;
+use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
+use marrow_store::value::{SavedValue, encode_value};
 use serde_json::{Value, json};
 
 /// Frame a JSON-RPC message with the LSP `Content-Length` header and write it.
@@ -43,6 +49,77 @@ fn fixture_root() -> PathBuf {
         .join("../../fixtures/shelf")
         .canonicalize()
         .expect("the shelf fixture exists")
+}
+
+fn native_counter_fixture() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    let source = "\
+module counter
+
+resource Counter
+    required value: int
+
+store ^counter(id: int): Counter
+
+pub fn f()
+    return
+";
+    let file = src.join("counter.mw");
+    std::fs::write(&file, source).unwrap();
+
+    let config_text = std::fs::read_to_string(root.join("marrow.json")).unwrap();
+    let config = marrow_project::parse_config(&config_text).unwrap();
+    let (report, proposed) = marrow_check::check_project(root, &config).unwrap();
+    assert!(!report.has_errors(), "{:#?}", report.diagnostics);
+    let store = TreeStore::open(&root.join("data").join("marrow.redb")).unwrap();
+    store
+        .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
+        .unwrap();
+    marrow_run::evolution::commit_catalog_baseline(&store, &proposed).unwrap();
+    let accepted = store.read_catalog_snapshot().unwrap();
+    if let Some(snapshot) = &accepted {
+        std::fs::write(
+            root.join("marrow.catalog.json"),
+            snapshot.to_json_pretty().unwrap(),
+        )
+        .unwrap();
+    }
+    let (report, program) =
+        marrow_check::check_project_with_catalog(root, &config, accepted.as_ref()).unwrap();
+    assert!(!report.has_errors(), "{:#?}", report.diagnostics);
+    let place = root_place(&program, "counter").unwrap();
+    let store_id = store_id_of(&place).unwrap();
+    let value_id = CatalogId::new(member_catalog_id(&place, "value").unwrap()).unwrap();
+    let identity = [SavedKey::Int(1)];
+    store.write_record_presence(&store_id, &identity).unwrap();
+    store
+        .write_data_value(
+            &store_id,
+            &identity,
+            &[DataPathSegment::Member(value_id)],
+            encode_value(&SavedValue::Int(42)).unwrap(),
+        )
+        .unwrap();
+    let page = data_children(
+        &program,
+        &store,
+        &[DataQuerySegment::Root("counter".into())],
+        10,
+        None,
+    )
+    .unwrap();
+    assert_eq!(page.children, vec![DataChild::Key(SavedKey::Int(1))]);
+
+    (dir, file)
 }
 
 struct Server(Child);
@@ -1360,7 +1437,7 @@ fn custom_saved_roots_request_answers_over_the_transport() {
     );
     let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
 
-    // The custom Data Roots request answers with a well-formed envelope. The
+    // The custom saved-root request answers with a well-formed envelope. The
     // fixture has no store file, so the store is unavailable: `available` is false
     // and `roots` is empty — a soft degrade, never a JSON-RPC error.
     send(
@@ -1376,6 +1453,103 @@ fn custom_saved_roots_request_answers_over_the_transport() {
     assert_eq!(
         response["result"]["roots"].as_array().map(Vec::len),
         Some(0)
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn custom_saved_data_inspector_requests_answer_over_the_transport() {
+    let (_dir, file) = native_counter_fixture();
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+                "initializationOptions": { "marrow.liveData": true }
+            }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let text = std::fs::read_to_string(&file).unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": text }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "marrow/dataChildren",
+            "params": {
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "limit": 10,
+                "cursor": null
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["available"], true);
+    assert_eq!(
+        response["result"]["children"],
+        json!([
+            {
+                "segment": { "kind": "key", "value": { "kind": "int", "value": 1 } },
+                "label": "(1)"
+            }
+        ])
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "marrow/dataRead",
+            "params": {
+                "segments": [
+                    { "kind": "root", "value": "counter" },
+                    { "kind": "key", "value": { "kind": "int", "value": 1 } },
+                    { "kind": "field", "value": "value" }
+                ]
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(
+        response["result"],
+        json!({ "available": true, "presence": "value_only", "value": "42" })
     );
 
     let _ = server.0.kill();

@@ -574,6 +574,26 @@ pub enum Genre
 }
 
 #[test]
+fn surface_declarations_color_names() {
+    let source = "\
+module shelf
+
+surface Books from ^books
+    fields title
+";
+    let (index, decoded) = decoded_for(source);
+
+    assert_token_type(
+        source,
+        &index,
+        &decoded,
+        "surface Books from ^books",
+        "Books",
+        legend_index(&SemanticTokenType::STRUCT),
+    );
+}
+
+#[test]
 fn module_const_declarations_are_readonly_variables() {
     let source = "\
 module m

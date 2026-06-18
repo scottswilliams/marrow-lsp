@@ -209,20 +209,20 @@ Goal: saved resources should be understandable without flooding the editor.
 
 Expected outcomes:
 
-- Resource hover and Data Roots share bounded summary helpers for fields, layers, indexes, and
-  key types.
+- Resource hover and the Saved Resource Inspector share bounded summary helpers for fields,
+  layers, indexes, and key types.
 - Large resource trees are summarized with counts and first few members rather than dumping the
   whole tree.
 - Live record counts remain blocked until Marrow exposes checked saved-place
-  queries, typed store summaries, and source/store generation boundaries.
-- Data Roots terminology matches hover and completion terminology.
+  facts, typed store summaries, and source/store generation boundaries.
+- Saved Resource Inspector terminology matches hover and completion terminology.
 
 Likely LSP files:
 
 - `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/hover.rs`
 - `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/data_explorer.rs`
 - `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/store.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/editors/vscode/src/dataRoots.ts`
+- `/Users/scottwilliams/Dev/marrow-lsp/editors/vscode/src/savedResourceInspector.ts`
 
 ### Lane 7: Cleanup And Drift Hardening
 

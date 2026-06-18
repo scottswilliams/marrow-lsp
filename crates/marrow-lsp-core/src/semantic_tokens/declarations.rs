@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use marrow_syntax::{
     Declaration, EnumDecl, EnumMember, EvolveDecl, EvolveStep, FieldDecl, FunctionDecl, GroupDecl,
     IndexDecl, Keyword, LexedSource, ResourceDecl, ResourceMember, SourceFile, SourceSpan,
-    StoreDecl, Token, TokenKind,
+    StoreDecl, SurfaceDecl, Token, TokenKind,
 };
 
 use super::{
@@ -90,6 +90,9 @@ fn add_declaration_overrides(
         Declaration::Store(store) => {
             add_store_declaration_overrides(overrides, lexed, source, store)
         }
+        Declaration::Surface(surface) => {
+            add_surface_declaration_overrides(overrides, lexed, source, surface)
+        }
         Declaration::Enum(enum_decl) => {
             add_enum_declaration_overrides(overrides, lexed, source, enum_decl);
         }
@@ -165,6 +168,32 @@ fn add_store_declaration_overrides(
     }
     for index in &store.indexes {
         add_index_overrides(overrides, lexed, source, index);
+    }
+}
+
+fn add_surface_declaration_overrides(
+    overrides: &mut HashMap<ByteSpan, u32>,
+    lexed: &LexedSource,
+    source: &str,
+    surface: &SurfaceDecl,
+) {
+    add_first_identifier_override(
+        overrides,
+        lexed,
+        source,
+        surface.span,
+        &surface.name,
+        TYPE_STRUCT,
+    );
+    if !surface.store.keys.is_empty() {
+        add_saved_root_key_overrides(
+            overrides,
+            lexed,
+            source,
+            surface.span,
+            &surface.store.root,
+            surface.store.keys.iter().map(|key| key.name.as_str()),
+        );
     }
 }
 

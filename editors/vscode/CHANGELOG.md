@@ -17,8 +17,8 @@ Initial release.
   These are editor aids, not stable production semantic contracts.
 - Rename refuses saved-data-backed edits until Marrow exposes catalog-backed evolution facts.
 - Document formatting.
-- The Marrow Data Roots view for opt-in saved-root listing while typed/catalog-bound store
-  facts are pending.
+- The Saved Resource Inspector view for opt-in committed saved-resource inspection through
+  Marrow-owned store facts.
 - F5 debugging via the `marrow-dap` adapter, with stop-on-entry, statement stepping, advisory
   breakpoints, and variables. The project `defaultEntry` is used while canonical function-entry
   facts are pending; explicit entry strings and line breakpoint arming remain blocked.

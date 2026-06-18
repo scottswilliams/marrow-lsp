@@ -22,14 +22,14 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use marrow_check::{CheckedProgram, checked_saved_root_place, type_at};
+use marrow_check::{CheckedProgram, type_at};
 use marrow_run::{CheckedEntryCall, Host, RunOutput, RuntimeError, Value, run_entry_with_host};
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
 use serde_json::{Map, Value as Json, json};
 
 use crate::completion::completion;
-use crate::data_explorer::{DataChildrenRequest, DataQuerySegmentDto};
+use crate::data_explorer::DataChildrenRequest;
 use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
@@ -52,10 +52,8 @@ const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
 ];
 const SAVED_DATA_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
-    "typed children",
-    "cursor/page facts",
     "snapshot/store generation",
-    "stable data DTOs",
+    "stable saved-data DTOs",
 ];
 const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
@@ -94,7 +92,7 @@ fn resource_schema_contract() -> Json {
 }
 
 fn saved_data_contract() -> Json {
-    presentation_contract("root-only data helper", SAVED_DATA_MISSING_FACTS)
+    presentation_contract("saved-root listing helper", SAVED_DATA_MISSING_FACTS)
 }
 
 fn data_children_contract() -> Json {
@@ -437,10 +435,10 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
     with_contract(result, contract)
 }
 
-/// `mw_data_children`: a bounded page of typed identity-key children under one
-/// saved root. Gated like [`saved_roots`]: disabled data access refuses before
-/// project loading, while enabled access checks the project and opens the native
-/// store read-only for one shared Marrow tooling query.
+/// `mw_data_children`: a bounded page of typed child segments under a saved-data
+/// path. Gated like [`saved_roots`]: disabled data access refuses before project
+/// loading, while enabled access checks the project and opens the native store
+/// read-only for one shared Marrow tooling read.
 pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool) -> Json {
     let contract = data_children_contract();
     if !allow_data {
@@ -469,11 +467,6 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
             return with_contract(value, contract);
         }
     };
-    if let Err(error) = ensure_identity_key_children_request(&program, &request) {
-        let mut value = unavailable;
-        value["error"] = json!(error);
-        return with_contract(value, contract);
-    }
     let Some(reader) = reader else {
         return with_contract(unavailable, contract);
     };
@@ -496,29 +489,6 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
             contract,
         ),
     }
-}
-
-fn ensure_identity_key_children_request(
-    program: &CheckedProgram,
-    request: &DataChildrenRequest,
-) -> Result<(), String> {
-    let [DataQuerySegmentDto::Root(root)] = request.segments.as_slice() else {
-        return Err(
-            "mw_data_children currently lists only first identity keys for a saved root; member expansion is blocked until Marrow exposes value-free member-presence facts"
-                .to_string(),
-        );
-    };
-    let Some(place) = checked_saved_root_place(program, root, marrow_syntax::SourceSpan::default())
-    else {
-        return Ok(());
-    };
-    if place.identity_keys.is_empty() {
-        return Err(
-            "mw_data_children currently lists only identity keys for keyed saved roots; keyless root member expansion is blocked until Marrow exposes value-free member-presence facts"
-                .to_string(),
-        );
-    }
-    Ok(())
 }
 
 fn data_program(workspace: &Workspace) -> Result<CheckedProgram, String> {

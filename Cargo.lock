@@ -501,7 +501,10 @@ name = "marrow-lsp"
 version = "0.1.0"
 dependencies = [
  "lsp-types",
+ "marrow-check",
  "marrow-lsp-core",
+ "marrow-project",
+ "marrow-run",
  "marrow-store",
  "serde_json",
  "tempfile",

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use marrow_syntax::{
     Block, ConstDecl, Declaration, EvolveDecl, EvolveStep, FunctionDecl, LexedSource, ResourceDecl,
-    ResourceMember, SourceFile, Statement, StoreDecl, TokenKind, TypeRef,
+    ResourceMember, SourceFile, Statement, StoreDecl, SurfaceDecl, TokenKind, TypeRef,
 };
 
 use super::{
@@ -40,6 +40,9 @@ fn add_declaration_type_annotation_overrides(
         }
         Declaration::Store(store) => {
             add_store_type_annotation_overrides(overrides, lexed, source, store);
+        }
+        Declaration::Surface(surface) => {
+            add_surface_type_annotation_overrides(overrides, lexed, source, surface);
         }
         Declaration::Evolve(evolve) => {
             add_evolve_type_annotation_overrides(overrides, lexed, source, evolve);
@@ -92,6 +95,17 @@ fn add_store_type_annotation_overrides(
     store: &StoreDecl,
 ) {
     for key in &store.root.keys {
+        add_type_annotation_overrides(overrides, lexed, source, &key.ty);
+    }
+}
+
+fn add_surface_type_annotation_overrides(
+    overrides: &mut HashMap<ByteSpan, TokenStyle>,
+    lexed: &LexedSource,
+    source: &str,
+    surface: &SurfaceDecl,
+) {
+    for key in &surface.store.keys {
         add_type_annotation_overrides(overrides, lexed, source, &key.ty);
     }
 }

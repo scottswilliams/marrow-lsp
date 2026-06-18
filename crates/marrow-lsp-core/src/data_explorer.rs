@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use marrow_check::CheckedProgram;
 use marrow_check::tooling::{
-    self, DataChild, DataQuerySegment, MemberFlavor, QueryError, ToolingError,
+    self, DataChild, DataPresence, DataQuerySegment, MemberFlavor, QueryError, ToolingError,
 };
 use marrow_store::StoreError;
 use marrow_store::key::SavedKey;
@@ -16,6 +16,7 @@ use marrow_store::tree::TreeStore;
 use crate::store::{Availability, LiveStore};
 
 pub const DATA_CHILDREN_PAGE_LIMIT: usize = 200;
+pub const DATA_VALUE_PREVIEW_LIMIT: usize = 2048;
 
 /// `marrow/savedRoots` reply: the saved root names, plus whether the store could
 /// be read. When `available` is false the roots are empty and the tree view shows
@@ -43,7 +44,7 @@ pub fn saved_roots(reader: Option<&LiveStore>, program: &CheckedProgram) -> Save
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum DataQuerySegmentDto {
+pub enum DataPathSegmentDto {
     Root(String),
     Field(String),
     Layer(String),
@@ -65,13 +66,15 @@ pub enum DataKeyDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum DataChildDto {
+    Root(String),
     Key(DataKeyDto),
-    Member(String),
+    Field(String),
+    Layer(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataChildrenRequest {
-    pub segments: Vec<DataQuerySegmentDto>,
+    pub segments: Vec<DataPathSegmentDto>,
     pub limit: usize,
     pub cursor: Option<DataKeyDto>,
 }
@@ -84,9 +87,61 @@ pub struct DataChildrenResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataChildViewDto {
+    pub segment: DataPathSegmentDto,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataChildViewsResult {
+    pub children: Vec<DataChildViewDto>,
+    pub truncated: bool,
+    pub cursor: Option<DataKeyDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataChildViewsResponse {
+    pub available: bool,
+    pub children: Vec<DataChildViewDto>,
+    pub truncated: bool,
+    pub cursor: Option<DataKeyDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<DataChildrenError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataReadRequest {
+    pub segments: Vec<DataPathSegmentDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataReadResult {
+    pub presence: DataPresenceDto,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataReadResponse {
+    pub available: bool,
+    pub presence: DataPresenceDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<DataChildrenError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataPresenceDto {
+    Absent,
+    ValueOnly,
+    ChildrenOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum DataChildrenError {
-    Query(DataQueryErrorDto),
+    Path(DataPathErrorDto),
     Store(DataStoreErrorDto),
 }
 
@@ -112,7 +167,7 @@ pub enum DataStoreErrorCodeDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
-pub enum DataQueryErrorDto {
+pub enum DataPathErrorDto {
     MissingRoot,
     UnknownRoot {
         root: String,
@@ -179,16 +234,7 @@ pub fn data_children_page(
     store: &TreeStore,
     request: DataChildrenRequest,
 ) -> Result<DataChildrenResult, DataChildrenError> {
-    let DataChildrenRequest {
-        segments,
-        limit,
-        cursor,
-    } = request;
-    let segments = segments
-        .into_iter()
-        .map(DataQuerySegment::from)
-        .collect::<Vec<_>>();
-    let cursor = cursor.map(SavedKey::from);
+    let (segments, limit, cursor) = data_children_parts(request);
     let page = tooling::data_children(
         program,
         store,
@@ -199,13 +245,105 @@ pub fn data_children_page(
     Ok(DataChildrenResult::from(page))
 }
 
-impl From<DataQuerySegmentDto> for DataQuerySegment {
-    fn from(segment: DataQuerySegmentDto) -> Self {
+pub fn data_child_views_page(
+    program: &CheckedProgram,
+    store: &TreeStore,
+    request: DataChildrenRequest,
+) -> Result<DataChildViewsResult, DataChildrenError> {
+    let (segments, limit, cursor) = data_children_parts(request);
+    let page = tooling::data_children(
+        program,
+        store,
+        &segments,
+        limit.min(DATA_CHILDREN_PAGE_LIMIT),
+        cursor.as_ref(),
+    )?;
+    Ok(DataChildViewsResult::from(page))
+}
+
+pub fn data_read(
+    program: &CheckedProgram,
+    store: &TreeStore,
+    request: DataReadRequest,
+) -> Result<DataReadResult, DataChildrenError> {
+    let segments = request
+        .segments
+        .into_iter()
+        .map(DataQuerySegment::from)
+        .collect::<Vec<_>>();
+    let Some(query) = tooling::resolve_data_query(program, &segments)? else {
+        return Ok(DataReadResult {
+            presence: DataPresenceDto::Absent,
+            value: None,
+        });
+    };
+    let (payload, presence) = tooling::read_data_query(store, &query)
+        .map_err(|error| DataChildrenError::Store(DataStoreErrorDto::from(error)))?;
+    let value = payload.map(|payload| render_value_preview(program, &query, payload.as_bytes()));
+    Ok(DataReadResult {
+        presence: DataPresenceDto::from(presence),
+        value,
+    })
+}
+
+fn render_value_preview(
+    program: &CheckedProgram,
+    query: &tooling::DataQuery,
+    bytes: &[u8],
+) -> String {
+    let rendered = tooling::render_data_query_value(program, query, bytes);
+    truncate_preview(rendered, DATA_VALUE_PREVIEW_LIMIT)
+}
+
+fn truncate_preview(mut text: String, limit: usize) -> String {
+    if text.len() <= limit {
+        return text;
+    }
+    let end = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= limit)
+        .last()
+        .unwrap_or(0);
+    text.truncate(end);
+    text.push_str("...");
+    text
+}
+
+fn data_children_parts(
+    request: DataChildrenRequest,
+) -> (Vec<DataQuerySegment>, usize, Option<SavedKey>) {
+    let DataChildrenRequest {
+        segments,
+        limit,
+        cursor,
+    } = request;
+    let segments = segments
+        .into_iter()
+        .map(DataQuerySegment::from)
+        .collect::<Vec<_>>();
+    let cursor = cursor.map(SavedKey::from);
+    (segments, limit, cursor)
+}
+
+impl From<DataPathSegmentDto> for DataQuerySegment {
+    fn from(segment: DataPathSegmentDto) -> Self {
         match segment {
-            DataQuerySegmentDto::Root(root) => Self::Root(root),
-            DataQuerySegmentDto::Field(field) => Self::Field(field),
-            DataQuerySegmentDto::Layer(layer) => Self::Layer(layer),
-            DataQuerySegmentDto::Key(key) => Self::Key(SavedKey::from(key)),
+            DataPathSegmentDto::Root(root) => Self::Root(root),
+            DataPathSegmentDto::Field(field) => Self::Field(field),
+            DataPathSegmentDto::Layer(layer) => Self::Layer(layer),
+            DataPathSegmentDto::Key(key) => Self::Key(SavedKey::from(key)),
+        }
+    }
+}
+
+impl From<DataQuerySegment> for DataPathSegmentDto {
+    fn from(segment: DataQuerySegment) -> Self {
+        match segment {
+            DataQuerySegment::Root(root) => Self::Root(root),
+            DataQuerySegment::Field(field) => Self::Field(field),
+            DataQuerySegment::Layer(layer) => Self::Layer(layer),
+            DataQuerySegment::Key(key) => Self::Key(DataKeyDto::from(key)),
         }
     }
 }
@@ -241,8 +379,36 @@ impl From<SavedKey> for DataKeyDto {
 impl From<DataChild> for DataChildDto {
     fn from(child: DataChild) -> Self {
         match child {
+            DataChild::Root(root) => Self::Root(root),
             DataChild::Key(key) => Self::Key(DataKeyDto::from(key)),
-            DataChild::Member(member) => Self::Member(member),
+            DataChild::Field(field) => Self::Field(field),
+            DataChild::Layer(layer) => Self::Layer(layer),
+        }
+    }
+}
+
+impl From<DataChild> for DataChildViewDto {
+    fn from(child: DataChild) -> Self {
+        match child {
+            DataChild::Root(root) => Self {
+                segment: DataPathSegmentDto::Root(root.clone()),
+                label: root,
+            },
+            DataChild::Key(key) => {
+                let label = tooling::render_query_segments(&[DataQuerySegment::Key(key.clone())]);
+                Self {
+                    segment: DataPathSegmentDto::Key(DataKeyDto::from(key)),
+                    label,
+                }
+            }
+            DataChild::Field(field) => Self {
+                segment: DataPathSegmentDto::Field(field.clone()),
+                label: field,
+            },
+            DataChild::Layer(layer) => Self {
+                segment: DataPathSegmentDto::Layer(layer.clone()),
+                label: layer,
+            },
         }
     }
 }
@@ -257,10 +423,34 @@ impl From<tooling::DataChildrenPage> for DataChildrenResult {
     }
 }
 
+impl From<tooling::DataChildrenPage> for DataChildViewsResult {
+    fn from(page: tooling::DataChildrenPage) -> Self {
+        Self {
+            children: page
+                .children
+                .into_iter()
+                .map(DataChildViewDto::from)
+                .collect(),
+            truncated: page.truncated,
+            cursor: page.cursor.map(DataKeyDto::from),
+        }
+    }
+}
+
+impl From<DataPresence> for DataPresenceDto {
+    fn from(presence: DataPresence) -> Self {
+        match presence {
+            DataPresence::Absent => Self::Absent,
+            DataPresence::ValueOnly => Self::ValueOnly,
+            DataPresence::ChildrenOnly => Self::ChildrenOnly,
+        }
+    }
+}
+
 impl From<ToolingError> for DataChildrenError {
     fn from(error: ToolingError) -> Self {
         match error {
-            ToolingError::Query(error) => Self::Query(DataQueryErrorDto::from(error)),
+            ToolingError::Query(error) => Self::Path(DataPathErrorDto::from(error)),
             ToolingError::Store(error) => Self::Store(DataStoreErrorDto::from(error)),
         }
     }
@@ -286,7 +476,7 @@ impl From<StoreError> for DataStoreErrorDto {
     }
 }
 
-impl From<QueryError> for DataQueryErrorDto {
+impl From<QueryError> for DataPathErrorDto {
     fn from(error: QueryError) -> Self {
         match error {
             QueryError::MissingRoot => Self::MissingRoot,
@@ -378,9 +568,12 @@ mod tests {
 
     use std::fs;
 
-    use marrow_check::test_support::{commit_then_check, root_place, store_id_of};
+    use marrow_check::test_support::{
+        commit_then_check, member_catalog_id, root_place, store_id_of,
+    };
     use marrow_store::key::SavedKey;
-    use marrow_store::tree::TreeStore;
+    use marrow_store::tree::{DataPathSegment, TreeStore};
+    use marrow_store::value::{SavedValue, encode_value};
 
     #[test]
     fn a_missing_reader_answers_unavailable() {
@@ -462,24 +655,24 @@ mod tests {
     }
 
     #[test]
-    fn zero_limit_returns_query_error() {
+    fn zero_limit_returns_path_error() {
         let (program, store) = checked_counter_store(1..=1);
         assert_eq!(
             data_children_page(
                 &program,
                 &store,
                 DataChildrenRequest {
-                    segments: vec![DataQuerySegmentDto::Root("counter".into())],
+                    segments: vec![DataPathSegmentDto::Root("counter".into())],
                     limit: 0,
                     cursor: None,
                 },
             ),
-            Err(DataChildrenError::Query(DataQueryErrorDto::ZeroLimit))
+            Err(DataChildrenError::Path(DataPathErrorDto::ZeroLimit))
         );
     }
 
     #[test]
-    fn typed_query_error_reports_string_scalar_type() {
+    fn typed_path_error_reports_string_scalar_type() {
         let (program, store) =
             checked_counter_store_with_keys("string", std::iter::empty::<SavedKey>());
         assert_eq!(
@@ -488,20 +681,18 @@ mod tests {
                 &store,
                 DataChildrenRequest {
                     segments: vec![
-                        DataQuerySegmentDto::Root("counter".into()),
-                        DataQuerySegmentDto::Key(DataKeyDto::Int(1)),
+                        DataPathSegmentDto::Root("counter".into()),
+                        DataPathSegmentDto::Key(DataKeyDto::Int(1)),
                     ],
                     limit: 2,
                     cursor: None,
                 },
             ),
-            Err(DataChildrenError::Query(
-                DataQueryErrorDto::IdentityKeyType {
-                    root: "counter".into(),
-                    expected: ScalarTypeDto::String,
-                    found: ScalarTypeDto::Int,
-                }
-            ))
+            Err(DataChildrenError::Path(DataPathErrorDto::IdentityKeyType {
+                root: "counter".into(),
+                expected: ScalarTypeDto::String,
+                found: ScalarTypeDto::Int,
+            }))
         );
     }
 
@@ -512,7 +703,7 @@ mod tests {
             &program,
             &store,
             DataChildrenRequest {
-                segments: vec![DataQuerySegmentDto::Root("counter".into())],
+                segments: vec![DataPathSegmentDto::Root("counter".into())],
                 limit: DATA_CHILDREN_PAGE_LIMIT + 1,
                 cursor: None,
             },
@@ -535,7 +726,7 @@ mod tests {
     #[test]
     fn data_children_returns_paged_typed_segments() {
         let (program, store) = checked_counter_store(1..=5);
-        let root = vec![DataQuerySegmentDto::Root("counter".into())];
+        let root = vec![DataPathSegmentDto::Root("counter".into())];
 
         let page = data_children_page(
             &program,
@@ -601,12 +792,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn data_child_views_render_key_labels_from_marrow() {
+        let (program, store) = checked_counter_store(1..=1);
+
+        let page = data_child_views_page(
+            &program,
+            &store,
+            DataChildrenRequest {
+                segments: vec![DataPathSegmentDto::Root("counter".into())],
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            page.children,
+            vec![DataChildViewDto {
+                segment: DataPathSegmentDto::Key(DataKeyDto::Int(1)),
+                label: "(1)".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn data_read_renders_a_present_value_leaf() {
+        let (program, store) = checked_counter_store_with_values([(1, 42)]);
+
+        let read = data_read(
+            &program,
+            &store,
+            DataReadRequest {
+                segments: vec![
+                    DataPathSegmentDto::Root("counter".into()),
+                    DataPathSegmentDto::Key(DataKeyDto::Int(1)),
+                    DataPathSegmentDto::Field("value".into()),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            read,
+            DataReadResult {
+                presence: DataPresenceDto::ValueOnly,
+                value: Some("42".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn data_read_truncates_large_value_preview() {
+        let long = "a".repeat(DATA_VALUE_PREVIEW_LIMIT + 20);
+        let (program, store) =
+            checked_counter_store_with_saved_values("string", [(1, SavedValue::Str(long))]);
+
+        let read = data_read(
+            &program,
+            &store,
+            DataReadRequest {
+                segments: vec![
+                    DataPathSegmentDto::Root("counter".into()),
+                    DataPathSegmentDto::Key(DataKeyDto::Int(1)),
+                    DataPathSegmentDto::Field("value".into()),
+                ],
+            },
+        )
+        .unwrap();
+
+        let value = read.value.expect("value preview");
+        assert_eq!(read.presence, DataPresenceDto::ValueOnly);
+        assert!(value.ends_with("..."), "{value}");
+        assert!(value.len() <= DATA_VALUE_PREVIEW_LIMIT + 3, "{value}");
+    }
+
     fn checked_counter_store(ids: std::ops::RangeInclusive<i64>) -> (CheckedProgram, TreeStore) {
         checked_counter_store_with_keys("int", ids.map(SavedKey::Int))
     }
 
+    fn checked_counter_store_with_values(
+        values: impl IntoIterator<Item = (i64, i64)>,
+    ) -> (CheckedProgram, TreeStore) {
+        checked_counter_store_with_saved_values(
+            "int",
+            values
+                .into_iter()
+                .map(|(identity, value)| (identity, SavedValue::Int(value))),
+        )
+    }
+
+    fn checked_counter_store_with_saved_values(
+        value_type: &str,
+        values: impl IntoIterator<Item = (i64, SavedValue)>,
+    ) -> (CheckedProgram, TreeStore) {
+        let (program, store) =
+            checked_counter_store_with_shape("int", value_type, std::iter::empty());
+        let place = root_place(&program, "counter").unwrap();
+        let store_id = store_id_of(&place).unwrap();
+        let value_id = member_catalog_id(&place, "value").unwrap();
+        let path = vec![DataPathSegment::Member(
+            marrow_store::cell::CatalogId::new(value_id).unwrap(),
+        )];
+        for (identity, value) in values {
+            let identity = [SavedKey::Int(identity)];
+            store.write_record_presence(&store_id, &identity).unwrap();
+            store
+                .write_data_value(&store_id, &identity, &path, encode_value(&value).unwrap())
+                .unwrap();
+        }
+        (program, store)
+    }
+
     fn checked_counter_store_with_keys(
         key_type: &str,
+        keys: impl IntoIterator<Item = SavedKey>,
+    ) -> (CheckedProgram, TreeStore) {
+        checked_counter_store_with_shape(key_type, "int", keys)
+    }
+
+    fn checked_counter_store_with_shape(
+        key_type: &str,
+        value_type: &str,
         keys: impl IntoIterator<Item = SavedKey>,
     ) -> (CheckedProgram, TreeStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -619,7 +926,7 @@ mod tests {
 module app
 
 resource Counter
-    required value: int
+    required value: {value_type}
 
 store ^counter(id: {key_type}): Counter
 "#

@@ -7,7 +7,7 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
-import { MarrowDataProvider } from "./dataRoots";
+import { SavedResourceProvider } from "./savedResourceInspector";
 import { MarrowDataIntegrity } from "./dataIntegrity";
 
 let client: LanguageClient | undefined;
@@ -17,7 +17,7 @@ const SERVER_BINARY = `marrow-lsp${EXE_SUFFIX}`;
 const DAP_BINARY = `marrow-dap${EXE_SUFFIX}`;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  const dataProvider = new MarrowDataProvider();
+  const dataProvider = new SavedResourceProvider();
   let dataIntegrity: MarrowDataIntegrity | undefined;
 
   context.subscriptions.push(

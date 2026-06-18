@@ -60,8 +60,8 @@ Marrow API or remain blocked.
 
 | Area | Graduation requirement |
 | --- | --- |
-| Source intelligence | Query-native Marrow facts for hover, navigation, completion, signature help, module paths, type annotations, docs, builtins, operators, enum paths, saved roots, and rename safety. |
-| Data views | Versioned catalog/store generations, typed data query DTOs, bounded paging, typed path segments, drift witnesses, and repair facts. |
+| Source intelligence | Checker-owned Marrow facts for hover, navigation, completion, signature help, module paths, type annotations, docs, builtins, operators, enum paths, saved roots, and rename safety. |
+| Data views | Versioned catalog/store generations, typed saved-data path DTOs, bounded paging, bounded or streaming value reads, typed path segments, drift witnesses, and repair facts. |
 | MCP run | A Marrow run/session mode that forces checked zero-argument execution over a fresh in-memory store without opening, reading, copying, or writing the configured project store, plus canonical entry identity and typed argument DTOs. |
 | DAP | Stop points, source mapping, frame scopes, value expansion, production expression evaluation, durable watch targets, typed launch args, and canonical protocol entry identity. |
 | VS Code | Editor commands and snippets may expose only ready or presentation-only contracts. Blocked semantic inputs stay absent from schemas and snippets. |

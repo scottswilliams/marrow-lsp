@@ -607,11 +607,11 @@ mod tests {
                     "roots": [],
                     "contract": contract(
                         "presentation-only",
-                        "root-only data helper",
+                        "saved-root listing helper",
                         &["catalog-bound saved-place identity"],
                     ),
                 }),
-                "root-only data helper (presentation-only: catalog-bound saved-place identity): data unavailable",
+                "saved-root listing helper (presentation-only: catalog-bound saved-place identity): data unavailable",
             ),
             (
                 "mw_data_integrity",

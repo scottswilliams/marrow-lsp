@@ -1,7 +1,7 @@
 # Marrow for VSCode
 
 Language support for the Marrow `.mw` language. The extension is a thin launcher: it ships
-the TextMate grammar, the editor configuration, the root-only data view, and the debug wiring,
+the TextMate grammar, the editor configuration, the saved-resource view, and the debug wiring,
 and it starts the bundled `marrow-lsp` language server and `marrow-dap` debug adapter. All
 language intelligence — parsing, checking, typing, schema, and store access — lives in the
 Rust binaries. No parsing or position math runs in TypeScript.
@@ -12,13 +12,13 @@ Rust binaries. No parsing or position math runs in TypeScript.
 - **Source intelligence** — presentation-only hover, completion, symbols, go-to definition,
   find references, rename, and semantic tokens over the current Marrow analysis. These are editor
   aids, not stable production semantic contracts; durable identity, catalog evolution, and
-  query-native hover/navigation/completion facts stay owned by Marrow.
+  typed hover/navigation/completion facts stay owned by Marrow.
 - **Rename** — editor rename for supported source bindings; saved-data-backed edits are refused
   until Marrow exposes catalog-backed evolution facts.
 - **Formatting** — format a `.mw` document.
-- **Marrow Data Roots** — an opt-in view (Activity Bar) that lists saved root names from the
-  native dev store when `marrow.liveData` is enabled. It is gated on Marrow tooling facts and does
-  not accept editor-authored saved paths.
+- **Saved Resource Inspector** — an opt-in view (Activity Bar) that expands committed saved
+  resources from the native dev store when `marrow.liveData` is enabled. It is gated on Marrow
+  tooling facts and does not accept editor-authored saved paths.
   Refreshes automatically when `marrow.json` is saved, and on demand from the view title.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
   project's `defaultEntry` while Marrow's canonical function-entry facts are pending. F5 remains
@@ -53,8 +53,8 @@ same way, in order:
   dev locations when the file exists.
 - `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
   bundled and dev locations when the file exists.
-- `marrow.liveData` — opt in to read-only native dev-store reads for the Marrow Data Roots view and
-  advisory data-integrity checks. Leave disabled to prevent editor-triggered reads of local
+- `marrow.liveData` — opt in to read-only native dev-store reads for the Saved Resource Inspector
+  and advisory data-integrity checks. Leave disabled to prevent editor-triggered reads of local
   stored data.
 
 ## Known limitations
@@ -62,9 +62,9 @@ same way, in order:
 - The bundled binaries are **platform-specific**. Each release `.vsix` targets one platform
   (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`); install the one that
   matches your machine, or point `marrow.server.path` / `marrow.dap.path` at your own build.
-- The Marrow Data Roots view lists saved root names only. Child paths, stored values, and paging remain
-  blocked on catalog-bound typed data facts. A disabled, busy, or missing store is treated as
-  "unavailable" rather than reporting an error.
+- The Saved Resource Inspector is a committed-store view. It does not observe uncommitted writes or
+  live debuggee state; a disabled, busy, or missing store is treated as "unavailable" rather than
+  reporting an error.
 - Debugging is **statement-level** (not expression-level stepping).
 
 ## Development

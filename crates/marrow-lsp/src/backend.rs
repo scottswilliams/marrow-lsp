@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use marrow_lsp_core::data_explorer::{SavedRootsResult, saved_roots};
+use marrow_lsp_core::data_explorer::{
+    DataChildViewsResponse, DataChildrenError, DataChildrenRequest, DataKeyDto, DataPresenceDto,
+    DataReadRequest, DataReadResponse, SavedRootsResult, saved_roots,
+};
 use marrow_lsp_core::data_integrity::{DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
@@ -79,11 +82,64 @@ impl Backend {
         Ok(saved_roots(reader.as_ref(), program))
     }
 
+    /// `marrow/dataChildren`: a bounded page of saved-data children for the
+    /// committed-store inspector. Requires a fresh checked program and a
+    /// live-data reader; unavailable stores degrade to a typed empty response.
+    pub async fn data_children(
+        &self,
+        request: DataChildrenRequest,
+    ) -> jsonrpc::Result<DataChildViewsResponse> {
+        let state = self.state.lock().await;
+        let reader = self.reader(&state.workspace);
+        let Some(program) = state.workspace.fresh_program(&state.documents) else {
+            return Ok(unavailable_data_children());
+        };
+        let Some(reader) = reader else {
+            return Ok(unavailable_data_children());
+        };
+        Ok(match reader.data_child_views_page(program, request) {
+            marrow_lsp_core::store::Availability::Unavailable => unavailable_data_children(),
+            marrow_lsp_core::store::Availability::Available(Ok(result)) => DataChildViewsResponse {
+                available: true,
+                children: result.children,
+                truncated: result.truncated,
+                cursor: result.cursor,
+                error: None,
+            },
+            marrow_lsp_core::store::Availability::Available(Err(error)) => {
+                data_children_error(error)
+            }
+        })
+    }
+
+    /// `marrow/dataRead`: read and render one saved-data path for the
+    /// committed-store inspector.
+    pub async fn data_read(&self, request: DataReadRequest) -> jsonrpc::Result<DataReadResponse> {
+        let state = self.state.lock().await;
+        let reader = self.reader(&state.workspace);
+        let Some(program) = state.workspace.fresh_program(&state.documents) else {
+            return Ok(unavailable_data_read());
+        };
+        let Some(reader) = reader else {
+            return Ok(unavailable_data_read());
+        };
+        Ok(match reader.data_read(program, request) {
+            marrow_lsp_core::store::Availability::Unavailable => unavailable_data_read(),
+            marrow_lsp_core::store::Availability::Available(Ok(result)) => DataReadResponse {
+                available: true,
+                presence: result.presence,
+                value: result.value,
+                error: None,
+            },
+            marrow_lsp_core::store::Availability::Available(Err(error)) => data_read_error(error),
+        })
+    }
+
     /// `marrow/dataIntegrity`: the schema-change-impact advisory. A capped,
     /// on-demand scan of the project's saved data that flags every record the
     /// current schema can no longer account for. Reads through the same
-    /// `marrow.liveData`-gated reader as the Data Roots view, so it never opens the
-    /// store when live data is off, and it is invoked only on explicit request. A
+    /// `marrow.liveData`-gated reader as the saved-resource inspector, so it never
+    /// opens the store when live data is off, and it is invoked only on explicit request. A
     /// missing fresh checked program, a `None` reader (live data off, no project,
     /// or no native store), or an unreadable store answers `available: false`.
     pub async fn data_integrity(&self) -> jsonrpc::Result<DataIntegrityResult> {
@@ -158,6 +214,44 @@ impl Backend {
                 client.publish_diagnostics(url, diagnostics, None).await;
             }
         }
+    }
+}
+
+fn unavailable_data_children() -> DataChildViewsResponse {
+    DataChildViewsResponse {
+        available: false,
+        children: Vec::new(),
+        truncated: false,
+        cursor: None::<DataKeyDto>,
+        error: None,
+    }
+}
+
+fn data_children_error(error: DataChildrenError) -> DataChildViewsResponse {
+    DataChildViewsResponse {
+        available: true,
+        children: Vec::new(),
+        truncated: false,
+        cursor: None::<DataKeyDto>,
+        error: Some(error),
+    }
+}
+
+fn unavailable_data_read() -> DataReadResponse {
+    DataReadResponse {
+        available: false,
+        presence: DataPresenceDto::Absent,
+        value: None,
+        error: None,
+    }
+}
+
+fn data_read_error(error: DataChildrenError) -> DataReadResponse {
+    DataReadResponse {
+        available: true,
+        presence: DataPresenceDto::Absent,
+        value: None,
+        error: Some(error),
     }
 }
 

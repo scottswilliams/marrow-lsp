@@ -26,11 +26,13 @@ async fn main() {
     let stdin = ExitWatcher::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();
 
-    // The standard LSP methods come from the `LanguageServer` impl; the root-only
-    // Data Roots read and schema-change-impact advisory are registered as
-    // custom methods over the same service so one transport serves both.
+    // The standard LSP methods come from the `LanguageServer` impl; saved-data
+    // inspection and integrity checks are registered as custom methods over the
+    // same service so one transport serves both.
     let (service, socket) = LspService::build(Backend::new)
         .custom_method("marrow/savedRoots", Backend::saved_roots)
+        .custom_method("marrow/dataChildren", Backend::data_children)
+        .custom_method("marrow/dataRead", Backend::data_read)
         .custom_method("marrow/dataIntegrity", Backend::data_integrity)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;

@@ -200,14 +200,14 @@ fn data_tools_refuse_without_the_opt_in() {
     assert_eq!(structured["contract"]["status"], "presentation-only");
     assert_eq!(
         structured["contract"]["description"],
-        "root-only data helper"
+        "saved-root listing helper"
     );
     assert!(
         response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .starts_with("root-only data helper (presentation-only: "),
-        "summary must name the root-only contract, got {response}"
+            .starts_with("saved-root listing helper (presentation-only: "),
+        "summary must name the saved-root contract, got {response}"
     );
 
     send(

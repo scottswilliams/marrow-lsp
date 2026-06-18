@@ -170,8 +170,8 @@ fn qualifier_before(source: &str, tokens: &[Token], colon_index: usize) -> Optio
 }
 
 /// Whether the `.` at `dot_index` lies on a saved path (`^root...`). Until
-/// Marrow exposes query-native saved-place completion facts, these positions
-/// return no candidates instead of falling back to bare lexical suggestions.
+/// Marrow exposes typed saved-place completion facts, these positions return no
+/// candidates instead of falling back to bare lexical suggestions.
 fn is_saved_path_dot(tokens: &[Token], dot_index: usize) -> bool {
     let mut cursor = dot_index;
 

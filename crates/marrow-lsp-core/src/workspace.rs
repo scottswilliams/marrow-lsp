@@ -8,7 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
-use marrow_check::{AnalysisIdentity, ProjectSources, analyze_project, build_binding_index};
+use marrow_check::{
+    AnalysisIdentity, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
+    read_accepted_catalog_artifact,
+};
 use marrow_project::{ProjectConfig, parse_config, test_module_file};
 
 pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
@@ -49,6 +52,8 @@ pub enum WorkspaceError {
     NoProject,
     /// A `marrow.json` was found but could not be parsed.
     Config(marrow_project::ConfigError),
+    /// The accepted catalog artifact could not be read.
+    AcceptedCatalog(ProjectIoError),
     /// The project's source roots could not be walked.
     Discover(marrow_project::DiscoverError),
 }
@@ -58,6 +63,7 @@ impl std::fmt::Display for WorkspaceError {
         match self {
             Self::NoProject => write!(f, "no marrow.json found for the file"),
             Self::Config(error) => write!(f, "{error}"),
+            Self::AcceptedCatalog(error) => write!(f, "accepted catalog: {}", error.message()),
             Self::Discover(error) => write!(f, "{error}"),
         }
     }
@@ -220,7 +226,9 @@ impl Workspace {
 
         let latest_open_analysis_paths = open_analysis_paths(project, documents);
         let sources = overlay(&project.root, documents);
-        let snapshot = analyze_project(&project.root, &project.config, &sources, None)
+        let accepted = read_accepted_catalog_artifact(&project.root)
+            .map_err(WorkspaceError::AcceptedCatalog)?;
+        let snapshot = analyze_project(&project.root, &project.config, &sources, accepted.as_ref())
             .map_err(WorkspaceError::Discover)?;
         let binding_index_key = BindingIndexKey::new(project, &snapshot);
 

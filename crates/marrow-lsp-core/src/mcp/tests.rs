@@ -655,13 +655,11 @@ fn data_tools_refuse_when_not_enabled() {
     assert_contract(
         &roots,
         "presentation-only",
-        "root-only data helper",
+        "saved-root listing helper",
         &[
             "catalog-bound saved-place identity",
-            "typed children",
-            "cursor/page facts",
             "snapshot/store generation",
-            "stable data DTOs",
+            "stable saved-data DTOs",
         ],
     );
     let integrity = data_integrity(&file, false);
@@ -681,7 +679,7 @@ fn data_tools_refuse_when_not_enabled() {
     let children = data_children(
         Path::new("/nope/project/src/main.mw"),
         crate::data_explorer::DataChildrenRequest {
-            segments: vec![crate::data_explorer::DataQuerySegmentDto::Root(
+            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
                 "counter".into(),
             )],
             limit: 1,
@@ -708,7 +706,7 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
     let result = data_children(
         &file,
         crate::data_explorer::DataChildrenRequest {
-            segments: vec![crate::data_explorer::DataQuerySegmentDto::Root(
+            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
                 "counter".into(),
             )],
             limit: 2,
@@ -743,15 +741,15 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
 }
 
 #[test]
-fn data_children_blocks_member_expansion_paths() {
+fn data_children_returns_empty_page_for_absent_members() {
     let (_dir, file) = native_counter_project(1..=1);
 
     let result = data_children(
         &file,
         crate::data_explorer::DataChildrenRequest {
             segments: vec![
-                crate::data_explorer::DataQuerySegmentDto::Root("counter".into()),
-                crate::data_explorer::DataQuerySegmentDto::Key(
+                crate::data_explorer::DataPathSegmentDto::Root("counter".into()),
+                crate::data_explorer::DataPathSegmentDto::Key(
                     crate::data_explorer::DataKeyDto::Int(1),
                 ),
             ],
@@ -761,13 +759,10 @@ fn data_children_blocks_member_expansion_paths() {
         true,
     );
 
-    assert_eq!(result["available"], false, "{result}");
-    assert!(
-        result["error"]
-            .as_str()
-            .is_some_and(|error| !error.is_empty()),
-        "member expansion should be blocked before any value reads: {result}"
-    );
+    assert_eq!(result["available"], true, "{result}");
+    assert_eq!(result["children"], json!([]), "{result}");
+    assert_eq!(result["truncated"], false, "{result}");
+    assert_eq!(result["cursor"], Json::Null, "{result}");
     assert_contract(
         &result,
         "presentation-only",
@@ -780,13 +775,13 @@ fn data_children_blocks_member_expansion_paths() {
 }
 
 #[test]
-fn data_children_blocks_keyless_roots_before_member_scans() {
+fn data_children_returns_empty_page_for_absent_keyless_root() {
     let (_dir, file) = native_settings_project();
 
     let result = data_children(
         &file,
         crate::data_explorer::DataChildrenRequest {
-            segments: vec![crate::data_explorer::DataQuerySegmentDto::Root(
+            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
                 "settings".into(),
             )],
             limit: 1,
@@ -795,13 +790,10 @@ fn data_children_blocks_keyless_roots_before_member_scans() {
         true,
     );
 
-    assert_eq!(result["available"], false, "{result}");
-    assert!(
-        result["error"]
-            .as_str()
-            .is_some_and(|error| !error.is_empty()),
-        "keyless roots would require member scans and must stay blocked: {result}"
-    );
+    assert_eq!(result["available"], true, "{result}");
+    assert_eq!(result["children"], json!([]), "{result}");
+    assert_eq!(result["truncated"], false, "{result}");
+    assert_eq!(result["cursor"], Json::Null, "{result}");
     assert_contract(
         &result,
         "presentation-only",

@@ -208,7 +208,7 @@ check("package command is portable", () => {
 
 check("package contribution titles are bounded", () => {
   const refresh = packageJson.contributes.commands.find((command) => command.command === "marrow.refreshData");
-  assert.equal(refresh?.title, "Refresh Data Roots");
+  assert.equal(refresh?.title, "Refresh Saved Data");
 });
 
 check("README development docs are cross-platform honest", () => {
