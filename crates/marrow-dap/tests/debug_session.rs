@@ -842,6 +842,63 @@ fn malformed_variables_references_fail_the_request() {
 }
 
 #[test]
+fn malformed_variables_optional_arguments_fail_the_request() {
+    let (_dir, mut client) = stopped_fixture_client();
+
+    for arguments in [
+        json!({ "variablesReference": 1, "start": "0" }),
+        json!({ "variablesReference": 1, "start": -1 }),
+        json!({ "variablesReference": 1, "start": 1.0 }),
+        json!({ "variablesReference": 1, "count": "1" }),
+        json!({ "variablesReference": 1, "count": -1 }),
+        json!({ "variablesReference": 1, "count": 1.0 }),
+        json!({ "variablesReference": 2, "start": "0" }),
+    ] {
+        let request = client.request("variables", arguments);
+        let response = client.response_for(request);
+        assert_variables_envelope_error(&response, "dap.variables.pageInvalid", "invalid-params");
+    }
+
+    for arguments in [
+        json!({ "variablesReference": 1, "filter": "all" }),
+        json!({ "variablesReference": 1, "filter": 1 }),
+    ] {
+        let request = client.request("variables", arguments);
+        let response = client.response_for(request);
+        assert_variables_envelope_error(&response, "dap.variables.filterInvalid", "invalid-params");
+    }
+}
+
+#[test]
+fn variables_optional_null_and_paging_off_arguments_are_accepted() {
+    let (_dir, mut client) = stopped_fixture_client();
+    step_to_line(&mut client, 6);
+
+    let baseline = client.request("variables", json!({ "variablesReference": 1 }));
+    let baseline = client.response_for(baseline);
+    assert_eq!(baseline["success"], true, "{baseline}");
+    let baseline_variables = baseline["body"]["variables"].clone();
+    assert!(
+        !baseline_variables.as_array().unwrap().is_empty(),
+        "paging-off checks should compare against real local variables: {baseline}"
+    );
+
+    for arguments in [
+        json!({ "variablesReference": 1, "start": null, "count": null, "filter": null }),
+        json!({ "variablesReference": 1, "start": 1, "count": 1 }),
+        json!({ "variablesReference": 1, "filter": "named" }),
+    ] {
+        let request = client.request("variables", arguments);
+        let response = client.response_for(request);
+        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(
+            response["body"]["variables"], baseline_variables,
+            "{response}"
+        );
+    }
+}
+
+#[test]
 fn unknown_positive_variables_reference_stays_empty() {
     let (_dir, mut client) = stopped_fixture_client();
 

@@ -61,6 +61,8 @@ const HOVER_EVALUATE_BLOCKED: &str =
 const EVALUATE_EXPRESSION_INVALID: &str = "missing or invalid evaluate expression";
 const EVALUATE_CONTEXT_INVALID: &str = "invalid evaluate context";
 const VARIABLES_REFERENCE_INVALID: &str = "missing or invalid variablesReference";
+const VARIABLES_PAGE_INVALID: &str = "invalid variables paging arguments";
+const VARIABLES_FILTER_INVALID: &str = "invalid variables filter";
 const THREAD_ID_INVALID: &str = "missing or invalid threadId";
 const FRAME_ID_INVALID: &str = "missing or invalid frameId";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
@@ -109,6 +111,10 @@ const ERROR_HOVER_EVALUATE_BLOCKED: DapError =
     DapError::blocked("dap.hoverEvaluate.blocked", HOVER_EVALUATE_FACTS);
 const ERROR_VARIABLES_REFERENCE_INVALID: DapError =
     DapError::new("dap.variables.referenceInvalid", STATUS_INVALID_PARAMS);
+const ERROR_VARIABLES_PAGE_INVALID: DapError =
+    DapError::new("dap.variables.pageInvalid", STATUS_INVALID_PARAMS);
+const ERROR_VARIABLES_FILTER_INVALID: DapError =
+    DapError::new("dap.variables.filterInvalid", STATUS_INVALID_PARAMS);
 const ERROR_THREAD_ID_INVALID: DapError =
     DapError::new("dap.threadId.invalid", STATUS_INVALID_PARAMS);
 const ERROR_FRAME_ID_INVALID: DapError =
@@ -231,6 +237,12 @@ enum BreakpointSource {
 struct DapInputError {
     message: &'static str,
     contract: DapError,
+}
+
+struct VariablesInput {
+    reference: i64,
+    page: ChildPage,
+    filter: VariablesFilter,
 }
 
 struct EvaluateInput<'a> {
@@ -572,14 +584,14 @@ impl<W: Write> Session<W> {
 
     /// `variables`: list the children of a scope or an expandable local value.
     fn on_variables(&mut self, request: &Json, arguments: &Json) {
-        let reference = match parse_variables_reference(arguments) {
-            Ok(reference) => reference,
+        let input = match parse_variables_input(arguments, self.supports_variable_paging) {
+            Ok(input) => input,
             Err(error) => {
                 self.respond_error(request, error.message, error.contract);
                 return;
             }
         };
-        if reference == DURABLE_REF {
+        if input.reference == DURABLE_REF {
             self.respond_error(
                 request,
                 RAW_DATA_INSPECTION_BLOCKED,
@@ -587,14 +599,12 @@ impl<W: Write> Session<W> {
             );
             return;
         }
-        let page = child_page(arguments, self.supports_variable_paging);
-        let filter = variables_filter(arguments);
-        let variables = match reference {
-            LOCALS_REF => self.locals_variables(page, filter),
+        let variables = match input.reference {
+            LOCALS_REF => self.locals_variables(input.page, input.filter),
             other => {
                 let children = match self.expandables.get(&other) {
                     Some(Expandable::Local(value)) => {
-                        crate::variables::children(value, page, filter)
+                        crate::variables::children(value, input.page, input.filter)
                     }
                     None => Vec::new(),
                 };
@@ -929,27 +939,71 @@ fn debug_admin_presentation_hint() -> Json {
     })
 }
 
-fn child_page(arguments: &Json, supports_variable_paging: bool) -> ChildPage {
-    if !supports_variable_paging {
-        return ChildPage::default();
-    }
-    let start = arguments
-        .get("start")
-        .and_then(Json::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0);
-    let count = arguments
-        .get("count")
-        .and_then(Json::as_u64)
-        .and_then(|value| usize::try_from(value).ok());
-    ChildPage::requested(start, count)
+fn parse_variables_input(
+    arguments: &Json,
+    supports_variable_paging: bool,
+) -> Result<VariablesInput, DapInputError> {
+    let reference = parse_variables_reference(arguments)?;
+    let page = parse_child_page(arguments, supports_variable_paging)?;
+    let filter = parse_variables_filter(arguments)?;
+    Ok(VariablesInput {
+        reference,
+        page,
+        filter,
+    })
 }
 
-fn variables_filter(arguments: &Json) -> VariablesFilter {
-    match arguments.get("filter").and_then(Json::as_str) {
-        Some("named") => VariablesFilter::Named,
-        Some("indexed") => VariablesFilter::Indexed,
-        _ => VariablesFilter::All,
+fn parse_child_page(
+    arguments: &Json,
+    supports_variable_paging: bool,
+) -> Result<ChildPage, DapInputError> {
+    let start = optional_usize(arguments, "start")?;
+    let count = optional_usize(arguments, "count")?;
+    if !supports_variable_paging {
+        return Ok(ChildPage::default());
+    }
+    Ok(ChildPage::requested(start.unwrap_or(0), count))
+}
+
+fn optional_usize(arguments: &Json, key: &str) -> Result<Option<usize>, DapInputError> {
+    match arguments.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Number(number)) => {
+            let Some(value) = number.as_u64() else {
+                return Err(variables_page_invalid());
+            };
+            let Ok(value) = usize::try_from(value) else {
+                return Err(variables_page_invalid());
+            };
+            Ok(Some(value))
+        }
+        Some(_) => Err(variables_page_invalid()),
+    }
+}
+
+fn parse_variables_filter(arguments: &Json) -> Result<VariablesFilter, DapInputError> {
+    match arguments.get("filter") {
+        None | Some(Json::Null) => Ok(VariablesFilter::All),
+        Some(Json::String(value)) => match value.as_str() {
+            "named" => Ok(VariablesFilter::Named),
+            "indexed" => Ok(VariablesFilter::Indexed),
+            _ => Err(variables_filter_invalid()),
+        },
+        Some(_) => Err(variables_filter_invalid()),
+    }
+}
+
+fn variables_page_invalid() -> DapInputError {
+    DapInputError {
+        message: VARIABLES_PAGE_INVALID,
+        contract: ERROR_VARIABLES_PAGE_INVALID,
+    }
+}
+
+fn variables_filter_invalid() -> DapInputError {
+    DapInputError {
+        message: VARIABLES_FILTER_INVALID,
+        contract: ERROR_VARIABLES_FILTER_INVALID,
     }
 }
 
