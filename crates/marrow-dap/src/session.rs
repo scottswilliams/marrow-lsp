@@ -64,6 +64,10 @@ const ERROR_LAUNCH_PROJECT_INVALID_PARAMS: DapError =
     DapError::new("dap.launchProject.invalid", STATUS_INVALID_PARAMS);
 const ERROR_LAUNCH_ARGS_INVALID_TYPE: DapError =
     DapError::new("dap.launchArgs.invalidType", STATUS_INVALID_PARAMS);
+const ERROR_LAUNCH_ENTRY_INVALID_TYPE: DapError =
+    DapError::new("dap.launchEntry.invalidType", STATUS_INVALID_PARAMS);
+const ERROR_LAUNCH_STOP_ON_ENTRY_INVALID_TYPE: DapError =
+    DapError::new("dap.launchStopOnEntry.invalidType", STATUS_INVALID_PARAMS);
 const ERROR_LAUNCH_ARGS_BLOCKED: DapError =
     DapError::blocked("dap.launchArgs.blocked", LAUNCH_ARGS_FACTS);
 const ERROR_BREAKPOINT_UNVERIFIED: DapError =
@@ -360,19 +364,21 @@ impl<W: Write> Session<W> {
     /// `launch`: validate and stash the launch arguments. The run does not start
     /// until `configurationDone`.
     fn on_launch(&mut self, request: &Json, arguments: &Json) {
-        let Some(project) = arguments.get("project").and_then(Json::as_str) else {
-            self.respond_error(
-                request,
-                "launch needs a `project` directory",
-                ERROR_LAUNCH_PROJECT_INVALID_PARAMS,
-            );
-            return;
+        let project = match parse_project(arguments) {
+            Ok(project) => project,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
         };
         let project_dir = PathBuf::from(project);
-        let entry = arguments
-            .get("entry")
-            .and_then(Json::as_str)
-            .map(str::to_string);
+        let entry = match parse_entry(arguments) {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
+        };
         match validate_args(arguments.get("args")) {
             Ok(()) => {}
             Err(error) => {
@@ -380,13 +386,16 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        let stop_on_entry = arguments
-            .get("stopOnEntry")
-            .and_then(Json::as_bool)
-            .unwrap_or(false);
+        let stop_on_entry = match parse_stop_on_entry(arguments) {
+            Ok(stop_on_entry) => stop_on_entry,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
+        };
         // Prepare the project now so a bad project fails launch before the client
         // sends configurationDone. The run thread prepares again when it starts.
-        match crate::project::prepare(&project_dir, entry.as_deref()) {
+        match crate::project::prepare(&project_dir, entry) {
             Ok(_) => {
                 self.pending = Some(PendingLaunch {
                     project_dir,
@@ -988,6 +997,38 @@ fn breakpoint_block(point: &Json) -> BreakpointBlock {
         }
     }
     BreakpointBlock::StopPoint
+}
+
+fn parse_project(arguments: &Json) -> Result<&str, DapInputError> {
+    match arguments.get("project") {
+        Some(Json::String(project)) if !project.trim().is_empty() => Ok(project),
+        _ => Err(DapInputError {
+            message: "launch needs a non-empty `project` directory",
+            contract: ERROR_LAUNCH_PROJECT_INVALID_PARAMS,
+        }),
+    }
+}
+
+fn parse_entry(arguments: &Json) -> Result<Option<&str>, DapInputError> {
+    match arguments.get("entry") {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(entry)) => Ok(Some(entry)),
+        Some(_) => Err(DapInputError {
+            message: "`entry` must be a string when present",
+            contract: ERROR_LAUNCH_ENTRY_INVALID_TYPE,
+        }),
+    }
+}
+
+fn parse_stop_on_entry(arguments: &Json) -> Result<bool, DapInputError> {
+    match arguments.get("stopOnEntry") {
+        None | Some(Json::Null) => Ok(false),
+        Some(Json::Bool(stop_on_entry)) => Ok(*stop_on_entry),
+        Some(_) => Err(DapInputError {
+            message: "`stopOnEntry` must be a boolean",
+            contract: ERROR_LAUNCH_STOP_ON_ENTRY_INVALID_TYPE,
+        }),
+    }
 }
 
 /// Parse the optional launch `args` array. Non-empty values are blocked until

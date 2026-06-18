@@ -372,6 +372,14 @@ fn assert_evaluate_envelope_error(response: &Json, code: &str, status: &str) {
     );
 }
 
+fn assert_launch_success(response: &Json) {
+    assert_eq!(response["success"], true, "{response}");
+    assert!(
+        response["body"].get("marrowError").is_none(),
+        "successful launch must not expose a blocked Marrow contract: {response}"
+    );
+}
+
 #[test]
 fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
     let dir = tempfile::tempdir().unwrap();
@@ -801,6 +809,153 @@ fn launch_rejects_non_array_args_as_protocol_validation() {
 }
 
 #[test]
+fn launch_rejects_concrete_non_string_entry_as_protocol_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_blocked_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "entry": 42,
+        }),
+    );
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchEntry.invalidType",
+        "invalid-params",
+        None,
+    );
+}
+
+#[test]
+fn launch_treats_null_entry_as_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    write_blocked_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "entry": null,
+        }),
+    );
+    let response = client.response_for(launch);
+    assert_launch_success(&response);
+}
+
+#[test]
+fn launch_rejects_concrete_non_boolean_stop_on_entry_as_protocol_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_blocked_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": "yes",
+        }),
+    );
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchStopOnEntry.invalidType",
+        "invalid-params",
+        None,
+    );
+}
+
+#[test]
+fn launch_treats_null_stop_on_entry_as_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    write_blocked_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": null,
+        }),
+    );
+    let response = client.response_for(launch);
+    assert_launch_success(&response);
+}
+
+#[test]
+fn launch_rejects_blank_project_as_protocol_validation() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request("launch", json!({ "project": "   " }));
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchProject.invalid",
+        "invalid-params",
+        None,
+    );
+}
+
+#[test]
+fn malformed_launch_does_not_arm_configuration_done() {
+    let dir = tempfile::tempdir().unwrap();
+    write_blocked_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": 1,
+        }),
+    );
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchStopOnEntry.invalidType",
+        "invalid-params",
+        None,
+    );
+
+    let done = client.request("configurationDone", json!({}));
+    let rejected = client.response_for(done);
+    assert_response_marrow_error(&rejected, "dap.launch.notConfigured", "invalid-state", None);
+}
+
+#[test]
 fn launch_rejects_missing_project_config_with_typed_contract() {
     let dir = tempfile::tempdir().unwrap();
     let mut client = Client::spawn();
@@ -841,11 +996,7 @@ fn launch_accepts_configured_default_entry_with_isolated_writes() {
         }),
     );
     let response = client.response_for(launch);
-    assert_eq!(response["success"], true, "{response}");
-    assert!(
-        response["body"].get("marrowError").is_none(),
-        "successful launch must not expose a blocked Marrow contract: {response}"
-    );
+    assert_launch_success(&response);
 
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
