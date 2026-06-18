@@ -55,6 +55,8 @@ const BREAKPOINTS_INVALID: &str = "`breakpoints` must be an array";
 const BREAKPOINT_INVALID_LINE: &str = "missing or invalid breakpoint line";
 const HOVER_EVALUATE_BLOCKED: &str =
     "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
+const EVALUATE_EXPRESSION_INVALID: &str = "missing or invalid evaluate expression";
+const EVALUATE_CONTEXT_INVALID: &str = "invalid evaluate context";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
 const ERROR_UNSUPPORTED_REQUEST: DapError =
     DapError::new("dap.unsupportedRequest", STATUS_UNSUPPORTED_REQUEST);
@@ -89,6 +91,10 @@ const ERROR_NOT_RUNNING: DapError = DapError::new("dap.notRunning", STATUS_INVAL
 const ERROR_NOT_STOPPED: DapError = DapError::new("dap.notStopped", STATUS_INVALID_STATE);
 const ERROR_EVALUATE_BLOCKED: DapError =
     DapError::blocked("dap.evaluate.blocked", EXPRESSION_EVALUATE_FACTS);
+const ERROR_EVALUATE_EXPRESSION_INVALID: DapError =
+    DapError::new("dap.evaluate.expressionInvalid", STATUS_INVALID_PARAMS);
+const ERROR_EVALUATE_CONTEXT_INVALID: DapError =
+    DapError::new("dap.evaluate.contextInvalid", STATUS_INVALID_PARAMS);
 const ERROR_HOVER_EVALUATE_BLOCKED: DapError =
     DapError::blocked("dap.hoverEvaluate.blocked", HOVER_EVALUATE_FACTS);
 
@@ -209,6 +215,11 @@ enum BreakpointSource {
 struct DapInputError {
     message: &'static str,
     contract: DapError,
+}
+
+struct EvaluateInput<'a> {
+    expression: &'a str,
+    context: Option<&'a str>,
 }
 
 impl<W: Write> Session<W> {
@@ -663,7 +674,14 @@ impl<W: Write> Session<W> {
     /// `evaluate`: watch/REPL requests are blocked until Marrow exposes canonical
     /// expression and durable path facts.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
-        if arguments.get("context").and_then(Json::as_str) == Some("hover") {
+        let input = match parse_evaluate_input(arguments) {
+            Ok(input) => input,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
+        };
+        if input.context == Some("hover") {
             self.respond_error(
                 request,
                 HOVER_EVALUATE_BLOCKED,
@@ -672,12 +690,7 @@ impl<W: Write> Session<W> {
             return;
         }
 
-        let expression = arguments
-            .get("expression")
-            .and_then(Json::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if !expression.trim_start().starts_with('^') {
+        if !input.expression.trim_start().starts_with('^') {
             self.respond_error(request, EXPRESSION_EVALUATE_BLOCKED, ERROR_EVALUATE_BLOCKED);
             return;
         }
@@ -927,6 +940,26 @@ fn requested_breakpoints(arguments: &Json) -> Result<Vec<RequestedBreakpoint>, D
         });
     };
     Ok(points.iter().map(requested_breakpoint).collect())
+}
+
+fn parse_evaluate_input(arguments: &Json) -> Result<EvaluateInput<'_>, DapInputError> {
+    let Some(expression) = arguments.get("expression").and_then(Json::as_str) else {
+        return Err(DapInputError {
+            message: EVALUATE_EXPRESSION_INVALID,
+            contract: ERROR_EVALUATE_EXPRESSION_INVALID,
+        });
+    };
+    let context = match arguments.get("context") {
+        Some(context) => Some(context.as_str().ok_or(DapInputError {
+            message: EVALUATE_CONTEXT_INVALID,
+            contract: ERROR_EVALUATE_CONTEXT_INVALID,
+        })?),
+        None => None,
+    };
+    Ok(EvaluateInput {
+        expression,
+        context,
+    })
 }
 
 fn requested_breakpoint(point: &Json) -> RequestedBreakpoint {

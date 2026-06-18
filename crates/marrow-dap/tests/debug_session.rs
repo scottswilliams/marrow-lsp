@@ -363,6 +363,15 @@ fn assert_breakpoint_envelope_error(response: &Json, code: &str, status: &str) {
     );
 }
 
+fn assert_evaluate_envelope_error(response: &Json, code: &str, status: &str) {
+    assert_response_marrow_error(response, code, status, None);
+    assert!(
+        response["body"].get("result").is_none()
+            && response["body"].get("variablesReference").is_none(),
+        "failed evaluate responses should not fabricate an EvaluateResponse body: {response}"
+    );
+}
+
 #[test]
 fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
     let dir = tempfile::tempdir().unwrap();
@@ -638,6 +647,104 @@ fn non_object_breakpoints_stay_per_entry_invalid_contracts() {
     for breakpoint in breakpoints {
         assert_invalid_breakpoint_line(breakpoint);
     }
+}
+
+#[test]
+fn malformed_evaluate_expressions_fail_the_request() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    for arguments in [
+        json!({}),
+        json!({ "expression": 42 }),
+        json!({ "expression": null }),
+        json!({ "expression": { "value": "title" } }),
+        json!({ "context": "hover" }),
+        json!({ "context": "hover", "expression": 42 }),
+    ] {
+        let request = client.request("evaluate", arguments);
+        let response = client.response_for(request);
+        assert_evaluate_envelope_error(
+            &response,
+            "dap.evaluate.expressionInvalid",
+            "invalid-params",
+        );
+    }
+}
+
+#[test]
+fn malformed_evaluate_contexts_fail_the_request() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    for arguments in [
+        json!({ "expression": "title", "context": 7 }),
+        json!({ "expression": "^books(1).title", "context": null }),
+        json!({ "expression": "title", "context": { "kind": "watch" } }),
+    ] {
+        let request = client.request("evaluate", arguments);
+        let response = client.response_for(request);
+        assert_evaluate_envelope_error(&response, "dap.evaluate.contextInvalid", "invalid-params");
+    }
+}
+
+#[test]
+fn valid_evaluate_envelopes_keep_blocked_contracts() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let unknown_context = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "clipboard" }),
+    );
+    let unknown_context = client.response_for(unknown_context);
+    assert_blocked_response(
+        &unknown_context,
+        "dap.evaluate.blocked",
+        "canonical expression/evaluate facts",
+    );
+
+    let whitespace = client.request(
+        "evaluate",
+        json!({ "expression": "   ", "context": "watch" }),
+    );
+    let whitespace = client.response_for(whitespace);
+    assert_blocked_response(
+        &whitespace,
+        "dap.evaluate.blocked",
+        "canonical expression/evaluate facts",
+    );
+
+    let hover = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "hover" }),
+    );
+    let hover = client.response_for(hover);
+    assert_blocked_response(
+        &hover,
+        "dap.hoverEvaluate.blocked",
+        "canonical evaluate facts",
+    );
+
+    let durable = client.request(
+        "evaluate",
+        json!({ "expression": "^books(1).title", "context": "watch" }),
+    );
+    let durable = client.response_for(durable);
+    assert_blocked_response(
+        &durable,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
+    );
 }
 
 #[test]
