@@ -24,8 +24,7 @@ use serde_json::{Value as Json, json};
 
 use server::Policy;
 
-/// The JSON-RPC invalid-params error code, for a `tools/call` whose arguments do
-/// not parse.
+/// The JSON-RPC invalid-params error code, for malformed request parameters.
 const INVALID_PARAMS: i64 = -32602;
 /// The JSON-RPC method-not-found error code.
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -100,20 +99,49 @@ fn handle(message: &Json, policy: Policy) -> Option<Json> {
     // `cancelled` are the ones a client sends; any other notification is ignored.
     let id = id?;
 
-    let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     match method {
-        "initialize" => Some(ok(id, server::initialize_result())),
+        "initialize" => Some(with_params(id, message, method, |id, _| {
+            ok(id, server::initialize_result())
+        })),
         // A liveness check the client may send; an empty result is the pong.
-        "ping" => Some(ok(id, json!({}))),
-        "tools/list" => Some(ok(id, json!({ "tools": server::tools() }))),
-        "tools/call" => Some(handle_tools_call(id, &params, policy)),
+        "ping" => Some(with_params(id, message, method, |id, _| ok(id, json!({})))),
+        "tools/list" => Some(with_params(id, message, method, |id, _| {
+            ok(id, json!({ "tools": server::tools() }))
+        })),
+        "tools/call" => Some(with_params(id, message, method, |id, params| {
+            handle_tools_call(id, &params, policy)
+        })),
         // A clean shutdown handshake; reply so the client can proceed to exit.
-        "shutdown" => Some(ok(id, Json::Null)),
+        "shutdown" => Some(with_params(id, message, method, |id, _| ok(id, Json::Null))),
         other => Some(error(
             id,
             METHOD_NOT_FOUND,
             &format!("unknown method `{other}`"),
         )),
+    }
+}
+
+fn request_params(message: &Json) -> Option<Json> {
+    match message.get("params") {
+        None | Some(Json::Null) => Some(json!({})),
+        Some(value @ Json::Object(_)) => Some(value.clone()),
+        Some(_) => None,
+    }
+}
+
+fn with_params(
+    id: Json,
+    message: &Json,
+    method: &str,
+    ok_with_params: impl FnOnce(Json, Json) -> Json,
+) -> Json {
+    match request_params(message) {
+        Some(params) => ok_with_params(id, params),
+        None => error(
+            id,
+            INVALID_PARAMS,
+            &format!("{method} `params` must be an object"),
+        ),
     }
 }
 
@@ -123,9 +151,6 @@ fn handle(message: &Json, policy: Policy) -> Option<Json> {
 /// malformed request (no tool name, unknown tool, bad arguments) is a protocol
 /// error.
 fn handle_tools_call(id: Json, params: &Json, policy: Policy) -> Json {
-    if !(params.is_null() || params.is_object()) {
-        return error(id, INVALID_PARAMS, "tools/call `params` must be an object");
-    }
     let Some(name) = params.get("name").and_then(Json::as_str) else {
         return error(id, INVALID_PARAMS, "tools/call needs a tool `name`");
     };
@@ -714,6 +739,68 @@ mod tests {
     #[test]
     fn summarize_falls_back_to_ok_for_an_unknown_shape() {
         assert_eq!(summarize("mw_mystery", &json!({ "weird": 1 })), "ok");
+    }
+
+    #[test]
+    fn supported_methods_reject_concrete_non_object_params() {
+        let policy = Policy { allow_data: false };
+        let cases = [
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [] }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": "bad" }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": 1 }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "shutdown", "params": false }),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": [] }),
+        ];
+
+        for request in cases {
+            let replies = drive(&[request], policy);
+            assert_eq!(replies.len(), 1, "got {replies:?}");
+            assert!(
+                replies[0].get("result").is_none(),
+                "invalid params responses must not include a result: {replies:?}"
+            );
+            let error = &replies[0]["error"];
+            assert_eq!(error["code"], INVALID_PARAMS, "{replies:?}");
+            let message = error["message"].as_str().unwrap();
+            assert!(message.contains("`params`"), "{message}");
+        }
+    }
+
+    #[test]
+    fn request_params_null_absent_and_precedence_guards() {
+        let policy = Policy { allow_data: false };
+        let replies = drive(
+            &[
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+                json!({ "jsonrpc": "2.0", "id": 2, "method": "ping", "params": null }),
+                json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": null }),
+                json!({ "jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null }),
+                json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": null }),
+                json!({ "jsonrpc": "2.0", "id": 6, "method": "frobnicate", "params": [] }),
+                json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": [] }),
+            ],
+            policy,
+        );
+
+        assert_eq!(
+            replies.len(),
+            6,
+            "the malformed notification should draw no reply: {replies:?}"
+        );
+        assert_eq!(replies[0]["result"]["serverInfo"]["name"], "marrow-mcp");
+        assert_eq!(replies[1]["result"], json!({}));
+        assert!(replies[2]["result"]["tools"].is_array(), "{replies:?}");
+        assert_eq!(replies[3]["result"], Json::Null);
+
+        let tool_call_message = replies[4]["error"]["message"].as_str().unwrap();
+        assert_eq!(replies[4]["error"]["code"], INVALID_PARAMS);
+        assert!(tool_call_message.contains("`name`"), "{tool_call_message}");
+        assert!(
+            !tool_call_message.contains("`params`"),
+            "{tool_call_message}"
+        );
+
+        assert_eq!(replies[5]["error"]["code"], METHOD_NOT_FOUND);
     }
 
     #[test]

@@ -76,6 +76,7 @@ treated as upstream API requests until an LSP lane proves a more specific gap.
 | Live saved-data hover and live record counts | `deleted` | None | Removed until LSP carries source/store generation boundaries for saved-data reads and counts. |
 | LSP stdio transport | `ready` | Transport over `marrow-lsp-core` | Inherits the core feature statuses above. |
 | MCP initialize/tools transport | `ready` | Thin stdio adapter over `marrow-lsp-core` | Individual tools carry their own status. |
+| MCP request `params` envelope | `ready` | MCP stdio transport validation of supported request `params` containers | Supported methods accept absent, `null`, and object params, and reject concrete non-object params with `INVALID_PARAMS`. Unknown methods stay `METHOD_NOT_FOUND`; notifications without `id` draw no reply. No language semantics. |
 | MCP `mw_check` | `ready` | Marrow project/snippet diagnostics and diagnostic codes | No local checker semantics. |
 | MCP `mw_type_at` | `ready` | `marrow_check::type_at` | No local type inference. |
 | MCP `mw_complete` | `presentation-only` | Bounded transport envelope over the current editor completion helper | Needs typed Marrow completion DTOs and checker-owned context facts before it can be a production completion API. |
