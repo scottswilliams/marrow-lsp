@@ -300,6 +300,15 @@ fn assert_blocked_response(response: &Json, code: &str, blocked_on: &str) {
 }
 
 fn assert_breakpoint_marrow_contract(breakpoint: &Json, code: &str, blocked_on: &str) {
+    assert_breakpoint_contract(breakpoint, code, "blocked-on-marrow", Some(blocked_on));
+}
+
+fn assert_breakpoint_contract(
+    breakpoint: &Json,
+    code: &str,
+    status: &str,
+    blocked_on: Option<&str>,
+) {
     let contract = breakpoint["marrowContract"].as_object().unwrap_or_else(|| {
         panic!("advisory breakpoint should include marrowContract: {breakpoint}")
     });
@@ -310,13 +319,39 @@ fn assert_breakpoint_marrow_contract(breakpoint: &Json, code: &str, blocked_on: 
     );
     assert_eq!(
         contract.get("status").and_then(Json::as_str),
-        Some("blocked-on-marrow"),
-        "breakpoint should expose blocked status: {breakpoint}"
+        Some(status),
+        "breakpoint should expose stable status `{status}`: {breakpoint}"
     );
-    assert_eq!(
-        contract.get("blockedOn").and_then(Json::as_str),
-        Some(blocked_on),
-        "breakpoint should name `{blocked_on}`: {breakpoint}"
+    match blocked_on {
+        Some(missing_fact) => assert_eq!(
+            contract.get("blockedOn").and_then(Json::as_str),
+            Some(missing_fact),
+            "breakpoint should name `{missing_fact}`: {breakpoint}"
+        ),
+        None => assert!(
+            contract.get("blockedOn").is_none(),
+            "breakpoint should not name a Marrow blocker for protocol validation: {breakpoint}"
+        ),
+    }
+}
+
+fn assert_invalid_breakpoint_line(breakpoint: &Json) {
+    assert_eq!(breakpoint["verified"], false, "{breakpoint}");
+    assert!(
+        breakpoint.get("line").is_none(),
+        "invalid breakpoint line should not be fabricated or echoed: {breakpoint}"
+    );
+    assert!(
+        breakpoint.get("condition").is_none()
+            && breakpoint.get("hitCondition").is_none()
+            && breakpoint.get("logMessage").is_none(),
+        "invalid breakpoint response must not echo request fields: {breakpoint}"
+    );
+    assert_breakpoint_contract(
+        breakpoint,
+        "dap.breakpoint.invalidLine",
+        "invalid-params",
+        None,
     );
 }
 
@@ -371,6 +406,57 @@ fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
             "blocked breakpoint response must not echo or retain expression inputs: {breakpoint}"
         );
     }
+}
+
+#[test]
+fn malformed_breakpoints_return_ordered_invalid_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [
+                { "line": 6 },
+                { "condition": "title == \"Dune\"" },
+                { "line": "6" },
+                { "line": -1 },
+                { "line": 0 },
+                { "line": 0, "condition": "title == \"Dune\"" },
+                { "line": 4294967296u64 },
+                { "line": 3.0 },
+                { "line": 7, "condition": "title == \"Dune\"" },
+            ],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_eq!(response["success"], true, "{response}");
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 9, "{response}");
+
+    assert_eq!(breakpoints[0]["line"], 6, "{response}");
+    assert_breakpoint_marrow_contract(
+        &breakpoints[0],
+        "dap.breakpoint.unverified",
+        "canonical stop-point facts",
+    );
+
+    for breakpoint in &breakpoints[1..=7] {
+        assert_invalid_breakpoint_line(breakpoint);
+    }
+
+    assert_eq!(breakpoints[8]["line"], 7, "{response}");
+    assert_breakpoint_marrow_contract(
+        &breakpoints[8],
+        "dap.breakpoint.expressionBlocked",
+        "canonical stop-point and breakpoint expression facts",
+    );
 }
 
 #[test]

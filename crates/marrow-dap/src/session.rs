@@ -48,6 +48,7 @@ const LAUNCH_ARGS_BLOCKED: &str =
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
 const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP conditional/hit-condition/logpoint breakpoints need canonical stop-point and breakpoint expression facts from Marrow";
+const BREAKPOINT_INVALID_LINE: &str = "missing or invalid breakpoint line";
 const HOVER_EVALUATE_BLOCKED: &str =
     "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
@@ -65,6 +66,8 @@ const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
     "dap.breakpoint.expressionBlocked",
     BREAKPOINT_EXPRESSION_FACTS,
 );
+const ERROR_BREAKPOINT_INVALID_LINE: DapError =
+    DapError::new("dap.breakpoint.invalidLine", STATUS_INVALID_PARAMS);
 const ERROR_CONFIGURATION_NOT_READY: DapError =
     DapError::new("dap.launch.notConfigured", STATUS_INVALID_STATE);
 const ERROR_RUN_INVALID: DapError = DapError::new("dap.run.invalid", STATUS_RUNTIME_ERROR);
@@ -181,10 +184,9 @@ struct PendingLaunch {
     stop_on_entry: bool,
 }
 
-#[derive(Clone, Copy)]
-struct RequestedBreakpoint {
-    line: u32,
-    block: BreakpointBlock,
+enum RequestedBreakpoint {
+    Valid { line: u32, block: BreakpointBlock },
+    InvalidLine,
 }
 
 impl<W: Write> Session<W> {
@@ -374,16 +376,16 @@ impl<W: Write> Session<W> {
             .and_then(|source| source.get("path"))
             .and_then(Json::as_str)
             .is_some();
-        let requested: Vec<RequestedBreakpoint> = arguments
-            .get("breakpoints")
-            .and_then(Json::as_array)
-            .map(|points| points.iter().filter_map(requested_breakpoint).collect())
-            .unwrap_or_default();
-
         if !has_source_path {
             self.respond(request, true, json!({ "breakpoints": [] }));
             return;
         }
+
+        let requested: Vec<RequestedBreakpoint> = arguments
+            .get("breakpoints")
+            .and_then(Json::as_array)
+            .map(|points| points.iter().map(requested_breakpoint).collect())
+            .unwrap_or_default();
 
         let advisory = self.resolve_breakpoints(&requested);
         self.respond(request, true, json!({ "breakpoints": advisory }));
@@ -393,13 +395,22 @@ impl<W: Write> Session<W> {
     fn resolve_breakpoints(&self, requested: &[RequestedBreakpoint]) -> Vec<Json> {
         requested
             .iter()
-            .map(|breakpoint| {
-                json!({
-                    "verified": false,
-                    "line": breakpoint.line,
-                    "message": breakpoint.block.message(),
-                    "marrowContract": breakpoint.block.contract().metadata(),
-                })
+            .map(|breakpoint| match breakpoint {
+                RequestedBreakpoint::Valid { line, block } => {
+                    json!({
+                        "verified": false,
+                        "line": *line,
+                        "message": block.message(),
+                        "marrowContract": block.contract().metadata(),
+                    })
+                }
+                RequestedBreakpoint::InvalidLine => {
+                    json!({
+                        "verified": false,
+                        "message": BREAKPOINT_INVALID_LINE,
+                        "marrowContract": ERROR_BREAKPOINT_INVALID_LINE.metadata(),
+                    })
+                }
             })
             .collect()
     }
@@ -846,12 +857,19 @@ fn variables_filter(arguments: &Json) -> VariablesFilter {
     }
 }
 
-fn requested_breakpoint(point: &Json) -> Option<RequestedBreakpoint> {
-    let line = point.get("line").and_then(Json::as_u64)? as u32;
-    Some(RequestedBreakpoint {
+fn requested_breakpoint(point: &Json) -> RequestedBreakpoint {
+    let Some(line) = point
+        .get("line")
+        .and_then(Json::as_u64)
+        .and_then(|line| u32::try_from(line).ok())
+        .filter(|line| *line > 0)
+    else {
+        return RequestedBreakpoint::InvalidLine;
+    };
+    RequestedBreakpoint::Valid {
         line,
         block: breakpoint_block(point),
-    })
+    }
 }
 
 fn breakpoint_block(point: &Json) -> BreakpointBlock {
