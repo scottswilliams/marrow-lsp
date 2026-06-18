@@ -54,6 +54,13 @@ function installVscodeStub() {
 
 function makeClient() {
   const calls = [];
+  const rootPath = [{ kind: "root", value: "Root" }];
+  const bytesKeyPath = [
+    ...rootPath,
+    { kind: "key", value: { kind: "bytes", value: [10] } },
+  ];
+  const layerPath = [...rootPath, { kind: "layer", value: "history" }];
+
   return {
     calls,
     async sendRequest(method, params) {
@@ -63,9 +70,9 @@ function makeClient() {
         return { available: true, roots: ["Root"] };
       }
       if (method === "marrow/dataChildren") {
-        if (params.segments.length === 1) {
+        if (deepEqual(params.segments, rootPath) && params.cursor === null) {
           assert.deepEqual(params, {
-            segments: [{ kind: "root", value: "Root" }],
+            segments: rootPath,
             limit: 200,
             cursor: null,
           });
@@ -76,40 +83,94 @@ function makeClient() {
                 segment: { kind: "key", value: { kind: "bytes", value: [10] } },
                 label: "server-rendered-bytes-key",
               },
+              {
+                segment: { kind: "layer", value: "history" },
+                label: "history",
+              },
+            ],
+            truncated: true,
+            cursor: { kind: "int", value: 200 },
+          };
+        }
+        if (
+          deepEqual(params.segments, rootPath) &&
+          deepEqual(params.cursor, { kind: "int", value: 200 })
+        ) {
+          return {
+            available: true,
+            children: [
+              {
+                segment: { kind: "key", value: { kind: "string", value: "next" } },
+                label: "server-rendered-next-key",
+              },
+            ],
+            truncated: true,
+            cursor: null,
+          };
+        }
+        if (deepEqual(params.segments, bytesKeyPath)) {
+          return {
+            available: true,
+            children: [
+              {
+                segment: { kind: "field", value: "value" },
+                label: "value",
+              },
             ],
             truncated: false,
             cursor: null,
           };
         }
-        assert.deepEqual(params.segments, [
-          { kind: "root", value: "Root" },
-          { kind: "key", value: { kind: "bytes", value: [10] } },
-        ]);
-        return {
-          available: true,
-          children: [
-            {
-              segment: { kind: "field", value: "value" },
-              label: "value",
-            },
-          ],
-          truncated: false,
-          cursor: null,
-        };
+        if (deepEqual(params.segments, layerPath)) {
+          return {
+            available: true,
+            children: [
+              {
+                segment: { kind: "field", value: "entry" },
+                label: "entry",
+              },
+            ],
+            truncated: false,
+            cursor: null,
+          };
+        }
+        throw new Error(`unexpected dataChildren path ${JSON.stringify(params)}`);
       }
       if (method === "marrow/dataRead") {
-        assert.deepEqual(params, {
-          segments: [
-            { kind: "root", value: "Root" },
-            { kind: "key", value: { kind: "bytes", value: [10] } },
+        if (
+          deepEqual(params.segments, [
+            ...bytesKeyPath,
             { kind: "field", value: "value" },
-          ],
-        });
-        return { available: true, presence: "value_only", value: "42" };
+          ])
+        ) {
+          return { available: true, presence: "value_only", value: "42" };
+        }
+        if (deepEqual(params.segments, layerPath)) {
+          return { available: true, presence: "children_only" };
+        }
+        throw new Error(`unexpected dataRead path ${JSON.stringify(params)}`);
       }
       throw new Error(`unexpected request ${method}`);
     },
   };
+}
+
+function deepEqual(left, right) {
+  try {
+    assert.deepEqual(left, right);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasReadFor(calls, segments) {
+  return calls.some(
+    (call) =>
+      call.method === "marrow/dataRead" &&
+      call.params !== undefined &&
+      deepEqual(call.params.segments, segments),
+  );
 }
 
 try {
@@ -135,12 +196,54 @@ try {
 
   assert.deepEqual(roots[0], { kind: "root", label: "Root" });
   const keys = await provider.getChildren(roots[0]);
-  assert.equal(keys.length, 1);
+  assert.equal(keys.length, 3);
   assert.equal(keys[0].label, "server-rendered-bytes-key");
   assert.deepEqual(keys[0].segments, [
     { kind: "root", value: "Root" },
     { kind: "key", value: { kind: "bytes", value: [10] } },
   ]);
+  assert.deepEqual(keys[2], {
+    kind: "more",
+    label: "more children",
+    segments: [{ kind: "root", value: "Root" }],
+    cursor: { kind: "int", value: 200 },
+  });
+
+  const moreItem = provider.getTreeItem(keys[2]);
+  assert.equal(moreItem.collapsibleState, 1, "cursor-backed continuation should expand");
+
+  const nextKeys = await provider.getChildren(keys[2]);
+  assert.equal(nextKeys.length, 2);
+  assert.equal(nextKeys[0].label, "server-rendered-next-key");
+  assert.deepEqual(client.calls.at(-1), {
+    method: "marrow/dataChildren",
+    params: {
+      segments: [{ kind: "root", value: "Root" }],
+      limit: 200,
+      cursor: { kind: "int", value: 200 },
+    },
+  });
+  assert.deepEqual(nextKeys[1], {
+    kind: "truncated",
+    label: "additional children unavailable",
+  });
+  const terminalItem = provider.getTreeItem(nextKeys[1]);
+  assert.equal(terminalItem.collapsibleState, 0, "cursor-less truncation should not expand");
+
+  const layerPath = [
+    { kind: "root", value: "Root" },
+    { kind: "layer", value: "history" },
+  ];
+  const layerChildren = await provider.getChildren(keys[1]);
+  assert.deepEqual(layerChildren[0].segments, [
+    ...layerPath,
+    { kind: "field", value: "entry" },
+  ]);
+  assert.equal(
+    hasReadFor(client.calls, layerPath),
+    false,
+    "layer expansion should ask for children without probing the value endpoint",
+  );
 
   const fields = await provider.getChildren(keys[0]);
   assert.equal(fields.length, 1);

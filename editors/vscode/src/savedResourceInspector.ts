@@ -46,7 +46,12 @@ const REQUEST_DATA_CHILDREN = "marrow/dataChildren";
 const REQUEST_DATA_READ = "marrow/dataRead";
 const DATA_PAGE_LIMIT = 200;
 
-type SavedResourceNode = SavedRootNode | SavedSegmentNode | SavedValueNode | SavedPlaceholderNode;
+type SavedResourceNode =
+  | SavedRootNode
+  | SavedSegmentNode
+  | SavedValueNode
+  | SavedMoreNode
+  | SavedPlaceholderNode;
 
 interface SavedRootNode {
   readonly kind: "root";
@@ -64,13 +69,20 @@ interface SavedValueNode {
   readonly label: string;
 }
 
+interface SavedMoreNode {
+  readonly kind: "more";
+  readonly label: string;
+  readonly segments: DataPathSegment[];
+  readonly cursor: DataKey;
+}
+
 interface SavedPlaceholderNode {
-  readonly kind: "unavailable" | "blocked" | "absent" | "more";
+  readonly kind: "unavailable" | "blocked" | "absent" | "truncated";
   readonly label: string;
 }
 
 function canExpand(node: SavedResourceNode): boolean {
-  return node.kind === "root" || node.kind === "segment";
+  return node.kind === "root" || node.kind === "segment" || node.kind === "more";
 }
 
 export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResourceNode> {
@@ -110,6 +122,9 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       if (node.kind === "segment") {
         return this.getSegmentChildren(node);
       }
+      if (node.kind === "more") {
+        return this.getDataChildren(node.segments, node.cursor);
+      }
       return [];
     }
     const client = this.client;
@@ -128,7 +143,10 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     return result.roots.map((root): SavedRootNode => ({ kind: "root", label: root }));
   }
 
-  private async getDataChildren(segments: DataPathSegment[]): Promise<SavedResourceNode[]> {
+  private async getDataChildren(
+    segments: DataPathSegment[],
+    cursor: DataKey | null = null,
+  ): Promise<SavedResourceNode[]> {
     const client = this.client;
     if (client === undefined) {
       return [];
@@ -138,7 +156,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       result = await client.sendRequest<DataChildrenResult>(REQUEST_DATA_CHILDREN, {
         segments,
         limit: DATA_PAGE_LIMIT,
-        cursor: null,
+        cursor,
       });
     } catch {
       return [unavailableNode()];
@@ -155,7 +173,16 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       segments: [...segments, child.segment],
     }));
     if (result.truncated) {
-      nodes.push({ kind: "more", label: "more results available" });
+      if (result.cursor !== null) {
+        nodes.push({
+          kind: "more",
+          label: "more children",
+          segments: [...segments],
+          cursor: result.cursor,
+        });
+      } else {
+        nodes.push({ kind: "truncated", label: "additional children unavailable" });
+      }
     }
     return nodes;
   }
@@ -203,5 +230,5 @@ function unavailableNode(): SavedPlaceholderNode {
 
 function readsValue(node: SavedSegmentNode): boolean {
   const last = node.segments[node.segments.length - 1];
-  return last?.kind === "field" || last?.kind === "layer";
+  return last?.kind === "field";
 }
