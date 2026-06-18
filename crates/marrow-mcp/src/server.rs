@@ -352,8 +352,8 @@ pub fn tools() -> Json {
 pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String> {
     match name {
         "mw_check" => {
-            let file = optional_path(arguments, "file");
-            let source = optional_str(arguments, "source");
+            let file = optional_path(arguments, "file")?;
+            let source = optional_str(arguments, "source")?;
             if file.is_none() && source.is_none() {
                 return Err("mw_check needs a `file` or a `source`".to_string());
             }
@@ -391,9 +391,9 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
         }
         "mw_run" => {
             let file = required_path(arguments, "file")?;
-            let entry = optional_str(arguments, "entry");
+            let entry = optional_str(arguments, "entry")?;
             let args = optional_array(arguments, "args")?;
-            let mode = match optional_str(arguments, "mode") {
+            let mode = match optional_str(arguments, "mode")? {
                 Some("test") => RunMode::Test,
                 Some("run") | None => RunMode::Run,
                 Some(other) => {
@@ -414,9 +414,13 @@ fn required_str<'a>(arguments: &'a Json, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing or non-string argument `{key}`"))
 }
 
-/// An optional string argument, or `None` when absent or not a string.
-fn optional_str<'a>(arguments: &'a Json, key: &str) -> Option<&'a str> {
-    arguments.get(key).and_then(Json::as_str)
+/// An optional string argument. `null` is absent; other concrete values must be strings.
+fn optional_str<'a>(arguments: &'a Json, key: &str) -> Result<Option<&'a str>, String> {
+    match arguments.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(value)) => Ok(Some(value)),
+        Some(_) => Err(format!("argument `{key}` must be a string when present")),
+    }
 }
 
 /// An optional array argument, empty when absent.
@@ -441,8 +445,8 @@ fn required_path(arguments: &Json, key: &str) -> Result<PathBuf, String> {
 }
 
 /// An optional path argument as a `PathBuf`.
-fn optional_path(arguments: &Json, key: &str) -> Option<PathBuf> {
-    optional_str(arguments, key).map(PathBuf::from)
+fn optional_path(arguments: &Json, key: &str) -> Result<Option<PathBuf>, String> {
+    Ok(optional_str(arguments, key)?.map(PathBuf::from))
 }
 
 /// A required non-negative integer argument as a `u32` (a line or character).
@@ -817,6 +821,57 @@ mod tests {
         assert!(
             error.contains("args"),
             "mw_run should report the non-array args argument: {error}"
+        );
+    }
+
+    #[test]
+    fn optional_string_arguments_reject_concrete_non_strings() {
+        let policy = Policy { allow_data: false };
+        let cases = [
+            (
+                "mw_check",
+                json!({ "file": 7, "source": "module a" }),
+                "file",
+            ),
+            (
+                "mw_check",
+                json!({ "file": "/x.mw", "source": 7 }),
+                "source",
+            ),
+            ("mw_run", json!({ "file": "/x.mw", "entry": 7 }), "entry"),
+            ("mw_run", json!({ "file": "/x.mw", "mode": 7 }), "mode"),
+        ];
+
+        for (tool, arguments, key) in cases {
+            let error = call(tool, &arguments, policy)
+                .expect_err(&format!("{tool} should reject non-string `{key}`"));
+            assert!(
+                error.contains(key),
+                "{tool} should report the malformed `{key}` argument: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_string_nulls_remain_absent() {
+        let policy = Policy { allow_data: false };
+
+        for arguments in [
+            json!({ "file": "/x.mw", "mode": null, "args": [1] }),
+            json!({ "file": "/x.mw", "entry": null, "args": [1] }),
+        ] {
+            let result = call("mw_run", &arguments, policy).unwrap();
+            assert_eq!(
+                result["diagnostics"][0]["code"], "mcp.run.args",
+                "null optional strings should be absent so run args still block before project loading: {result}"
+            );
+        }
+
+        let error = call("mw_check", &json!({ "source": null }), policy)
+            .expect_err("null source should be absent, not a source snippet");
+        assert!(
+            error.contains("file") && error.contains("source"),
+            "null source should leave mw_check with neither input: {error}"
         );
     }
 
