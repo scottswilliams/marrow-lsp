@@ -29,6 +29,9 @@ const DURABLE_REF: i64 = 2;
 const FIRST_DYNAMIC_REF: i64 = 1000;
 /// The single thread id the debugger exposes — the run is single-threaded.
 const THREAD_ID: i64 = 1;
+/// The single stack frame id exposed while stopped. It is a frame identity, not
+/// the thread identity, even while both singleton ids share the same value.
+const FRAME_ID: i64 = 1;
 const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
 const STATUS_INVALID_PARAMS: &str = "invalid-params";
 const STATUS_INVALID_STATE: &str = "invalid-state";
@@ -58,6 +61,8 @@ const HOVER_EVALUATE_BLOCKED: &str =
 const EVALUATE_EXPRESSION_INVALID: &str = "missing or invalid evaluate expression";
 const EVALUATE_CONTEXT_INVALID: &str = "invalid evaluate context";
 const VARIABLES_REFERENCE_INVALID: &str = "missing or invalid variablesReference";
+const THREAD_ID_INVALID: &str = "missing or invalid threadId";
+const FRAME_ID_INVALID: &str = "missing or invalid frameId";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
 const ERROR_UNSUPPORTED_REQUEST: DapError =
     DapError::new("dap.unsupportedRequest", STATUS_UNSUPPORTED_REQUEST);
@@ -104,6 +109,10 @@ const ERROR_HOVER_EVALUATE_BLOCKED: DapError =
     DapError::blocked("dap.hoverEvaluate.blocked", HOVER_EVALUATE_FACTS);
 const ERROR_VARIABLES_REFERENCE_INVALID: DapError =
     DapError::new("dap.variables.referenceInvalid", STATUS_INVALID_PARAMS);
+const ERROR_THREAD_ID_INVALID: DapError =
+    DapError::new("dap.threadId.invalid", STATUS_INVALID_PARAMS);
+const ERROR_FRAME_ID_INVALID: DapError =
+    DapError::new("dap.frameId.invalid", STATUS_INVALID_PARAMS);
 
 #[derive(Clone, Copy)]
 struct DapError {
@@ -325,14 +334,14 @@ impl<W: Write> Session<W> {
             "setBreakpoints" => self.on_set_breakpoints(request, &arguments),
             "configurationDone" => self.on_configuration_done(request),
             "threads" => self.on_threads(request),
-            "stackTrace" => self.on_stack_trace(request),
-            "scopes" => self.on_scopes(request),
+            "stackTrace" => self.on_stack_trace(request, &arguments),
+            "scopes" => self.on_scopes(request, &arguments),
             "variables" => self.on_variables(request, &arguments),
-            "continue" => self.on_continue(request),
-            "next" => self.on_step(request, StepKind::Over),
-            "stepIn" => self.on_step(request, StepKind::Into),
-            "stepOut" => self.on_step(request, StepKind::Out),
-            "pause" => self.on_pause(request),
+            "continue" => self.on_continue(request, &arguments),
+            "next" => self.on_step(request, &arguments, StepKind::Over),
+            "stepIn" => self.on_step(request, &arguments, StepKind::Into),
+            "stepOut" => self.on_step(request, &arguments, StepKind::Out),
+            "pause" => self.on_pause(request, &arguments),
             "evaluate" => self.on_evaluate(request, &arguments),
             "disconnect" | "terminate" => self.on_disconnect(request),
             other => self.respond_error(
@@ -510,7 +519,11 @@ impl<W: Write> Session<W> {
     /// `stackTrace`: the single current frame at the stop. A statement debugger
     /// reports the stopped statement's location; deeper callers are summarized by
     /// the activation depth rather than reconstructed.
-    fn on_stack_trace(&mut self, request: &Json) {
+    fn on_stack_trace(&mut self, request: &Json, arguments: &Json) {
+        if let Err(error) = parse_thread_id(arguments) {
+            self.respond_error(request, error.message, error.contract);
+            return;
+        }
         let Some(stop) = self.running.as_ref().and_then(|r| r.stopped_at.as_ref()) else {
             self.respond(
                 request,
@@ -521,7 +534,7 @@ impl<W: Write> Session<W> {
         };
         let name = format!("depth {}", stop.depth);
         let frame = json!({
-            "id": THREAD_ID,
+            "id": FRAME_ID,
             "name": name,
             "line": stop.line,
             "column": stop.column.max(1),
@@ -535,7 +548,20 @@ impl<W: Write> Session<W> {
 
     /// `scopes`: Locals are available. Durable data is blocked until Marrow
     /// exposes canonical tooling facts.
-    fn on_scopes(&mut self, request: &Json) {
+    fn on_scopes(&mut self, request: &Json, arguments: &Json) {
+        if let Err(error) = parse_frame_id(arguments) {
+            self.respond_error(request, error.message, error.contract);
+            return;
+        }
+        if self
+            .running
+            .as_ref()
+            .and_then(|running| running.stopped_at.as_ref())
+            .is_none()
+        {
+            self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
+            return;
+        }
         let scopes = vec![json!({
             "name": "Locals",
             "variablesReference": LOCALS_REF,
@@ -631,7 +657,11 @@ impl<W: Write> Session<W> {
     }
 
     /// `continue`: resume until the run finishes or another supported stop occurs.
-    fn on_continue(&mut self, request: &Json) {
+    fn on_continue(&mut self, request: &Json, arguments: &Json) {
+        if let Err(error) = parse_thread_id(arguments) {
+            self.respond_error(request, error.message, error.contract);
+            return;
+        }
         if self.running.is_none() {
             self.respond_error(request, "not running", ERROR_NOT_RUNNING);
             return;
@@ -646,7 +676,11 @@ impl<W: Write> Session<W> {
 
     /// `next` / `stepIn` / `stepOut`: resume with the matching depth-relative step
     /// target, computed from the depth at the current stop.
-    fn on_step(&mut self, request: &Json, kind: StepKind) {
+    fn on_step(&mut self, request: &Json, arguments: &Json, kind: StepKind) {
+        if let Err(error) = parse_thread_id(arguments) {
+            self.respond_error(request, error.message, error.contract);
+            return;
+        }
         let Some(depth) = self
             .running
             .as_ref()
@@ -673,7 +707,11 @@ impl<W: Write> Session<W> {
     /// statement (and reports `pause`). A client that is already stopped sees a
     /// one-statement advance; this is the honest behavior of a synchronous pump,
     /// which cannot interrupt a statement mid-flight.
-    fn on_pause(&mut self, request: &Json) {
+    fn on_pause(&mut self, request: &Json, arguments: &Json) {
+        if let Err(error) = parse_thread_id(arguments) {
+            self.respond_error(request, error.message, error.contract);
+            return;
+        }
         if self.running.is_none() {
             self.respond_error(request, "not running", ERROR_NOT_RUNNING);
             return;
@@ -927,6 +965,39 @@ fn parse_variables_reference(arguments: &Json) -> Result<i64, DapInputError> {
         });
     };
     Ok(reference)
+}
+
+fn parse_thread_id(arguments: &Json) -> Result<(), DapInputError> {
+    parse_singleton_id(
+        arguments,
+        "threadId",
+        THREAD_ID,
+        THREAD_ID_INVALID,
+        ERROR_THREAD_ID_INVALID,
+    )
+}
+
+fn parse_frame_id(arguments: &Json) -> Result<(), DapInputError> {
+    parse_singleton_id(
+        arguments,
+        "frameId",
+        FRAME_ID,
+        FRAME_ID_INVALID,
+        ERROR_FRAME_ID_INVALID,
+    )
+}
+
+fn parse_singleton_id(
+    arguments: &Json,
+    field: &'static str,
+    expected: i64,
+    message: &'static str,
+    contract: DapError,
+) -> Result<(), DapInputError> {
+    match arguments.get(field).and_then(Json::as_i64) {
+        Some(value) if value == expected => Ok(()),
+        _ => Err(DapInputError { message, contract }),
+    }
 }
 
 fn breakpoint_source(arguments: &Json) -> Result<BreakpointSource, DapInputError> {

@@ -131,14 +131,18 @@ fn write_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
-fn stopped_fixture_client() -> (tempfile::TempDir, Client) {
-    let dir = tempfile::tempdir().unwrap();
-    write_fixture(dir.path());
+fn initialized_client() -> Client {
     let mut client = Client::spawn();
-
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
     client.event("initialized");
+    client
+}
+
+fn stopped_fixture_client() -> (tempfile::TempDir, Client) {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path());
+    let mut client = initialized_client();
 
     let launch = client.request(
         "launch",
@@ -403,6 +407,31 @@ fn assert_variables_envelope_error(response: &Json, code: &str, status: &str) {
     assert!(
         response["body"].get("variables").is_none(),
         "failed variables responses should not fabricate a variables list: {response}"
+    );
+}
+
+fn assert_stack_trace_envelope_error(response: &Json, code: &str, status: &str) {
+    assert_response_marrow_error(response, code, status, None);
+    assert!(
+        response["body"].get("stackFrames").is_none()
+            && response["body"].get("totalFrames").is_none(),
+        "failed stackTrace responses should not fabricate a stackTrace body: {response}"
+    );
+}
+
+fn assert_scopes_envelope_error(response: &Json, code: &str, status: &str) {
+    assert_response_marrow_error(response, code, status, None);
+    assert!(
+        response["body"].get("scopes").is_none(),
+        "failed scopes responses should not fabricate a scopes list: {response}"
+    );
+}
+
+fn assert_resume_envelope_error(response: &Json, code: &str, status: &str) {
+    assert_response_marrow_error(response, code, status, None);
+    assert!(
+        response["body"].get("allThreadsContinued").is_none(),
+        "failed resume responses should not fabricate a continue body: {response}"
     );
 }
 
@@ -824,6 +853,83 @@ fn unknown_positive_variables_reference_stays_empty() {
         response["body"].get("marrowError").is_none(),
         "unknown positive variables references should remain stale-reference tolerant: {response}"
     );
+}
+
+#[test]
+fn malformed_stack_trace_thread_ids_fail_the_request() {
+    let mut client = initialized_client();
+    let cases = [
+        json!({}),
+        json!({ "threadId": null }),
+        json!({ "threadId": "1" }),
+        json!({ "threadId": 1.0 }),
+        json!({ "threadId": 0 }),
+        json!({ "threadId": -1 }),
+        json!({ "threadId": 2 }),
+    ];
+
+    for arguments in cases {
+        let request = client.request("stackTrace", arguments);
+        let response = client.response_for(request);
+        assert_stack_trace_envelope_error(&response, "dap.threadId.invalid", "invalid-params");
+    }
+}
+
+#[test]
+fn stack_trace_with_valid_thread_id_stays_empty_without_a_stopped_frame() {
+    let mut client = initialized_client();
+
+    let request = client.request("stackTrace", json!({ "threadId": 1 }));
+    let response = client.response_for(request);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["body"]["stackFrames"], json!([]), "{response}");
+    assert_eq!(response["body"]["totalFrames"], 0, "{response}");
+    assert!(
+        response["body"].get("marrowError").is_none(),
+        "successful empty stackTrace should not carry an error contract: {response}"
+    );
+}
+
+#[test]
+fn malformed_scopes_frame_ids_fail_the_request() {
+    let mut client = initialized_client();
+    let cases = [
+        json!({}),
+        json!({ "frameId": null }),
+        json!({ "frameId": "1" }),
+        json!({ "frameId": 1.0 }),
+        json!({ "frameId": 0 }),
+        json!({ "frameId": -1 }),
+        json!({ "frameId": 2 }),
+    ];
+
+    for arguments in cases {
+        let request = client.request("scopes", arguments);
+        let response = client.response_for(request);
+        assert_scopes_envelope_error(&response, "dap.frameId.invalid", "invalid-params");
+    }
+}
+
+#[test]
+fn scopes_require_a_current_stopped_frame() {
+    let mut client = initialized_client();
+
+    let request = client.request("scopes", json!({ "frameId": 1 }));
+    let response = client.response_for(request);
+    assert_scopes_envelope_error(&response, "dap.notStopped", "invalid-state");
+}
+
+#[test]
+fn malformed_resume_thread_ids_fail_before_state_checks() {
+    let mut client = initialized_client();
+
+    for command in ["continue", "next", "stepIn", "stepOut", "pause"] {
+        for arguments in [json!({}), json!({ "threadId": "1" })] {
+            let request = client.request(command, arguments);
+            let response = client.response_for(request);
+            assert_resume_envelope_error(&response, "dap.threadId.invalid", "invalid-params");
+        }
+    }
 }
 
 #[test]
