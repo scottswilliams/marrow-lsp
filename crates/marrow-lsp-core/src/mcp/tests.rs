@@ -2,7 +2,7 @@ use super::*;
 
 use marrow_check::test_support::{commit_then_check, root_place, store_id_of};
 use marrow_store::key::SavedKey;
-use marrow_store::tree::TreeStore;
+use marrow_store::tree::{StoreUid, TreeStore};
 
 fn assert_contract(result: &Json, status: &str, description: &str, missing_facts: &[&str]) {
     let contract = &result["contract"];
@@ -22,6 +22,55 @@ fn assert_contract(result: &Json, status: &str, description: &str, missing_facts
         .map(|fact| fact.as_str().expect("missing fact string"))
         .collect();
     assert_eq!(actual, missing_facts, "missing facts for {result}");
+}
+
+fn assert_store_snapshot(snapshot: &Json) {
+    assert_eq!(
+        snapshot["store_uid"], "store_00000000000000000000000000000001",
+        "snapshot should carry the fixture store UID: {snapshot}"
+    );
+    assert!(
+        snapshot["catalog_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "snapshot should carry a catalog digest: {snapshot}"
+    );
+    let commit = &snapshot["commit"];
+    assert!(
+        commit["commit_id"].is_u64(),
+        "snapshot should carry commit metadata: {snapshot}"
+    );
+    assert!(
+        commit["catalog_epoch"].is_u64(),
+        "snapshot commit should carry a catalog epoch: {snapshot}"
+    );
+    assert!(
+        commit["source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "snapshot commit should carry a source digest: {snapshot}"
+    );
+    assert!(
+        commit["layout_epoch"].is_u64(),
+        "snapshot commit should carry a layout epoch: {snapshot}"
+    );
+    assert!(
+        commit["engine_profile_digest"]
+            .as_str()
+            .is_some_and(|digest| {
+                digest.len() == 16
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            }),
+        "snapshot commit should carry canonical profile digest hex: {snapshot}"
+    );
+    assert!(
+        snapshot["checked_source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "snapshot should carry the checked program source digest: {snapshot}"
+    );
 }
 
 /// Write a clean two-resource project to a temp dir and return its root and a
@@ -128,6 +177,10 @@ store ^counter(id: int): Counter
     let data_dir = root.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
     let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    store
+        .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
+        .unwrap();
+    marrow_run::evolution::commit_catalog_baseline(&store, &program).unwrap();
     for id in ids {
         store
             .write_record_presence(&store_id, &[SavedKey::Int(id)])
@@ -658,7 +711,6 @@ fn data_tools_refuse_when_not_enabled() {
         "saved-root listing helper",
         &[
             "catalog-bound saved-place identity",
-            "snapshot/store generation",
             "stable saved-data DTOs",
         ],
     );
@@ -695,6 +747,25 @@ fn data_tools_refuse_when_not_enabled() {
         &[
             "catalog-bound saved-place identity",
             "snapshot/store generation",
+        ],
+    );
+}
+
+#[test]
+fn saved_roots_return_snapshot_metadata_when_enabled() {
+    let (_dir, file) = native_counter_project(1..=1);
+    let result = saved_roots(&file, true);
+
+    assert_eq!(result["available"], true, "{result}");
+    assert_eq!(result["roots"], json!(["counter"]), "{result}");
+    assert_store_snapshot(&result["store_snapshot"]);
+    assert_contract(
+        &result,
+        "presentation-only",
+        "saved-root listing helper",
+        &[
+            "catalog-bound saved-place identity",
+            "stable saved-data DTOs",
         ],
     );
 }

@@ -39,8 +39,11 @@ impl LiveStore {
         }
     }
 
-    pub fn roots(&self, program: &CheckedProgram) -> Availability<Vec<String>> {
-        self.with_tree_result(|store| tooling::data_roots_in_store(program, store))
+    pub fn roots(
+        &self,
+        program: &CheckedProgram,
+    ) -> Availability<tooling::StampedData<Vec<String>>> {
+        self.with_tree_result(|store| tooling::stamped_data_roots_in_store(program, store))
     }
 
     pub fn data_children_page(

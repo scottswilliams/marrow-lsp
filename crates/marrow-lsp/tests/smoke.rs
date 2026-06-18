@@ -122,6 +122,55 @@ pub fn f()
     (dir, file)
 }
 
+fn assert_store_snapshot(snapshot: &Value) {
+    assert_eq!(
+        snapshot["store_uid"], "store_00000000000000000000000000000001",
+        "snapshot should carry the native fixture store UID: {snapshot}"
+    );
+    assert!(
+        snapshot["catalog_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "snapshot should carry a catalog digest: {snapshot}"
+    );
+    let commit = &snapshot["commit"];
+    assert!(
+        commit["commit_id"].is_u64(),
+        "snapshot should carry commit metadata: {snapshot}"
+    );
+    assert!(
+        commit["catalog_epoch"].is_u64(),
+        "snapshot commit should carry a catalog epoch: {snapshot}"
+    );
+    assert!(
+        commit["source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "snapshot commit should carry a source digest: {snapshot}"
+    );
+    assert!(
+        commit["layout_epoch"].is_u64(),
+        "snapshot commit should carry a layout epoch: {snapshot}"
+    );
+    assert!(
+        commit["engine_profile_digest"]
+            .as_str()
+            .is_some_and(|digest| {
+                digest.len() == 16
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            }),
+        "snapshot commit should carry canonical profile digest hex: {snapshot}"
+    );
+    assert!(
+        snapshot["checked_source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "snapshot should carry the checked program source digest: {snapshot}"
+    );
+}
+
 struct Server(Child);
 
 impl Drop for Server {
@@ -1509,6 +1558,20 @@ fn custom_saved_data_inspector_requests_answer_over_the_transport() {
         &json!({
             "jsonrpc": "2.0",
             "id": 2,
+            "method": "marrow/savedRoots"
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["available"], true);
+    assert_eq!(response["result"]["roots"], json!(["counter"]));
+    assert_store_snapshot(&response["result"]["store_snapshot"]);
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
             "method": "marrow/dataChildren",
             "params": {
                 "segments": [{ "kind": "root", "value": "counter" }],
@@ -1517,7 +1580,7 @@ fn custom_saved_data_inspector_requests_answer_over_the_transport() {
             }
         }),
     );
-    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let response = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
     assert!(response.get("error").is_none(), "no error: {response:?}");
     assert_eq!(response["result"]["available"], true);
     assert_eq!(
@@ -1534,7 +1597,7 @@ fn custom_saved_data_inspector_requests_answer_over_the_transport() {
         &mut stdin,
         &json!({
             "jsonrpc": "2.0",
-            "id": 3,
+            "id": 4,
             "method": "marrow/dataRead",
             "params": {
                 "segments": [
@@ -1545,12 +1608,12 @@ fn custom_saved_data_inspector_requests_answer_over_the_transport() {
             }
         }),
     );
-    let response = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
+    let response = wait_for_response(&mut stdout, 4, Duration::from_secs(10));
     assert!(response.get("error").is_none(), "no error: {response:?}");
-    assert_eq!(
-        response["result"],
-        json!({ "available": true, "presence": "value_only", "value": "42" })
-    );
+    assert_eq!(response["result"]["available"], true);
+    assert_eq!(response["result"]["presence"], "value_only");
+    assert_eq!(response["result"]["value"], "42");
+    assert_store_snapshot(&response["result"]["store_snapshot"]);
 
     let _ = server.0.kill();
 }

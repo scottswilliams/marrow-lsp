@@ -197,14 +197,13 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Presentation-only saved-root listing helper: list saved root names from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, snapshot/store generation, and stable saved-data DTOs; not a stable typed production API.",
+            "description": "Presentation-only saved-root listing helper: list saved root names and Marrow store_snapshot metadata from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity and stable saved-data DTOs; not a stable typed production API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
                 "description": "saved-root listing helper",
                 "missingFacts": [
                     "catalog-bound saved-place identity",
-                    "snapshot/store generation",
                     "stable saved-data DTOs",
                 ],
                 "dataAccess": "gated",
@@ -580,7 +579,6 @@ mod tests {
             strings(&saved_roots["missingFacts"]),
             vec![
                 "catalog-bound saved-place identity",
-                "snapshot/store generation",
                 "stable saved-data DTOs"
             ]
         );

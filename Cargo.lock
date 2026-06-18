@@ -497,6 +497,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "marrow-json"
+version = "0.1.0"
+dependencies = [
+ "marrow-check",
+ "marrow-run",
+ "marrow-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "marrow-lsp"
 version = "0.1.0"
 dependencies = [
@@ -519,6 +530,7 @@ version = "0.1.0"
 dependencies = [
  "lsp-types",
  "marrow-check",
+ "marrow-json",
  "marrow-project",
  "marrow-run",
  "marrow-schema",

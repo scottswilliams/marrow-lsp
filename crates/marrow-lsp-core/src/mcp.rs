@@ -52,7 +52,6 @@ const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
 ];
 const SAVED_DATA_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
-    "snapshot/store generation",
     "stable saved-data DTOs",
 ];
 const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[

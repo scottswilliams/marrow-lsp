@@ -24,6 +24,7 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 marrow-syntax = { path = "../marrow/crates/marrow-syntax" }
 marrow-check = { path = "../marrow/crates/marrow-check" }
+marrow-json = { path = "../marrow/crates/marrow-json" }
 marrow-schema = { path = "../marrow/crates/marrow-schema" }
 marrow-store = { path = "../marrow/crates/marrow-store", features = ["native"] }
 marrow-run = { path = "../marrow/crates/marrow-run" }

@@ -4,6 +4,7 @@ import { LanguageClient } from "vscode-languageclient/node";
 interface SavedRootsResult {
   available: boolean;
   roots: string[];
+  store_snapshot: unknown | null;
 }
 
 type DataPathSegment =
@@ -38,6 +39,7 @@ interface DataReadResult {
   readonly available: boolean;
   readonly presence: "absent" | "value_only" | "children_only";
   readonly value?: string;
+  readonly store_snapshot: unknown | null;
   readonly error?: unknown;
 }
 

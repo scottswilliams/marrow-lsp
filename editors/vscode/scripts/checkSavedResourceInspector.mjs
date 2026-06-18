@@ -67,7 +67,7 @@ function makeClient() {
       calls.push({ method, params });
       if (method === "marrow/savedRoots") {
         assert.equal(params, undefined);
-        return { available: true, roots: ["Root"] };
+        return { available: true, roots: ["Root"], store_snapshot: null };
       }
       if (method === "marrow/dataChildren") {
         if (deepEqual(params.segments, rootPath) && params.cursor === null) {
@@ -143,10 +143,19 @@ function makeClient() {
             { kind: "field", value: "value" },
           ])
         ) {
-          return { available: true, presence: "value_only", value: "42" };
+          return {
+            available: true,
+            presence: "value_only",
+            value: "42",
+            store_snapshot: null,
+          };
         }
         if (deepEqual(params.segments, layerPath)) {
-          return { available: true, presence: "children_only" };
+          return {
+            available: true,
+            presence: "children_only",
+            store_snapshot: null,
+          };
         }
         throw new Error(`unexpected dataRead path ${JSON.stringify(params)}`);
       }

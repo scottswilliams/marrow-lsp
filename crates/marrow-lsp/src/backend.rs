@@ -77,6 +77,7 @@ impl Backend {
             return Ok(SavedRootsResult {
                 available: false,
                 roots: Vec::new(),
+                store_snapshot: None,
             });
         };
         Ok(saved_roots(reader.as_ref(), program))
@@ -129,6 +130,7 @@ impl Backend {
                 available: true,
                 presence: result.presence,
                 value: result.value,
+                store_snapshot: result.store_snapshot,
                 error: None,
             },
             marrow_lsp_core::store::Availability::Available(Err(error)) => data_read_error(error),
@@ -242,6 +244,7 @@ fn unavailable_data_read() -> DataReadResponse {
         available: false,
         presence: DataPresenceDto::Absent,
         value: None,
+        store_snapshot: None,
         error: None,
     }
 }
@@ -251,6 +254,7 @@ fn data_read_error(error: DataChildrenError) -> DataReadResponse {
         available: true,
         presence: DataPresenceDto::Absent,
         value: None,
+        store_snapshot: None,
         error: Some(error),
     }
 }

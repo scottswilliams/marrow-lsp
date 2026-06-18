@@ -9,6 +9,7 @@ use marrow_check::CheckedProgram;
 use marrow_check::tooling::{
     self, DataChild, DataPresence, DataQuerySegment, MemberFlavor, QueryError, ToolingError,
 };
+use marrow_json::DataSnapshotJson;
 use marrow_store::StoreError;
 use marrow_store::key::SavedKey;
 use marrow_store::tree::TreeStore;
@@ -21,23 +22,26 @@ pub const DATA_VALUE_PREVIEW_LIMIT: usize = 2048;
 /// `marrow/savedRoots` reply: the saved root names, plus whether the store could
 /// be read. When `available` is false the roots are empty and the tree view shows
 /// an unavailable state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SavedRootsResult {
     pub available: bool,
     pub roots: Vec<String>,
+    pub store_snapshot: Option<DataSnapshotJson>,
 }
 
 /// Handle `marrow/savedRoots`. A `None` reader (no native store configured) or an
 /// unavailable store both answer `available: false` with no roots.
 pub fn saved_roots(reader: Option<&LiveStore>, program: &CheckedProgram) -> SavedRootsResult {
     match reader.map(|reader| reader.roots(program)) {
-        Some(Availability::Available(roots)) => SavedRootsResult {
+        Some(Availability::Available(stamped)) => SavedRootsResult {
             available: true,
-            roots,
+            roots: stamped.data,
+            store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
         },
         _ => SavedRootsResult {
             available: false,
             roots: Vec::new(),
+            store_snapshot: None,
         },
     }
 }
@@ -114,18 +118,20 @@ pub struct DataReadRequest {
     pub segments: Vec<DataPathSegmentDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataReadResult {
     pub presence: DataPresenceDto,
     pub value: Option<String>,
+    pub store_snapshot: Option<DataSnapshotJson>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DataReadResponse {
     pub available: bool,
     pub presence: DataPresenceDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    pub store_snapshot: Option<DataSnapshotJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DataChildrenError>,
 }
@@ -275,16 +281,19 @@ pub fn data_read(
         return Ok(DataReadResult {
             presence: DataPresenceDto::Absent,
             value: None,
+            store_snapshot: None,
         });
     };
-    let read = tooling::read_data_query(store, &query)
+    let stamped = tooling::stamped_read_data_query(program, store, &query)
         .map_err(|error| DataChildrenError::Store(DataStoreErrorDto::from(error)))?;
-    let value = read
+    let value = stamped
+        .data
         .payload
         .map(|payload| render_value_preview(program, &query, payload.as_bytes()));
     Ok(DataReadResult {
-        presence: DataPresenceDto::from(read.presence),
+        presence: DataPresenceDto::from(stamped.data.presence),
         value,
+        store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
     })
 }
 
@@ -584,7 +593,8 @@ mod tests {
             saved_roots(None, &program),
             SavedRootsResult {
                 available: false,
-                roots: Vec::new()
+                roots: Vec::new(),
+                store_snapshot: None,
             }
         );
     }
@@ -840,6 +850,12 @@ mod tests {
             DataReadResult {
                 presence: DataPresenceDto::ValueOnly,
                 value: Some("42".into()),
+                store_snapshot: Some(marrow_json::DataSnapshotJson {
+                    store_uid: None,
+                    catalog_digest: None,
+                    commit: None,
+                    checked_source_digest: program.source_digest(),
+                }),
             }
         );
     }
@@ -865,6 +881,7 @@ mod tests {
 
         let value = read.value.expect("value preview");
         assert_eq!(read.presence, DataPresenceDto::ValueOnly);
+        assert!(read.store_snapshot.is_some());
         assert!(value.ends_with("..."), "{value}");
         assert!(value.len() <= DATA_VALUE_PREVIEW_LIMIT + 3, "{value}");
     }
