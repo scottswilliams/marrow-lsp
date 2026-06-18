@@ -48,6 +48,10 @@ const LAUNCH_ARGS_BLOCKED: &str =
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
 const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP conditional/hit-condition/logpoint breakpoints need canonical stop-point and breakpoint expression facts from Marrow";
+const BREAKPOINT_SOURCE_INVALID: &str = "missing or invalid breakpoint source";
+const BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: &str =
+    "DAP sourceReference breakpoint sources are not supported";
+const BREAKPOINTS_INVALID: &str = "`breakpoints` must be an array";
 const BREAKPOINT_INVALID_LINE: &str = "missing or invalid breakpoint line";
 const HOVER_EVALUATE_BLOCKED: &str =
     "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
@@ -66,6 +70,14 @@ const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
     "dap.breakpoint.expressionBlocked",
     BREAKPOINT_EXPRESSION_FACTS,
 );
+const ERROR_BREAKPOINT_SOURCE_INVALID: DapError =
+    DapError::new("dap.breakpoint.sourceInvalid", STATUS_INVALID_PARAMS);
+const ERROR_BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: DapError = DapError::new(
+    "dap.breakpoint.sourceReferenceUnsupported",
+    STATUS_UNSUPPORTED_REQUEST,
+);
+const ERROR_BREAKPOINTS_INVALID: DapError =
+    DapError::new("dap.breakpoint.breakpointsInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_INVALID_LINE: DapError =
     DapError::new("dap.breakpoint.invalidLine", STATUS_INVALID_PARAMS);
 const ERROR_CONFIGURATION_NOT_READY: DapError =
@@ -187,6 +199,16 @@ struct PendingLaunch {
 enum RequestedBreakpoint {
     Valid { line: u32, block: BreakpointBlock },
     InvalidLine,
+}
+
+enum BreakpointSource {
+    Path,
+    SourceReference,
+}
+
+struct DapInputError {
+    message: &'static str,
+    contract: DapError,
 }
 
 impl<W: Write> Session<W> {
@@ -371,21 +393,29 @@ impl<W: Write> Session<W> {
     /// `setBreakpoints`: return unverified advisory breakpoints. Requested lines
     /// are not armed until Marrow provides canonical stop-point facts.
     fn on_set_breakpoints(&mut self, request: &Json, arguments: &Json) {
-        let has_source_path = arguments
-            .get("source")
-            .and_then(|source| source.get("path"))
-            .and_then(Json::as_str)
-            .is_some();
-        if !has_source_path {
-            self.respond(request, true, json!({ "breakpoints": [] }));
-            return;
+        match breakpoint_source(arguments) {
+            Ok(BreakpointSource::Path) => {}
+            Ok(BreakpointSource::SourceReference) => {
+                self.respond_error(
+                    request,
+                    BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED,
+                    ERROR_BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED,
+                );
+                return;
+            }
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
         }
 
-        let requested: Vec<RequestedBreakpoint> = arguments
-            .get("breakpoints")
-            .and_then(Json::as_array)
-            .map(|points| points.iter().map(requested_breakpoint).collect())
-            .unwrap_or_default();
+        let requested = match requested_breakpoints(arguments) {
+            Ok(requested) => requested,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
+        };
 
         let advisory = self.resolve_breakpoints(&requested);
         self.respond(request, true, json!({ "breakpoints": advisory }));
@@ -857,6 +887,48 @@ fn variables_filter(arguments: &Json) -> VariablesFilter {
     }
 }
 
+fn breakpoint_source(arguments: &Json) -> Result<BreakpointSource, DapInputError> {
+    let Some(source) = arguments.get("source").and_then(Json::as_object) else {
+        return Err(DapInputError {
+            message: BREAKPOINT_SOURCE_INVALID,
+            contract: ERROR_BREAKPOINT_SOURCE_INVALID,
+        });
+    };
+    if source
+        .get("sourceReference")
+        .and_then(Json::as_u64)
+        .is_some_and(|reference| reference > 0)
+    {
+        return Ok(BreakpointSource::SourceReference);
+    }
+    if let Some(path) = source.get("path") {
+        return path
+            .as_str()
+            .map(|_| BreakpointSource::Path)
+            .ok_or(DapInputError {
+                message: BREAKPOINT_SOURCE_INVALID,
+                contract: ERROR_BREAKPOINT_SOURCE_INVALID,
+            });
+    }
+    Err(DapInputError {
+        message: BREAKPOINT_SOURCE_INVALID,
+        contract: ERROR_BREAKPOINT_SOURCE_INVALID,
+    })
+}
+
+fn requested_breakpoints(arguments: &Json) -> Result<Vec<RequestedBreakpoint>, DapInputError> {
+    let Some(points) = arguments.get("breakpoints") else {
+        return Ok(Vec::new());
+    };
+    let Some(points) = points.as_array() else {
+        return Err(DapInputError {
+            message: BREAKPOINTS_INVALID,
+            contract: ERROR_BREAKPOINTS_INVALID,
+        });
+    };
+    Ok(points.iter().map(requested_breakpoint).collect())
+}
+
 fn requested_breakpoint(point: &Json) -> RequestedBreakpoint {
     let Some(line) = point
         .get("line")
@@ -887,28 +959,23 @@ fn breakpoint_block(point: &Json) -> BreakpointBlock {
 
 /// Parse the optional launch `args` array. Non-empty values are blocked until
 /// Marrow exposes typed launch argument facts.
-fn validate_args(args: Option<&Json>) -> Result<(), LaunchArgsError> {
+fn validate_args(args: Option<&Json>) -> Result<(), DapInputError> {
     let Some(array) = args else {
         return Ok(());
     };
     let Some(items) = array.as_array() else {
-        return Err(LaunchArgsError {
+        return Err(DapInputError {
             message: "`args` must be an array",
             contract: ERROR_LAUNCH_ARGS_INVALID_TYPE,
         });
     };
     if !items.is_empty() {
-        return Err(LaunchArgsError {
+        return Err(DapInputError {
             message: LAUNCH_ARGS_BLOCKED,
             contract: ERROR_LAUNCH_ARGS_BLOCKED,
         });
     }
     Ok(())
-}
-
-struct LaunchArgsError {
-    message: &'static str,
-    contract: DapError,
 }
 
 #[cfg(test)]

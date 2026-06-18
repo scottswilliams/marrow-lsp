@@ -355,6 +355,14 @@ fn assert_invalid_breakpoint_line(breakpoint: &Json) {
     );
 }
 
+fn assert_breakpoint_envelope_error(response: &Json, code: &str, status: &str) {
+    assert_response_marrow_error(response, code, status, None);
+    assert!(
+        response["body"].get("breakpoints").is_none(),
+        "failed setBreakpoints responses should not fabricate a breakpoint list: {response}"
+    );
+}
+
 #[test]
 fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
     let dir = tempfile::tempdir().unwrap();
@@ -457,6 +465,179 @@ fn malformed_breakpoints_return_ordered_invalid_contracts() {
         "dap.breakpoint.expressionBlocked",
         "canonical stop-point and breakpoint expression facts",
     );
+}
+
+#[test]
+fn malformed_breakpoint_source_envelopes_fail_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    for source in [
+        Json::Null,
+        json!("not a source object"),
+        json!({}),
+        json!({ "sourceReference": 0 }),
+        json!({ "sourceReference": -1 }),
+        json!({ "sourceReference": 1.5 }),
+        json!({ "path": 7 }),
+    ] {
+        let set = client.request(
+            "setBreakpoints",
+            json!({
+                "source": source,
+                "breakpoints": [{ "line": 6 }],
+            }),
+        );
+        let response = client.response_for(set);
+        assert_breakpoint_envelope_error(
+            &response,
+            "dap.breakpoint.sourceInvalid",
+            "invalid-params",
+        );
+    }
+
+    let clear = client.request(
+        "setBreakpoints",
+        json!({ "source": { "path": file.display().to_string() } }),
+    );
+    let response = client.response_for(clear);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["body"]["breakpoints"], json!([]));
+}
+
+#[test]
+fn source_reference_breakpoint_sources_are_adapter_unsupported() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "sourceReference": 1 },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_breakpoint_envelope_error(
+        &response,
+        "dap.breakpoint.sourceReferenceUnsupported",
+        "unsupported-request",
+    );
+}
+
+#[test]
+fn positive_source_reference_takes_precedence_over_path() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": {
+                "path": "ignored.mw",
+                "sourceReference": 1,
+            },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_breakpoint_envelope_error(
+        &response,
+        "dap.breakpoint.sourceReferenceUnsupported",
+        "unsupported-request",
+    );
+}
+
+#[test]
+fn zero_source_reference_with_path_uses_the_path_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": {
+                "path": file.display().to_string(),
+                "sourceReference": 0,
+            },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["body"]["breakpoints"][0]["line"], 6, "{response}");
+    assert_breakpoint_marrow_contract(
+        &response["body"]["breakpoints"][0],
+        "dap.breakpoint.unverified",
+        "canonical stop-point facts",
+    );
+}
+
+#[test]
+fn non_array_breakpoints_fail_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": "line 6",
+        }),
+    );
+    let response = client.response_for(set);
+    assert_breakpoint_envelope_error(
+        &response,
+        "dap.breakpoint.breakpointsInvalid",
+        "invalid-params",
+    );
+}
+
+#[test]
+fn non_object_breakpoints_stay_per_entry_invalid_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [42, "line 6"],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_eq!(response["success"], true, "{response}");
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 2, "{response}");
+    for breakpoint in breakpoints {
+        assert_invalid_breakpoint_line(breakpoint);
+    }
 }
 
 #[test]
