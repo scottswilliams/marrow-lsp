@@ -277,11 +277,13 @@ pub fn data_read(
             value: None,
         });
     };
-    let (payload, presence) = tooling::read_data_query(store, &query)
+    let read = tooling::read_data_query(store, &query)
         .map_err(|error| DataChildrenError::Store(DataStoreErrorDto::from(error)))?;
-    let value = payload.map(|payload| render_value_preview(program, &query, payload.as_bytes()));
+    let value = read
+        .payload
+        .map(|payload| render_value_preview(program, &query, payload.as_bytes()));
     Ok(DataReadResult {
-        presence: DataPresenceDto::from(presence),
+        presence: DataPresenceDto::from(read.presence),
         value,
     })
 }
