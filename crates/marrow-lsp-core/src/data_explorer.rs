@@ -83,11 +83,12 @@ pub struct DataChildrenRequest {
     pub cursor: Option<DataKeyDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DataChildrenResult {
     pub children: Vec<DataChildDto>,
     pub truncated: bool,
     pub cursor: Option<DataKeyDto>,
+    pub store_snapshot: Option<DataSnapshotJson>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,19 +97,21 @@ pub struct DataChildViewDto {
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DataChildViewsResult {
     pub children: Vec<DataChildViewDto>,
     pub truncated: bool,
     pub cursor: Option<DataKeyDto>,
+    pub store_snapshot: Option<DataSnapshotJson>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DataChildViewsResponse {
     pub available: bool,
     pub children: Vec<DataChildViewDto>,
     pub truncated: bool,
     pub cursor: Option<DataKeyDto>,
+    pub store_snapshot: Option<DataSnapshotJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DataChildrenError>,
 }
@@ -241,14 +244,14 @@ pub fn data_children_page(
     request: DataChildrenRequest,
 ) -> Result<DataChildrenResult, DataChildrenError> {
     let (segments, limit, cursor) = data_children_parts(request);
-    let page = tooling::data_children(
+    let stamped = tooling::stamped_data_children(
         program,
         store,
         &segments,
         limit.min(DATA_CHILDREN_PAGE_LIMIT),
         cursor.as_ref(),
     )?;
-    Ok(DataChildrenResult::from(page))
+    Ok(DataChildrenResult::from(stamped))
 }
 
 pub fn data_child_views_page(
@@ -257,14 +260,14 @@ pub fn data_child_views_page(
     request: DataChildrenRequest,
 ) -> Result<DataChildViewsResult, DataChildrenError> {
     let (segments, limit, cursor) = data_children_parts(request);
-    let page = tooling::data_children(
+    let stamped = tooling::stamped_data_children(
         program,
         store,
         &segments,
         limit.min(DATA_CHILDREN_PAGE_LIMIT),
         cursor.as_ref(),
     )?;
-    Ok(DataChildViewsResult::from(page))
+    Ok(DataChildViewsResult::from(stamped))
 }
 
 pub fn data_read(
@@ -424,18 +427,21 @@ impl From<DataChild> for DataChildViewDto {
     }
 }
 
-impl From<tooling::DataChildrenPage> for DataChildrenResult {
-    fn from(page: tooling::DataChildrenPage) -> Self {
+impl From<tooling::StampedData<tooling::DataChildrenPage>> for DataChildrenResult {
+    fn from(stamped: tooling::StampedData<tooling::DataChildrenPage>) -> Self {
+        let page = stamped.data;
         Self {
             children: page.children.into_iter().map(DataChildDto::from).collect(),
             truncated: page.truncated,
             cursor: page.cursor.map(DataKeyDto::from),
+            store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
         }
     }
 }
 
-impl From<tooling::DataChildrenPage> for DataChildViewsResult {
-    fn from(page: tooling::DataChildrenPage) -> Self {
+impl From<tooling::StampedData<tooling::DataChildrenPage>> for DataChildViewsResult {
+    fn from(stamped: tooling::StampedData<tooling::DataChildrenPage>) -> Self {
+        let page = stamped.data;
         Self {
             children: page
                 .children
@@ -444,6 +450,7 @@ impl From<tooling::DataChildrenPage> for DataChildViewsResult {
                 .collect(),
             truncated: page.truncated,
             cursor: page.cursor.map(DataKeyDto::from),
+            store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
         }
     }
 }
@@ -627,6 +634,7 @@ mod tests {
             children: vec![DataChildDto::Key(DataKeyDto::Duration(i128::MIN))],
             truncated: true,
             cursor: Some(DataKeyDto::Instant(i128::MAX)),
+            store_snapshot: None,
         };
         let json = serde_json::json!({
             "children": [
@@ -643,12 +651,9 @@ mod tests {
                 "kind": "instant",
                 "value": i128::MAX.to_string(),
             },
+            "store_snapshot": null,
         });
         assert_eq!(serde_json::to_value(&result).unwrap(), json);
-        assert_eq!(
-            serde_json::from_value::<DataChildrenResult>(json).unwrap(),
-            result
-        );
     }
 
     #[test]
@@ -759,6 +764,12 @@ mod tests {
                 ],
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(2)),
+                store_snapshot: Some(marrow_json::DataSnapshotJson {
+                    store_uid: None,
+                    catalog_digest: None,
+                    commit: None,
+                    checked_source_digest: program.source_digest(),
+                }),
             }
         );
 
@@ -781,6 +792,12 @@ mod tests {
                 ],
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(4)),
+                store_snapshot: Some(marrow_json::DataSnapshotJson {
+                    store_uid: None,
+                    catalog_digest: None,
+                    commit: None,
+                    checked_source_digest: program.source_digest(),
+                }),
             }
         );
 
@@ -800,6 +817,12 @@ mod tests {
                 children: vec![DataChildDto::Key(DataKeyDto::Int(5))],
                 truncated: false,
                 cursor: None,
+                store_snapshot: Some(marrow_json::DataSnapshotJson {
+                    store_uid: None,
+                    catalog_digest: None,
+                    commit: None,
+                    checked_source_digest: program.source_digest(),
+                }),
             }
         );
     }
@@ -825,6 +848,15 @@ mod tests {
                 segment: DataPathSegmentDto::Key(DataKeyDto::Int(1)),
                 label: "(1)".into(),
             }]
+        );
+        assert_eq!(
+            page.store_snapshot,
+            Some(marrow_json::DataSnapshotJson {
+                store_uid: None,
+                catalog_digest: None,
+                commit: None,
+                checked_source_digest: program.source_digest(),
+            })
         );
     }
 

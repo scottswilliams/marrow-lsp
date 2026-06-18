@@ -32,6 +32,7 @@ interface DataChildrenResult {
   readonly children: DataChildView[];
   readonly truncated: boolean;
   readonly cursor: DataKey | null;
+  readonly store_snapshot: unknown | null;
   readonly error?: unknown;
 }
 

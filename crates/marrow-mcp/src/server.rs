@@ -223,14 +223,13 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_children",
-            "description": "Presentation-only bounded typed data helper: return one page of typed child segments under a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity and snapshot/store generation facts; not a stable production data API.",
+            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow store_snapshot metadata under a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
                 "description": "bounded typed data helper",
                 "missingFacts": [
                     "catalog-bound saved-place identity",
-                    "snapshot/store generation",
                 ],
                 "dataAccess": "gated",
                 "basis": "Marrow typed data children tooling",
@@ -596,10 +595,7 @@ mod tests {
         assert_eq!(data_children["description"], "bounded typed data helper");
         assert_eq!(
             strings(&data_children["missingFacts"]),
-            vec![
-                "catalog-bound saved-place identity",
-                "snapshot/store generation"
-            ]
+            vec!["catalog-bound saved-place identity"]
         );
         assert_eq!(data_children["dataAccess"], "gated");
         assert_eq!(data_children["boundedness"]["page"], "limit-clamped");

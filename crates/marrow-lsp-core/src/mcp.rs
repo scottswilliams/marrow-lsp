@@ -54,10 +54,7 @@ const SAVED_DATA_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
     "stable saved-data DTOs",
 ];
-const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
-    "catalog-bound saved-place identity",
-    "snapshot/store generation",
-];
+const DATA_CHILDREN_MISSING_FACTS: &[&str] = &["catalog-bound saved-place identity"];
 const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "catalog/store identity",
     "store generation",
@@ -448,6 +445,7 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
         "children": [],
         "truncated": false,
         "cursor": Json::Null,
+        "store_snapshot": Json::Null,
     });
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
@@ -483,6 +481,7 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
                 "children": [],
                 "truncated": false,
                 "cursor": Json::Null,
+                "store_snapshot": Json::Null,
                 "error": error,
             }),
             contract,

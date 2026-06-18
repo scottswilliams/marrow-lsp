@@ -1592,6 +1592,7 @@ fn custom_saved_data_inspector_requests_answer_over_the_transport() {
             }
         ])
     );
+    assert_store_snapshot(&response["result"]["store_snapshot"]);
 
     send(
         &mut stdin,

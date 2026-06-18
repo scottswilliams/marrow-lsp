@@ -105,6 +105,7 @@ impl Backend {
                 children: result.children,
                 truncated: result.truncated,
                 cursor: result.cursor,
+                store_snapshot: result.store_snapshot,
                 error: None,
             },
             marrow_lsp_core::store::Availability::Available(Err(error)) => {
@@ -225,6 +226,7 @@ fn unavailable_data_children() -> DataChildViewsResponse {
         children: Vec::new(),
         truncated: false,
         cursor: None::<DataKeyDto>,
+        store_snapshot: None,
         error: None,
     }
 }
@@ -235,6 +237,7 @@ fn data_children_error(error: DataChildrenError) -> DataChildViewsResponse {
         children: Vec::new(),
         truncated: false,
         cursor: None::<DataKeyDto>,
+        store_snapshot: None,
         error: Some(error),
     }
 }

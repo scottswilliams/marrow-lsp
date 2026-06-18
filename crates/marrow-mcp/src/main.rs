@@ -677,13 +677,10 @@ mod tests {
                     "contract": contract(
                         "presentation-only",
                         "bounded typed data helper",
-                        &[
-                            "catalog-bound saved-place identity",
-                            "snapshot/store generation",
-                        ],
+                        &["catalog-bound saved-place identity"],
                     ),
                 }),
-                "bounded typed data helper (presentation-only: catalog-bound saved-place identity +1): 2 children (truncated)",
+                "bounded typed data helper (presentation-only: catalog-bound saved-place identity): 2 children (truncated)",
             ),
             (
                 "mw_run",

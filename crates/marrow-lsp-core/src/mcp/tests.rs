@@ -73,6 +73,30 @@ fn assert_store_snapshot(snapshot: &Json) {
     );
 }
 
+fn assert_checked_snapshot(snapshot: &Json) {
+    assert_eq!(
+        snapshot["store_uid"],
+        Json::Null,
+        "snapshot should not fabricate a store UID: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["catalog_digest"],
+        Json::Null,
+        "snapshot should not fabricate a catalog digest: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["commit"],
+        Json::Null,
+        "snapshot should not fabricate commit metadata: {snapshot}"
+    );
+    assert!(
+        snapshot["checked_source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "snapshot should carry the checked program source digest: {snapshot}"
+    );
+}
+
 /// Write a clean two-resource project to a temp dir and return its root and a
 /// file inside it. The project declares a saved `Book` resource and a couple of
 /// functions an `mw_run`/`mw_type_at` test can target.
@@ -744,10 +768,7 @@ fn data_tools_refuse_when_not_enabled() {
         &children,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "catalog-bound saved-place identity",
-            "snapshot/store generation",
-        ],
+        &["catalog-bound saved-place identity"],
     );
 }
 
@@ -800,14 +821,12 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
         json!({ "kind": "int", "value": 2 }),
         "{result}"
     );
+    assert_store_snapshot(&result["store_snapshot"]);
     assert_contract(
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "catalog-bound saved-place identity",
-            "snapshot/store generation",
-        ],
+        &["catalog-bound saved-place identity"],
     );
 }
 
@@ -834,14 +853,12 @@ fn data_children_returns_empty_page_for_absent_members() {
     assert_eq!(result["children"], json!([]), "{result}");
     assert_eq!(result["truncated"], false, "{result}");
     assert_eq!(result["cursor"], Json::Null, "{result}");
+    assert_store_snapshot(&result["store_snapshot"]);
     assert_contract(
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "catalog-bound saved-place identity",
-            "snapshot/store generation",
-        ],
+        &["catalog-bound saved-place identity"],
     );
 }
 
@@ -865,13 +882,11 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
     assert_eq!(result["children"], json!([]), "{result}");
     assert_eq!(result["truncated"], false, "{result}");
     assert_eq!(result["cursor"], Json::Null, "{result}");
+    assert_checked_snapshot(&result["store_snapshot"]);
     assert_contract(
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "catalog-bound saved-place identity",
-            "snapshot/store generation",
-        ],
+        &["catalog-bound saved-place identity"],
     );
 }

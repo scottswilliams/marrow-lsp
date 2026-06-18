@@ -90,6 +90,7 @@ function makeClient() {
             ],
             truncated: true,
             cursor: { kind: "int", value: 200 },
+            store_snapshot: null,
           };
         }
         if (
@@ -106,6 +107,7 @@ function makeClient() {
             ],
             truncated: true,
             cursor: null,
+            store_snapshot: null,
           };
         }
         if (deepEqual(params.segments, bytesKeyPath)) {
@@ -119,6 +121,7 @@ function makeClient() {
             ],
             truncated: false,
             cursor: null,
+            store_snapshot: null,
           };
         }
         if (deepEqual(params.segments, layerPath)) {
@@ -132,6 +135,7 @@ function makeClient() {
             ],
             truncated: false,
             cursor: null,
+            store_snapshot: null,
           };
         }
         throw new Error(`unexpected dataChildren path ${JSON.stringify(params)}`);
