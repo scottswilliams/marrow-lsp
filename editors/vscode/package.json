@@ -283,6 +283,7 @@
     "check:copy": "node ./scripts/checkCopy.mjs",
     "check:bundleSmoke": "node ./scripts/checkBundleSmoke.mjs",
     "bundle": "node ./scripts/bundle.mjs",
+    "package:vsix": "vsce package --no-dependencies",
     "package": "node ./scripts/package.mjs"
   },
   "dependencies": {
@@ -291,6 +292,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "3.9.2",
     "esbuild": "0.28.1",
     "typescript": "^5.3.0"
   }

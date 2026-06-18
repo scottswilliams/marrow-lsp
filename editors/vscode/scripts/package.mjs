@@ -65,4 +65,4 @@ const target = currentVscodeTarget();
 
 run("npm", ["run", "compile:release"], env);
 run("npm", ["run", "bundle"], env);
-run("npx", ["@vscode/vsce", "package", "--no-dependencies", "--target", target], env);
+run("npm", ["run", "package:vsix", "--", "--target", target], env);

@@ -17,14 +17,16 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const extensionDir = dirname(scriptDir);
 const repoRoot = resolve(extensionDir, "..", "..");
 const bundlePath = join(scriptDir, "bundle.mjs");
+const packageScriptPath = join(scriptDir, "package.mjs");
 const packageJsonPath = join(extensionDir, "package.json");
+const packageLockPath = join(extensionDir, "package-lock.json");
 const readmePath = join(extensionDir, "README.md");
-const workflowPath = join(repoRoot, ".github", "workflows", "release.yml");
 
 const bundleScript = readFileSync(bundlePath, "utf8");
+const packageScript = readFileSync(packageScriptPath, "utf8");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+const packageLock = JSON.parse(readFileSync(packageLockPath, "utf8"));
 const readme = readFileSync(readmePath, "utf8");
-const releaseWorkflow = readFileSync(workflowPath, "utf8");
 const failures = [];
 
 function check(label, test) {
@@ -179,37 +181,29 @@ check("bundle script carries explicit cargo contract", () => {
 check("bundle rejects missing CARGO_TARGET_DIR before cargo", runBundleWithoutTargetDirRejectsBeforeCargo);
 check("bundle uses explicit target dir at runtime", runBundleWithStubCargoUsesExplicitTargetDir);
 
-check("release workflow has portable build commands", () => {
-  assert.doesNotMatch(
-    releaseWorkflow,
-    /^\s+(?:cross|cargo) build .+\\$/m,
-    "release build commands must not use POSIX backslash continuations",
-  );
+check("vsce packager is installed through npm ci", () => {
+  assert.equal(packageJson.scripts["package:vsix"], "vsce package --no-dependencies");
   assert.match(
-    releaseWorkflow,
-    /CARGO_TARGET_DIR:\s*\$\{\{\s*runner\.temp\s*\}\}\/[^\s]+/,
-    "release package job must set CARGO_TARGET_DIR under runner.temp",
+    packageJson.devDependencies["@vscode/vsce"],
+    /^\d+\.\d+\.\d+$/,
+    "VSIX packager must be an explicit, reviewed dev dependency",
   );
-  assert.match(
-    releaseWorkflow,
-    /run:\s*cross build --manifest-path \$\{\{\s*github\.workspace\s*\}\}\/Cargo\.toml --release --target \$\{\{\s*matrix\.rust_target\s*\}\} -p marrow-lsp -p marrow-dap/,
-    "release cross build must be a shell-portable command with --manifest-path",
+  assert.equal(
+    packageLock.packages[""].devDependencies["@vscode/vsce"],
+    packageJson.devDependencies["@vscode/vsce"],
   );
-  assert.match(
-    releaseWorkflow,
-    /run:\s*cargo build --manifest-path \$\{\{\s*github\.workspace\s*\}\}\/Cargo\.toml --release --target \$\{\{\s*matrix\.rust_target\s*\}\} -p marrow-lsp -p marrow-dap/,
-    "release cargo build must be a shell-portable command with --manifest-path",
-  );
-  assert.match(
-    releaseWorkflow,
-    /name:\s*Bundle binaries[\s\S]*env:[\s\S]*CARGO_BUILD_TARGET:\s*\$\{\{\s*matrix\.rust_target\s*\}\}[\s\S]*CARGO_TARGET_DIR:\s*\$\{\{\s*runner\.temp\s*\}\}\/[^\s]+[\s\S]*run:\s*npm run bundle/,
-    "release bundle step must pass the outside-repo CARGO_TARGET_DIR to npm run bundle",
-  );
+  assert.ok(packageLock.packages["node_modules/@vscode/vsce"], "package-lock must pin @vscode/vsce");
 });
 
 check("package command is portable", () => {
   assert.equal(packageJson.scripts.package, "node ./scripts/package.mjs");
   assert.doesNotMatch(packageJson.scripts.package, /\$\(/, "package script must not use POSIX substitution");
+  assert.match(
+    packageScript,
+    /run\("npm", \["run", "package:vsix", "--", "--target", target\], env\)/,
+    "package helper must use the locally installed VSIX packager",
+  );
+  assert.doesNotMatch(packageScript, /\bnpx\b/, "package helper must not invoke network-backed npx");
 });
 
 check("package contribution titles are bounded", () => {
