@@ -57,6 +57,7 @@ const HOVER_EVALUATE_BLOCKED: &str =
     "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
 const EVALUATE_EXPRESSION_INVALID: &str = "missing or invalid evaluate expression";
 const EVALUATE_CONTEXT_INVALID: &str = "invalid evaluate context";
+const VARIABLES_REFERENCE_INVALID: &str = "missing or invalid variablesReference";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
 const ERROR_UNSUPPORTED_REQUEST: DapError =
     DapError::new("dap.unsupportedRequest", STATUS_UNSUPPORTED_REQUEST);
@@ -101,6 +102,8 @@ const ERROR_EVALUATE_CONTEXT_INVALID: DapError =
     DapError::new("dap.evaluate.contextInvalid", STATUS_INVALID_PARAMS);
 const ERROR_HOVER_EVALUATE_BLOCKED: DapError =
     DapError::blocked("dap.hoverEvaluate.blocked", HOVER_EVALUATE_FACTS);
+const ERROR_VARIABLES_REFERENCE_INVALID: DapError =
+    DapError::new("dap.variables.referenceInvalid", STATUS_INVALID_PARAMS);
 
 #[derive(Clone, Copy)]
 struct DapError {
@@ -543,10 +546,13 @@ impl<W: Write> Session<W> {
 
     /// `variables`: list the children of a scope or an expandable local value.
     fn on_variables(&mut self, request: &Json, arguments: &Json) {
-        let reference = arguments
-            .get("variablesReference")
-            .and_then(Json::as_i64)
-            .unwrap_or(0);
+        let reference = match parse_variables_reference(arguments) {
+            Ok(reference) => reference,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
+        };
         if reference == DURABLE_REF {
             self.respond_error(
                 request,
@@ -907,6 +913,20 @@ fn variables_filter(arguments: &Json) -> VariablesFilter {
         Some("indexed") => VariablesFilter::Indexed,
         _ => VariablesFilter::All,
     }
+}
+
+fn parse_variables_reference(arguments: &Json) -> Result<i64, DapInputError> {
+    let Some(reference) = arguments
+        .get("variablesReference")
+        .and_then(Json::as_i64)
+        .filter(|reference| *reference > 0)
+    else {
+        return Err(DapInputError {
+            message: VARIABLES_REFERENCE_INVALID,
+            contract: ERROR_VARIABLES_REFERENCE_INVALID,
+        });
+    };
+    Ok(reference)
 }
 
 fn breakpoint_source(arguments: &Json) -> Result<BreakpointSource, DapInputError> {

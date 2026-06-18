@@ -131,6 +131,32 @@ fn write_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
+fn stopped_fixture_client() -> (tempfile::TempDir, Client) {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+
+    (dir, client)
+}
+
 /// Write a fixture whose entry would need a launch argument if that surface were
 /// available. Launch blocks before running it until Marrow exposes typed facts.
 fn write_blocked_arg_fixture(dir: &Path) {
@@ -369,6 +395,14 @@ fn assert_evaluate_envelope_error(response: &Json, code: &str, status: &str) {
         response["body"].get("result").is_none()
             && response["body"].get("variablesReference").is_none(),
         "failed evaluate responses should not fabricate an EvaluateResponse body: {response}"
+    );
+}
+
+fn assert_variables_envelope_error(response: &Json, code: &str, status: &str) {
+    assert_response_marrow_error(response, code, status, None);
+    assert!(
+        response["body"].get("variables").is_none(),
+        "failed variables responses should not fabricate a variables list: {response}"
     );
 }
 
@@ -752,6 +786,43 @@ fn valid_evaluate_envelopes_keep_blocked_contracts() {
         &durable,
         "dap.durableData.blocked",
         "typed durable watch/path facts",
+    );
+}
+
+#[test]
+fn malformed_variables_references_fail_the_request() {
+    let (_dir, mut client) = stopped_fixture_client();
+    let cases = [
+        json!({}),
+        json!({ "variablesReference": null }),
+        json!({ "variablesReference": "2" }),
+        json!({ "variablesReference": 2.0 }),
+        json!({ "variablesReference": 0 }),
+        json!({ "variablesReference": -1 }),
+    ];
+
+    for arguments in cases {
+        let request = client.request("variables", arguments);
+        let response = client.response_for(request);
+        assert_variables_envelope_error(
+            &response,
+            "dap.variables.referenceInvalid",
+            "invalid-params",
+        );
+    }
+}
+
+#[test]
+fn unknown_positive_variables_reference_stays_empty() {
+    let (_dir, mut client) = stopped_fixture_client();
+
+    let request = client.request("variables", json!({ "variablesReference": 99999 }));
+    let response = client.response_for(request);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["body"]["variables"], json!([]), "{response}");
+    assert!(
+        response["body"].get("marrowError").is_none(),
+        "unknown positive variables references should remain stale-reference tolerant: {response}"
     );
 }
 
