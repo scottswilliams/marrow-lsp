@@ -36,6 +36,7 @@ const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
 const LAUNCH_ARGS_FACTS: &str = "typed launch argument decoding facts";
 const STOP_POINT_FACTS: &str = "canonical stop-point facts";
+const BREAKPOINT_EXPRESSION_FACTS: &str = "canonical stop-point and breakpoint expression facts";
 const EXPRESSION_EVALUATE_FACTS: &str = "canonical expression/evaluate facts";
 const HOVER_EVALUATE_FACTS: &str = "canonical evaluate facts";
 const DURABLE_WATCH_PATH_FACTS: &str = "typed durable watch/path facts";
@@ -46,6 +47,7 @@ const LAUNCH_ARGS_BLOCKED: &str =
     "blocked-on-marrow: DAP launch args need typed launch argument decoding facts from Marrow";
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
+const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP conditional/hit-condition/logpoint breakpoints need canonical stop-point and breakpoint expression facts from Marrow";
 const HOVER_EVALUATE_BLOCKED: &str =
     "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
@@ -59,6 +61,10 @@ const ERROR_LAUNCH_ARGS_BLOCKED: DapError =
     DapError::blocked("dap.launchArgs.blocked", LAUNCH_ARGS_FACTS);
 const ERROR_BREAKPOINT_UNVERIFIED: DapError =
     DapError::blocked("dap.breakpoint.unverified", STOP_POINT_FACTS);
+const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
+    "dap.breakpoint.expressionBlocked",
+    BREAKPOINT_EXPRESSION_FACTS,
+);
 const ERROR_CONFIGURATION_NOT_READY: DapError =
     DapError::new("dap.launch.notConfigured", STATUS_INVALID_STATE);
 const ERROR_RUN_INVALID: DapError = DapError::new("dap.run.invalid", STATUS_RUNTIME_ERROR);
@@ -115,6 +121,28 @@ impl DapError {
     }
 }
 
+#[derive(Clone, Copy)]
+enum BreakpointBlock {
+    StopPoint,
+    Expression,
+}
+
+impl BreakpointBlock {
+    fn message(self) -> &'static str {
+        match self {
+            Self::StopPoint => BREAKPOINT_VERIFICATION_BLOCKED,
+            Self::Expression => BREAKPOINT_EXPRESSION_BLOCKED,
+        }
+    }
+
+    fn contract(self) -> DapError {
+        match self {
+            Self::StopPoint => ERROR_BREAKPOINT_UNVERIFIED,
+            Self::Expression => ERROR_BREAKPOINT_EXPRESSION_BLOCKED,
+        }
+    }
+}
+
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
 #[derive(Clone)]
 enum Expandable {
@@ -151,6 +179,12 @@ pub struct Session<W: Write> {
 struct PendingLaunch {
     project_dir: PathBuf,
     stop_on_entry: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RequestedBreakpoint {
+    line: u32,
+    block: BreakpointBlock,
 }
 
 impl<W: Write> Session<W> {
@@ -340,16 +374,10 @@ impl<W: Write> Session<W> {
             .and_then(|source| source.get("path"))
             .and_then(Json::as_str)
             .is_some();
-        let requested: Vec<u32> = arguments
+        let requested: Vec<RequestedBreakpoint> = arguments
             .get("breakpoints")
             .and_then(Json::as_array)
-            .map(|points| {
-                points
-                    .iter()
-                    .filter_map(|point| point.get("line").and_then(Json::as_u64))
-                    .map(|line| line as u32)
-                    .collect()
-            })
+            .map(|points| points.iter().filter_map(requested_breakpoint).collect())
             .unwrap_or_default();
 
         if !has_source_path {
@@ -362,15 +390,15 @@ impl<W: Write> Session<W> {
     }
 
     /// Return unverified breakpoint objects for the requested source lines.
-    fn resolve_breakpoints(&self, requested: &[u32]) -> Vec<Json> {
+    fn resolve_breakpoints(&self, requested: &[RequestedBreakpoint]) -> Vec<Json> {
         requested
             .iter()
-            .map(|line| {
+            .map(|breakpoint| {
                 json!({
                     "verified": false,
-                    "line": *line,
-                    "message": BREAKPOINT_VERIFICATION_BLOCKED,
-                    "marrowContract": ERROR_BREAKPOINT_UNVERIFIED.metadata(),
+                    "line": breakpoint.line,
+                    "message": breakpoint.block.message(),
+                    "marrowContract": breakpoint.block.contract().metadata(),
                 })
             })
             .collect()
@@ -816,6 +844,27 @@ fn variables_filter(arguments: &Json) -> VariablesFilter {
         Some("indexed") => VariablesFilter::Indexed,
         _ => VariablesFilter::All,
     }
+}
+
+fn requested_breakpoint(point: &Json) -> Option<RequestedBreakpoint> {
+    let line = point.get("line").and_then(Json::as_u64)? as u32;
+    Some(RequestedBreakpoint {
+        line,
+        block: breakpoint_block(point),
+    })
+}
+
+fn breakpoint_block(point: &Json) -> BreakpointBlock {
+    for field in ["condition", "hitCondition", "logMessage"] {
+        if point
+            .get(field)
+            .and_then(Json::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return BreakpointBlock::Expression;
+        }
+    }
+    BreakpointBlock::StopPoint
 }
 
 /// Parse the optional launch `args` array. Non-empty values are blocked until

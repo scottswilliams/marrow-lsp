@@ -321,6 +321,59 @@ fn assert_breakpoint_marrow_contract(breakpoint: &Json, code: &str, blocked_on: 
 }
 
 #[test]
+fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [
+                { "line": 6 },
+                { "line": 7, "condition": "title == \"Dune\"" },
+                { "line": 8, "hitCondition": "3" },
+                { "line": 9, "logMessage": "title changed" },
+            ],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_eq!(response["success"], true, "{response}");
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 4, "{response}");
+
+    assert_eq!(breakpoints[0]["verified"], false, "{response}");
+    assert_eq!(breakpoints[0]["line"], 6, "{response}");
+    assert_breakpoint_marrow_contract(
+        &breakpoints[0],
+        "dap.breakpoint.unverified",
+        "canonical stop-point facts",
+    );
+
+    for (index, line) in [(1, 7), (2, 8), (3, 9)] {
+        let breakpoint = &breakpoints[index];
+        assert_eq!(breakpoint["verified"], false, "{response}");
+        assert_eq!(breakpoint["line"], line, "{response}");
+        assert_breakpoint_marrow_contract(
+            breakpoint,
+            "dap.breakpoint.expressionBlocked",
+            "canonical stop-point and breakpoint expression facts",
+        );
+        assert!(
+            breakpoint.get("condition").is_none()
+                && breakpoint.get("hitCondition").is_none()
+                && breakpoint.get("logMessage").is_none(),
+            "blocked breakpoint response must not echo or retain expression inputs: {breakpoint}"
+        );
+    }
+}
+
+#[test]
 fn launch_blocks_non_empty_args_by_default_until_typed_facts_exist() {
     let dir = tempfile::tempdir().unwrap();
     write_blocked_arg_fixture(dir.path());
@@ -1029,6 +1082,16 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_initialize_capability()
         response["body"]["supportsEvaluateForHovers"], true,
         "hover evaluation must not be advertised until Marrow exposes canonical evaluate facts: {response}"
     );
+    for capability in [
+        "supportsConditionalBreakpoints",
+        "supportsHitConditionalBreakpoints",
+        "supportsLogPoints",
+    ] {
+        assert_ne!(
+            response["body"][capability], true,
+            "{capability} must not be advertised until Marrow exposes canonical breakpoint facts: {response}"
+        );
+    }
 }
 
 #[test]
