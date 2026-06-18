@@ -123,13 +123,23 @@ fn handle(message: &Json, policy: Policy) -> Option<Json> {
 /// malformed request (no tool name, unknown tool, bad arguments) is a protocol
 /// error.
 fn handle_tools_call(id: Json, params: &Json, policy: Policy) -> Json {
+    if !(params.is_null() || params.is_object()) {
+        return error(id, INVALID_PARAMS, "tools/call `params` must be an object");
+    }
     let Some(name) = params.get("name").and_then(Json::as_str) else {
         return error(id, INVALID_PARAMS, "tools/call needs a tool `name`");
     };
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let arguments = match params.get("arguments") {
+        None | Some(Json::Null) => json!({}),
+        Some(value @ Json::Object(_)) => value.clone(),
+        Some(_) => {
+            return error(
+                id,
+                INVALID_PARAMS,
+                "tools/call `arguments` must be an object when present",
+            );
+        }
+    };
     match server::call(name, &arguments, policy) {
         Ok(result) => ok(id, tool_result(name, &result)),
         Err(message) => error(id, INVALID_PARAMS, &message),
@@ -704,6 +714,83 @@ mod tests {
     #[test]
     fn summarize_falls_back_to_ok_for_an_unknown_shape() {
         assert_eq!(summarize("mw_mystery", &json!({ "weird": 1 })), "ok");
+    }
+
+    #[test]
+    fn tools_call_rejects_concrete_non_object_params_and_arguments() {
+        let policy = Policy { allow_data: false };
+        let request = |params: Json| json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+        let mw_check = |arguments: Json| json!({ "name": "mw_check", "arguments": arguments });
+        let cases = [
+            (request(json!([])), "`params`"),
+            (request(json!("mw_check")), "`params`"),
+            (request(json!(1)), "`params`"),
+            (request(json!(false)), "`params`"),
+            (request(mw_check(json!([]))), "`arguments`"),
+            (request(mw_check(json!("source"))), "`arguments`"),
+            (request(mw_check(json!(1))), "`arguments`"),
+            (request(mw_check(json!(false))), "`arguments`"),
+        ];
+
+        for (request, field) in cases {
+            let replies = drive(&[request], policy);
+            let error = &replies[0]["error"];
+            assert_eq!(error["code"], INVALID_PARAMS);
+            assert!(
+                error["message"].as_str().unwrap().contains(field),
+                "error should name malformed {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_call_null_params_and_arguments_remain_absent() {
+        let policy = Policy { allow_data: false };
+
+        let replies = drive(
+            &[json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": null })],
+            policy,
+        );
+        let message = replies[0]["error"]["message"].as_str().unwrap();
+        assert_eq!(replies[0]["error"]["code"], INVALID_PARAMS);
+        assert!(message.contains("`name`"), "{message}");
+        assert!(!message.contains("`params`"), "{message}");
+
+        for params in [
+            json!({ "name": "mw_check" }),
+            json!({ "name": "mw_check", "arguments": null }),
+        ] {
+            let replies = drive(
+                &[json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": params,
+                })],
+                policy,
+            );
+            let message = replies[0]["error"]["message"].as_str().unwrap();
+            assert_eq!(replies[0]["error"]["code"], INVALID_PARAMS);
+            assert!(
+                message.contains("`file`") && message.contains("`source`"),
+                "{message}"
+            );
+            assert!(!message.contains("`arguments`"), "{message}");
+        }
+
+        let replies = drive(
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "mw_check",
+                    "arguments": { "source": "module a" },
+                },
+            })],
+            policy,
+        );
+        assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
     }
 
     #[test]
