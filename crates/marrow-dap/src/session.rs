@@ -17,6 +17,7 @@ use serde_json::{Value as Json, json};
 use crate::debugger::{Control, Query, QueryResult, RunEvent, StopInfo};
 use crate::protocol::write_message;
 use crate::step::Resume;
+use crate::variables::{ChildCounts, ChildPage, VariablesFilter};
 
 /// The variable reference for the Locals scope at a stop. Fixed, since there is
 /// one Locals scope per frame.
@@ -138,6 +139,7 @@ pub struct Session<W: Write> {
     running: Option<Running>,
     /// Pending launch captured between `launch` and `configurationDone`.
     pending: Option<PendingLaunch>,
+    supports_variable_paging: bool,
     /// The dynamic reference registry for the current stop, cleared on resume.
     expandables: HashMap<i64, Expandable>,
     next_ref: i64,
@@ -158,6 +160,7 @@ impl<W: Write> Session<W> {
             seq: 0,
             running: None,
             pending: None,
+            supports_variable_paging: false,
             expandables: HashMap::new(),
             next_ref: FIRST_DYNAMIC_REF,
             done: false,
@@ -268,6 +271,11 @@ impl<W: Write> Session<W> {
     /// then announce readiness with the `initialized` event so the client sends
     /// breakpoints.
     fn on_initialize(&mut self, request: &Json) {
+        self.supports_variable_paging = request
+            .get("arguments")
+            .and_then(|arguments| arguments.get("supportsVariablePaging"))
+            .and_then(Json::as_bool)
+            .unwrap_or(false);
         self.respond(
             request,
             true,
@@ -458,48 +466,71 @@ impl<W: Write> Session<W> {
             );
             return;
         }
+        let page = child_page(arguments, self.supports_variable_paging);
+        let filter = variables_filter(arguments);
         let variables = match reference {
-            LOCALS_REF => self.locals_variables(),
-            other => match self.expandables.get(&other).cloned() {
-                Some(Expandable::Local(value)) => self.expand_local(value),
-                None => Vec::new(),
-            },
+            LOCALS_REF => self.locals_variables(page, filter),
+            other => {
+                let children = match self.expandables.get(&other) {
+                    Some(Expandable::Local(value)) => {
+                        crate::variables::children(value, page, filter)
+                    }
+                    None => Vec::new(),
+                };
+                self.child_variables(children)
+            }
         };
         self.respond(request, true, json!({ "variables": variables }));
     }
 
     /// The Locals scope contents: each local rendered, with a reference for any
     /// compound value the client can drill into.
-    fn locals_variables(&mut self) -> Vec<Json> {
-        let Some(QueryResult::Locals(snapshot)) = self.query(Query::Locals) else {
+    fn locals_variables(&mut self, page: ChildPage, filter: VariablesFilter) -> Vec<Json> {
+        let Some(QueryResult::Locals(snapshot)) = self.query(Query::Locals { page, filter }) else {
             return Vec::new();
         };
         snapshot
             .entries
             .into_iter()
             .map(|local| {
+                let counts = local
+                    .expand
+                    .as_ref()
+                    .and_then(crate::variables::child_counts);
                 let reference = local
                     .expand
                     .map(|value| self.alloc_ref(Expandable::Local(value)))
                     .unwrap_or(0);
-                variable_json(&local.name, &local.value, reference, LOCAL_VALUE_BLOCKER)
+                variable_json(
+                    &local.name,
+                    &local.value,
+                    reference,
+                    LOCAL_VALUE_BLOCKER,
+                    counts,
+                )
             })
             .collect()
     }
 
-    /// Expand a compound local value (a sequence, resource, or identity).
-    fn expand_local(&mut self, value: marrow_run::Value) -> Vec<Json> {
-        let Some(QueryResult::Children(children)) = self.query(Query::ExpandLocal(value)) else {
-            return Vec::new();
-        };
+    fn child_variables(&mut self, children: Vec<crate::variables::Child>) -> Vec<Json> {
         children
             .into_iter()
             .map(|child| {
+                let counts = child
+                    .expand
+                    .as_ref()
+                    .and_then(crate::variables::child_counts);
                 let reference = child
                     .expand
                     .map(|value| self.alloc_ref(Expandable::Local(value)))
                     .unwrap_or(0);
-                variable_json(&child.name, &child.value, reference, LOCAL_VALUE_BLOCKER)
+                variable_json(
+                    &child.name,
+                    &child.value,
+                    reference,
+                    LOCAL_VALUE_BLOCKER,
+                    counts,
+                )
             })
             .collect()
     }
@@ -724,14 +755,29 @@ enum StepKind {
 
 /// Build a DAP `Variable` object. A zero reference marks a leaf; a non-zero one
 /// lets the client expand it.
-fn variable_json(name: &str, value: &str, reference: i64, blocked_on: &str) -> Json {
-    json!({
+fn variable_json(
+    name: &str,
+    value: &str,
+    reference: i64,
+    blocked_on: &str,
+    counts: Option<ChildCounts>,
+) -> Json {
+    let mut variable = json!({
         "name": name,
         "value": value,
         "presentationHint": debug_admin_presentation_hint(),
         "marrowContract": debug_admin_contract(blocked_on),
         "variablesReference": reference,
-    })
+    });
+    if let Some(counts) = counts {
+        if let Some(named) = counts.named {
+            variable["namedVariables"] = json!(named);
+        }
+        if let Some(indexed) = counts.indexed {
+            variable["indexedVariables"] = json!(indexed);
+        }
+    }
+    variable
 }
 
 fn debug_admin_contract(blocked_on: &str) -> Json {
@@ -746,6 +792,30 @@ fn debug_admin_presentation_hint() -> Json {
         "kind": "data",
         "attributes": ["readOnly"],
     })
+}
+
+fn child_page(arguments: &Json, supports_variable_paging: bool) -> ChildPage {
+    if !supports_variable_paging {
+        return ChildPage::default();
+    }
+    let start = arguments
+        .get("start")
+        .and_then(Json::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let count = arguments
+        .get("count")
+        .and_then(Json::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    ChildPage::requested(start, count)
+}
+
+fn variables_filter(arguments: &Json) -> VariablesFilter {
+    match arguments.get("filter").and_then(Json::as_str) {
+        Some("named") => VariablesFilter::Named,
+        Some("indexed") => VariablesFilter::Indexed,
+        _ => VariablesFilter::All,
+    }
 }
 
 /// Parse the optional launch `args` array. Non-empty values are blocked until

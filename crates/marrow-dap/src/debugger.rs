@@ -26,7 +26,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use marrow_run::{Frame, RuntimeError, StepHook, Value};
 
 use crate::step::{self, Resume, StopReason};
-use crate::variables::{self, Child};
+use crate::variables::{self, ChildPage, VariablesFilter};
 
 /// The `run.terminated` fault code the hook returns to unwind the run on a client
 /// `terminate`/`disconnect`. It surfaces like any runtime fault, so an open
@@ -66,16 +66,16 @@ pub struct StopInfo {
 #[derive(Debug)]
 pub enum Query {
     /// The locals visible at the current stop.
-    Locals,
-    /// Expand a previously-returned compound local value.
-    ExpandLocal(Value),
+    Locals {
+        page: ChildPage,
+        filter: VariablesFilter,
+    },
 }
 
 /// The answer to a [`Query`], owned and `Send`.
 #[derive(Debug)]
 pub enum QueryResult {
     Locals(LocalsSnapshot),
-    Children(Vec<Child>),
 }
 
 /// A control message from the protocol thread to the parked run-thread.
@@ -134,26 +134,27 @@ impl Debugger {
     }
 
     /// Capture the locals at the current frame as owned, `Send` data.
-    fn snapshot_locals(frame: &Frame<'_, '_>) -> LocalsSnapshot {
+    fn snapshot_locals(
+        frame: &Frame<'_, '_>,
+        page: ChildPage,
+        filter: VariablesFilter,
+    ) -> LocalsSnapshot {
         // Frame::locals yields shadowing outer-then-inner; keep the last binding
         // per name so the value in scope wins, matching what the run sees.
-        let mut order: Vec<String> = Vec::new();
-        let mut latest: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let mut order: Vec<&str> = Vec::new();
+        let mut latest: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
         for (name, value) in frame.locals() {
             if !latest.contains_key(name) {
-                order.push(name.to_string());
+                order.push(name);
             }
-            latest.insert(name.to_string(), value.clone());
+            latest.insert(name, value);
         }
-        let entries = order
+        let entries = variables::local_children_from_refs(order, &latest, page, filter)
             .into_iter()
-            .map(|name| {
-                let value = latest.remove(&name).expect("name was inserted");
-                LocalVar {
-                    name,
-                    value: value.display_debug(),
-                    expand: variables::is_expandable(&value).then_some(value),
-                }
+            .map(|child| LocalVar {
+                name: child.name,
+                value: child.value,
+                expand: child.expand,
             })
             .collect();
         LocalsSnapshot { entries }
@@ -162,8 +163,9 @@ impl Debugger {
     /// Answer one query from the live frame, returning owned data.
     fn answer(&self, frame: &Frame<'_, '_>, query: Query) -> QueryResult {
         match query {
-            Query::Locals => QueryResult::Locals(Self::snapshot_locals(frame)),
-            Query::ExpandLocal(value) => QueryResult::Children(variables::children(&value)),
+            Query::Locals { page, filter } => {
+                QueryResult::Locals(Self::snapshot_locals(frame, page, filter))
+            }
         }
     }
 

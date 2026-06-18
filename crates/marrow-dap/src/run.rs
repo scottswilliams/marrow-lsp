@@ -116,7 +116,7 @@ fn outcome(
         Ok(run) => {
             let rendered = run
                 .value
-                .map(|value| value.display_debug())
+                .map(|value| crate::variables::value_preview(&value))
                 .unwrap_or_default();
             Outcome {
                 output,

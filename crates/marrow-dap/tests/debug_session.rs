@@ -211,6 +211,8 @@ fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
                   \x20   const title: string = \"Dune\"\n\
                   \x20   var tags: sequence[string]\n\
                   \x20   tags(1) = \"classic\"\n\
+                  \x20   tags(2) = \"space\"\n\
+                  \x20   tags(3) = \"award\"\n\
                   \x20   print(title)\n";
     let file = src.join("shelf.mw");
     std::fs::write(&file, source).unwrap();
@@ -541,6 +543,10 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
         response["body"]["supportsConfigurationDoneRequest"], true,
         "{response}"
     );
+    assert!(
+        response["body"].get("supportsVariablePaging").is_none(),
+        "{response}"
+    );
     client.event("initialized");
 
     // launch the fixture's default entry.
@@ -614,6 +620,7 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
     let locals = client.request("variables", json!({ "variablesReference": locals_ref }));
     let locals = client.response_for(locals);
     let local_vars = locals["body"]["variables"].as_array().unwrap();
+    assert_eq!(local_vars.len(), 2, "{locals}");
     let title = local_vars
         .iter()
         .find(|variable| variable["name"] == "title")
@@ -726,7 +733,10 @@ fn dap_value_surfaces_mark_blocked_contracts() {
 
     let mut client = Client::spawn();
 
-    let init = client.request("initialize", json!({ "supportsVariableType": true }));
+    let init = client.request(
+        "initialize",
+        json!({ "supportsVariableType": true, "supportsVariablePaging": true }),
+    );
     assert_eq!(client.response_for(init)["success"], true);
     client.event("initialized");
 
@@ -743,7 +753,7 @@ fn dap_value_surfaces_mark_blocked_contracts() {
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 8 }],
+            "breakpoints": [{ "line": 10 }],
         }),
     );
     assert_eq!(client.response_for(set)["success"], true);
@@ -752,7 +762,7 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     assert_eq!(client.response_for(done)["success"], true);
     let stopped = client.event("stopped");
     assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
-    step_to_line(&mut client, 8);
+    step_to_line(&mut client, 10);
 
     let threads = client.request("threads", json!({}));
     let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
@@ -781,6 +791,7 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     let locals = client.request("variables", json!({ "variablesReference": locals_ref }));
     let locals = client.response_for(locals);
     let local_vars = locals["body"]["variables"].as_array().unwrap();
+    assert_eq!(local_vars.len(), 3, "{locals}");
     let title = local_vars
         .iter()
         .find(|variable| variable["name"] == "title")
@@ -788,21 +799,105 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     assert_eq!(title["value"], "Dune", "{locals}");
     assert_debug_admin_value_contract(title, "canonical runtime value expansion facts");
 
+    let local_page = client.request(
+        "variables",
+        json!({ "variablesReference": locals_ref, "start": 1, "count": 1 }),
+    );
+    let local_page = client.response_for(local_page);
+    let local_page_vars = local_page["body"]["variables"].as_array().unwrap();
+    assert_eq!(local_page_vars.len(), 1, "{local_page}");
+    assert_eq!(local_page_vars[0]["name"], "title", "{local_page}");
+    assert_eq!(local_page_vars[0]["value"], "Dune", "{local_page}");
+
+    let local_zero_count = client.request(
+        "variables",
+        json!({ "variablesReference": locals_ref, "start": 1, "count": 0 }),
+    );
+    let local_zero_count = client.response_for(local_zero_count);
+    let local_zero_count_vars = local_zero_count["body"]["variables"].as_array().unwrap();
+    assert_eq!(local_zero_count_vars.len(), 2, "{local_zero_count}");
+    assert_eq!(
+        local_zero_count_vars[0]["name"], "title",
+        "{local_zero_count}"
+    );
+    assert_eq!(
+        local_zero_count_vars[1]["name"], "tags",
+        "{local_zero_count}"
+    );
+
+    let local_indexed = client.request(
+        "variables",
+        json!({ "variablesReference": locals_ref, "filter": "indexed" }),
+    );
+    let local_indexed = client.response_for(local_indexed);
+    assert!(
+        local_indexed["body"]["variables"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{local_indexed}"
+    );
+
     let tags = local_vars
         .iter()
         .find(|variable| variable["name"] == "tags")
         .expect("a `tags` local");
-    assert_eq!(tags["value"], "sequence[1]", "{locals}");
+    assert_eq!(tags["value"], "sequence[3]", "{locals}");
     assert_debug_admin_value_contract(tags, "canonical runtime value expansion facts");
+    assert_eq!(tags["indexedVariables"], 3, "{locals}");
     let tags_ref = tags["variablesReference"].as_i64().unwrap();
     assert!(tags_ref > 0, "tags should be expandable: {locals}");
 
     let expanded = client.request("variables", json!({ "variablesReference": tags_ref }));
     let expanded = client.response_for(expanded);
+    let expanded_vars = expanded["body"]["variables"].as_array().unwrap();
+    assert_eq!(expanded_vars.len(), 3, "{expanded}");
     let tag_child = &expanded["body"]["variables"][0];
     assert_eq!(tag_child["name"], "[0]", "{expanded}");
     assert_eq!(tag_child["value"], "classic", "{expanded}");
     assert_debug_admin_value_contract(tag_child, "canonical runtime value expansion facts");
+
+    let zero_count = client.request(
+        "variables",
+        json!({ "variablesReference": tags_ref, "start": 1, "count": 0 }),
+    );
+    let zero_count = client.response_for(zero_count);
+    let zero_count_vars = zero_count["body"]["variables"].as_array().unwrap();
+    assert_eq!(zero_count_vars.len(), 2, "{zero_count}");
+    assert_eq!(zero_count_vars[0]["name"], "[1]", "{zero_count}");
+    assert_eq!(zero_count_vars[1]["name"], "[2]", "{zero_count}");
+
+    let named_tags = client.request(
+        "variables",
+        json!({ "variablesReference": tags_ref, "filter": "named" }),
+    );
+    let named_tags = client.response_for(named_tags);
+    assert!(
+        named_tags["body"]["variables"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{named_tags}"
+    );
+
+    let indexed_tags = client.request(
+        "variables",
+        json!({ "variablesReference": tags_ref, "filter": "indexed", "start": 2, "count": 1 }),
+    );
+    let indexed_tags = client.response_for(indexed_tags);
+    let indexed_tag_vars = indexed_tags["body"]["variables"].as_array().unwrap();
+    assert_eq!(indexed_tag_vars.len(), 1, "{indexed_tags}");
+    assert_eq!(indexed_tag_vars[0]["name"], "[2]", "{indexed_tags}");
+
+    let page = client.request(
+        "variables",
+        json!({ "variablesReference": tags_ref, "start": 1, "count": 1 }),
+    );
+    let page = client.response_for(page);
+    let page_vars = page["body"]["variables"].as_array().unwrap();
+    assert_eq!(page_vars.len(), 1, "{page}");
+    assert_eq!(page_vars[0]["name"], "[1]", "{page}");
+    assert_eq!(page_vars[0]["value"], "space", "{page}");
 
     let durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
     let durable_variables = client.response_for(durable_variables);

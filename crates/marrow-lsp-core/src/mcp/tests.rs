@@ -419,6 +419,60 @@ fn run_value_json_summarizes_local_trees() {
 }
 
 #[test]
+fn run_value_json_caps_large_sequences() {
+    let value = Value::Sequence((0..300).map(Value::Int).collect());
+    let rendered = value_to_json(value);
+    let items = rendered["sequence"]
+        .as_array()
+        .unwrap_or_else(|| panic!("large sequences render as a bounded summary: {rendered}"));
+
+    assert_eq!(rendered["truncated"], true, "{rendered}");
+    assert!(items.len() < 300, "{rendered}");
+}
+
+#[test]
+fn run_value_json_caps_large_strings() {
+    let rendered = value_to_json(Value::Str("x".repeat(20_000)));
+
+    assert_eq!(rendered["truncated"], true, "{rendered}");
+    assert!(
+        rendered["string"].as_str().unwrap().len() < 20_000,
+        "{rendered}"
+    );
+}
+
+#[test]
+fn run_value_json_caps_large_resources() {
+    let value = Value::Resource(
+        (0..300)
+            .map(|index| (format!("field{index}"), Value::Int(index)))
+            .collect(),
+    );
+    let rendered = value_to_json(value);
+    let fields = rendered["resource"]
+        .as_array()
+        .unwrap_or_else(|| panic!("large resources render as a bounded summary: {rendered}"));
+
+    assert_eq!(rendered["truncated"], true, "{rendered}");
+    assert!(fields.len() < 300, "{rendered}");
+}
+
+#[test]
+fn run_value_json_caps_large_resource_field_names() {
+    let rendered = value_to_json(Value::Resource(vec![("x".repeat(20_000), Value::Int(1))]));
+    let fields = rendered["resource"]
+        .as_array()
+        .unwrap_or_else(|| panic!("long resource names render as a bounded summary: {rendered}"));
+
+    assert_eq!(rendered["truncated"], true, "{rendered}");
+    assert_eq!(fields[0]["nameTruncated"], true, "{rendered}");
+    assert!(
+        fields[0]["name"].as_str().unwrap().len() < 20_000,
+        "{rendered}"
+    );
+}
+
+#[test]
 fn run_contract_marks_entry_string_as_presentation_only() {
     let (_dir, file) = pure_project();
     let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);

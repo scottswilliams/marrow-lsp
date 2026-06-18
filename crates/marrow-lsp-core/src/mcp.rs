@@ -26,7 +26,7 @@ use marrow_check::{CheckedProgram, checked_saved_root_place, type_at};
 use marrow_run::{CheckedEntryCall, Host, RunOutput, RuntimeError, Value, run_entry_with_host};
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
-use serde_json::{Value as Json, json};
+use serde_json::{Map, Value as Json, json};
 
 use crate::completion::completion;
 use crate::data_explorer::{DataChildrenRequest, DataQuerySegmentDto};
@@ -41,6 +41,8 @@ use crate::workspace::Workspace;
 /// program's own `print`/`write` stream; a runaway loop must not balloon the
 /// reply, so it is truncated with a marker once it crosses this.
 const OUTPUT_CAP: usize = 8 * 1024;
+const RUN_VALUE_NODE_CAP: usize = 256;
+const RUN_VALUE_STRING_CAP: usize = 8 * 1024;
 
 const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
 const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
@@ -837,15 +839,40 @@ fn truncate(mut output: String) -> String {
     output
 }
 
-/// A runtime [`Value`] as JSON for a run's returned value. The scalars render to
-/// their JSON forms; the wide and structural values (instant, duration, sequence,
-/// resource, identity) render to a tagged string so the result stays inspectable
-/// without inventing a numeric form JSON cannot hold.
+/// A runtime [`Value`] as JSON for a run's returned value. Scalars keep their
+/// JSON forms; structural values stay inspectable while sharing a small node
+/// budget, so a presentation-only run cannot return an unbounded JSON tree.
 fn value_to_json(value: Value) -> Json {
+    let mut budget = ValueBudget::new(RUN_VALUE_NODE_CAP);
+    value_to_json_bounded(value, &mut budget)
+}
+
+struct ValueBudget {
+    remaining: usize,
+}
+
+impl ValueBudget {
+    fn new(limit: usize) -> Self {
+        Self { remaining: limit }
+    }
+
+    fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
+fn value_to_json_bounded(value: Value, budget: &mut ValueBudget) -> Json {
+    if !budget.take() {
+        return json!({ "truncated": true });
+    }
     match value {
         Value::Int(value) => json!(value),
         Value::Bool(value) => json!(value),
-        Value::Str(value) => json!(value),
+        Value::Str(value) => string_value_to_json(value),
         Value::Decimal(value) => json!(value.to_text()),
         Value::Date(days) => json!({ "date": days }),
         Value::Instant(nanos) => json!({ "instant": nanos.to_string() }),
@@ -854,18 +881,127 @@ fn value_to_json(value: Value) -> Json {
             json!({ "enum": { "id": value.enum_id().0, "member": value.member_id().0 } })
         }
         Value::Bytes(bytes) => json!({ "bytes": bytes.len() }),
-        Value::Sequence(items) => json!(items.into_iter().map(value_to_json).collect::<Vec<_>>()),
+        Value::Sequence(items) => sequence_to_json(items, budget),
         Value::LocalTree(entries) => json!({ "tree": entries.len() }),
-        Value::Resource(fields) => Json::Object(
-            fields
-                .into_iter()
-                .map(|(name, value)| (name, value_to_json(value)))
-                .collect(),
-        ),
-        Value::Identity(identity) => {
-            json!({ "identity": { "root": identity.root(), "keyCount": identity.keys().len() } })
-        }
+        Value::Resource(fields) => resource_to_json(fields, budget),
+        Value::Identity(identity) => identity_to_json(identity),
     }
+}
+
+struct BoundedString {
+    value: String,
+    truncated: bool,
+    original_bytes: usize,
+}
+
+fn bounded_string(mut value: String) -> BoundedString {
+    let original_bytes = value.len();
+    let mut truncated = false;
+    if original_bytes > RUN_VALUE_STRING_CAP {
+        let mut end = RUN_VALUE_STRING_CAP;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.truncate(end);
+        value.push('…');
+        truncated = true;
+    }
+    BoundedString {
+        value,
+        truncated,
+        original_bytes,
+    }
+}
+
+fn string_value_to_json(value: String) -> Json {
+    let value = bounded_string(value);
+    if !value.truncated {
+        return json!(value.value);
+    }
+    json!({
+        "string": value.value,
+        "truncated": true,
+        "originalBytes": value.original_bytes,
+    })
+}
+
+fn sequence_to_json(items: Vec<Value>, budget: &mut ValueBudget) -> Json {
+    let total = items.len();
+    let mut omitted = 0;
+    let mut rendered = Vec::new();
+
+    for item in items {
+        if budget.remaining == 0 {
+            omitted += 1;
+            continue;
+        }
+        rendered.push(value_to_json_bounded(item, budget));
+    }
+
+    if omitted == 0 {
+        Json::Array(rendered)
+    } else {
+        json!({
+            "sequence": rendered,
+            "truncated": true,
+            "omitted": omitted,
+            "total": total,
+        })
+    }
+}
+
+fn resource_to_json(fields: Vec<(String, Value)>, budget: &mut ValueBudget) -> Json {
+    let total = fields.len();
+    let mut omitted = 0;
+    let mut field_names_truncated = false;
+    let mut object = Map::new();
+    let mut entries = Vec::new();
+
+    for (name, value) in fields {
+        if budget.remaining == 0 {
+            omitted += 1;
+            continue;
+        }
+        let name = bounded_string(name);
+        field_names_truncated |= name.truncated;
+        let value = value_to_json_bounded(value, budget);
+        object.insert(name.value.clone(), value.clone());
+        let mut entry = json!({
+            "name": name.value,
+            "value": value,
+        });
+        if name.truncated {
+            entry["nameTruncated"] = json!(true);
+            entry["nameOriginalBytes"] = json!(name.original_bytes);
+        }
+        entries.push(entry);
+    }
+
+    if omitted == 0 && !field_names_truncated {
+        Json::Object(object)
+    } else {
+        json!({
+            "resource": entries,
+            "truncated": true,
+            "omitted": omitted,
+            "total": total,
+        })
+    }
+}
+
+fn identity_to_json(identity: marrow_run::IdentityValue) -> Json {
+    let root = bounded_string(identity.root().to_string());
+    let mut value = json!({
+        "identity": {
+            "root": root.value,
+            "keyCount": identity.keys().len(),
+        }
+    });
+    if root.truncated {
+        value["identity"]["rootTruncated"] = json!(true);
+        value["identity"]["rootOriginalBytes"] = json!(root.original_bytes);
+    }
+    value
 }
 
 /// Merge the fields of `extra` into `base` (a small object union for assembling a
