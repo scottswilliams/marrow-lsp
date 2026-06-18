@@ -1,13 +1,13 @@
 # LSP Fact Consumption Ledger
 
 This ledger records what `marrow-lsp` may treat as semantic authority while
-Marrow core is moving to v0.1. It is maintained through the product-surface
-truth lane in
-[`production-readiness-roadmap.md`](production-readiness-roadmap.md). The rule
-is direct: if a fact belongs to Marrow and Marrow does not expose it, LSP, MCP,
-DAP, and VS Code must delete the surface, block it, or render an explicitly
-presentation-only view. They must not reconstruct language, catalog, runtime,
-or storage meaning locally.
+Marrow core is moving to v0.1. It is the surface-status authority for the
+release contract in
+[`production-readiness-roadmap.md`](production-readiness-roadmap.md). The rule is
+direct: if a fact belongs to Marrow and Marrow does not expose it, LSP, MCP, DAP,
+and VS Code must delete the surface, block it, or render an explicitly
+presentation-only view. They must not reconstruct language, catalog, runtime, or
+storage meaning locally.
 
 ## Status Definitions
 
