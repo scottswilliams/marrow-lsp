@@ -63,11 +63,14 @@ const EVALUATE_CONTEXT_INVALID: &str = "invalid evaluate context";
 const VARIABLES_REFERENCE_INVALID: &str = "missing or invalid variablesReference";
 const VARIABLES_PAGE_INVALID: &str = "invalid variables paging arguments";
 const VARIABLES_FILTER_INVALID: &str = "invalid variables filter";
+const ARGUMENTS_INVALID: &str = "request arguments must be an object";
 const THREAD_ID_INVALID: &str = "missing or invalid threadId";
 const FRAME_ID_INVALID: &str = "missing or invalid frameId";
 const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
 const ERROR_UNSUPPORTED_REQUEST: DapError =
     DapError::new("dap.unsupportedRequest", STATUS_UNSUPPORTED_REQUEST);
+const ERROR_ARGUMENTS_INVALID: DapError =
+    DapError::new("dap.arguments.invalid", STATUS_INVALID_PARAMS);
 const ERROR_LAUNCH_PROJECT_INVALID_PARAMS: DapError =
     DapError::new("dap.launchProject.invalid", STATUS_INVALID_PARAMS);
 const ERROR_LAUNCH_ARGS_INVALID_TYPE: DapError =
@@ -336,26 +339,97 @@ impl<W: Write> Session<W> {
             .and_then(Json::as_str)
             .unwrap_or_default()
             .to_string();
-        let arguments = request
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
         match command.as_str() {
-            "initialize" => self.on_initialize(request),
-            "launch" => self.on_launch(request, &arguments),
-            "setBreakpoints" => self.on_set_breakpoints(request, &arguments),
-            "configurationDone" => self.on_configuration_done(request),
-            "threads" => self.on_threads(request),
-            "stackTrace" => self.on_stack_trace(request, &arguments),
-            "scopes" => self.on_scopes(request, &arguments),
-            "variables" => self.on_variables(request, &arguments),
-            "continue" => self.on_continue(request, &arguments),
-            "next" => self.on_step(request, &arguments, StepKind::Over),
-            "stepIn" => self.on_step(request, &arguments, StepKind::Into),
-            "stepOut" => self.on_step(request, &arguments, StepKind::Out),
-            "pause" => self.on_pause(request, &arguments),
-            "evaluate" => self.on_evaluate(request, &arguments),
-            "disconnect" | "terminate" => self.on_disconnect(request),
+            "initialize" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_initialize(request, &arguments);
+            }
+            "launch" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_launch(request, &arguments);
+            }
+            "setBreakpoints" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_set_breakpoints(request, &arguments);
+            }
+            "configurationDone" => {
+                if self.arguments_or_reject(request).is_none() {
+                    return;
+                }
+                self.on_configuration_done(request);
+            }
+            "threads" => {
+                if self.arguments_or_reject(request).is_none() {
+                    return;
+                }
+                self.on_threads(request);
+            }
+            "stackTrace" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_stack_trace(request, &arguments);
+            }
+            "scopes" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_scopes(request, &arguments);
+            }
+            "variables" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_variables(request, &arguments);
+            }
+            "continue" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_continue(request, &arguments);
+            }
+            "next" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_step(request, &arguments, StepKind::Over);
+            }
+            "stepIn" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_step(request, &arguments, StepKind::Into);
+            }
+            "stepOut" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_step(request, &arguments, StepKind::Out);
+            }
+            "pause" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_pause(request, &arguments);
+            }
+            "evaluate" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_evaluate(request, &arguments);
+            }
+            "disconnect" | "terminate" => {
+                if self.arguments_or_reject(request).is_none() {
+                    return;
+                }
+                self.on_disconnect(request);
+            }
             other => self.respond_error(
                 request,
                 format!("unsupported request `{other}`"),
@@ -364,13 +438,22 @@ impl<W: Write> Session<W> {
         }
     }
 
+    fn arguments_or_reject(&mut self, request: &Json) -> Option<Json> {
+        match request_arguments(request) {
+            Ok(arguments) => Some(arguments),
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                None
+            }
+        }
+    }
+
     /// `initialize`: advertise the small capability set the debugger supports,
     /// then announce readiness with the `initialized` event so the client sends
     /// breakpoints.
-    fn on_initialize(&mut self, request: &Json) {
-        self.supports_variable_paging = request
-            .get("arguments")
-            .and_then(|arguments| arguments.get("supportsVariablePaging"))
+    fn on_initialize(&mut self, request: &Json, arguments: &Json) {
+        self.supports_variable_paging = arguments
+            .get("supportsVariablePaging")
             .and_then(Json::as_bool)
             .unwrap_or(false);
         self.respond(
@@ -951,6 +1034,17 @@ fn parse_variables_input(
         page,
         filter,
     })
+}
+
+fn request_arguments(request: &Json) -> Result<Json, DapInputError> {
+    match request.get("arguments") {
+        None | Some(Json::Null) => Ok(json!({})),
+        Some(value @ Json::Object(_)) => Ok(value.clone()),
+        Some(_) => Err(DapInputError {
+            message: ARGUMENTS_INVALID,
+            contract: ERROR_ARGUMENTS_INVALID,
+        }),
+    }
 }
 
 fn parse_child_page(

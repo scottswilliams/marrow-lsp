@@ -42,14 +42,24 @@ impl Client {
 
     /// Send a DAP request and return its sequence number.
     fn request(&mut self, command: &str, arguments: Json) -> i64 {
+        self.request_with_arguments(command, Some(arguments))
+    }
+
+    fn request_without_arguments(&mut self, command: &str) -> i64 {
+        self.request_with_arguments(command, None)
+    }
+
+    fn request_with_arguments(&mut self, command: &str, arguments: Option<Json>) -> i64 {
         self.seq += 1;
         let seq = self.seq;
-        let message = json!({
+        let mut message = json!({
             "seq": seq,
             "type": "request",
             "command": command,
-            "arguments": arguments,
         });
+        if let Some(arguments) = arguments {
+            message["arguments"] = arguments;
+        }
         let body = serde_json::to_vec(&message).unwrap();
         write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
         self.stdin.write_all(&body).unwrap();
@@ -435,11 +445,103 @@ fn assert_resume_envelope_error(response: &Json, code: &str, status: &str) {
     );
 }
 
+fn assert_arguments_envelope_error(response: &Json) {
+    assert_response_marrow_error(response, "dap.arguments.invalid", "invalid-params", None);
+    for field in [
+        "breakpoints",
+        "threads",
+        "stackFrames",
+        "totalFrames",
+        "scopes",
+        "variables",
+        "result",
+        "variablesReference",
+        "allThreadsContinued",
+    ] {
+        assert!(
+            response["body"].get(field).is_none(),
+            "arguments-envelope failures should not fabricate `{field}`: {response}"
+        );
+    }
+}
+
 fn assert_launch_success(response: &Json) {
     assert_eq!(response["success"], true, "{response}");
     assert!(
         response["body"].get("marrowError").is_none(),
         "successful launch must not expose a blocked Marrow contract: {response}"
+    );
+}
+
+#[test]
+fn malformed_request_arguments_fail_before_command_handlers() {
+    for (command, arguments) in [
+        ("initialize", json!([])),
+        ("launch", json!([])),
+        ("setBreakpoints", json!([])),
+        ("configurationDone", json!("bad")),
+        ("threads", json!(false)),
+        ("stackTrace", json!(1)),
+        ("scopes", json!([])),
+        ("variables", json!([])),
+        ("evaluate", json!(true)),
+        ("continue", json!([])),
+        ("next", json!([])),
+        ("stepIn", json!([])),
+        ("stepOut", json!([])),
+        ("pause", json!([])),
+    ] {
+        let mut client = Client::spawn();
+        let request = client.request(command, arguments);
+        let response = client.response_for(request);
+        assert_arguments_envelope_error(&response);
+    }
+
+    for command in ["disconnect", "terminate"] {
+        let mut client = Client::spawn();
+        let request = client.request(command, json!([]));
+        let response = client.response_for(request);
+        assert_arguments_envelope_error(&response);
+
+        let threads = client.request("threads", json!({}));
+        let threads = client.response_for(threads);
+        assert_eq!(threads["success"], true, "{threads}");
+    }
+}
+
+#[test]
+fn null_and_absent_request_arguments_remain_absent() {
+    let mut client = Client::spawn();
+
+    let init = client.request_without_arguments("initialize");
+    assert_eq!(client.response_for(init)["success"], true);
+    client.event("initialized");
+
+    let threads = client.request("threads", Json::Null);
+    let threads = client.response_for(threads);
+    assert_eq!(threads["success"], true, "{threads}");
+    assert_eq!(threads["body"]["threads"][0]["id"], 1, "{threads}");
+
+    let done = client.request("configurationDone", Json::Null);
+    let done = client.response_for(done);
+    assert_response_marrow_error(&done, "dap.launch.notConfigured", "invalid-state", None);
+
+    let launch = client.request("launch", Json::Null);
+    let launch = client.response_for(launch);
+    assert_response_marrow_error(&launch, "dap.launchProject.invalid", "invalid-params", None);
+}
+
+#[test]
+fn unsupported_commands_do_not_parse_request_arguments() {
+    let mut client = Client::spawn();
+
+    let request = client.request("madeUpCommand", json!([]));
+    let response = client.response_for(request);
+    assert_response_marrow_error(
+        &response,
+        "dap.unsupportedRequest",
+        "unsupported-request",
+        None,
     );
 }
 
