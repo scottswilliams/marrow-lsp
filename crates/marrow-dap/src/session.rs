@@ -628,12 +628,15 @@ impl<W: Write> Session<W> {
             return;
         };
         let name = format!("depth {}", stop.depth);
-        let frame = json!({
+        let mut frame = json!({
             "id": FRAME_ID,
             "name": name,
             "line": stop.line,
             "column": stop.column.max(1),
         });
+        if let Some(path) = &stop.file {
+            frame["source"] = json!({ "path": path });
+        }
         self.respond(
             request,
             true,

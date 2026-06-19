@@ -1508,9 +1508,10 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
     let frames = client.response_for(stack);
     let frame = &frames["body"]["stackFrames"][0];
     assert_eq!(frame["line"], 6, "{frames}");
-    assert!(
-        frame.get("source").is_none(),
-        "stack source stays unavailable until Marrow exposes canonical debugger source facts: {frames}"
+    assert_eq!(
+        frame["source"]["path"],
+        file.display().to_string(),
+        "stack source should use the stopped frame's Marrow-owned file path: {frames}"
     );
     let frame_id = frame["id"].as_i64().unwrap();
 

@@ -21,6 +21,7 @@
 //! rolling back any open transaction. The frame borrow is thus confined to one
 //! thread by construction; the channels carry only `Send` owned data.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
 use marrow_run::{Frame, RuntimeError, StepHook, Value};
@@ -56,6 +57,7 @@ pub struct LocalVar {
 #[derive(Debug, Clone)]
 pub struct StopInfo {
     pub reason: StopReason,
+    pub file: Option<PathBuf>,
     pub line: u32,
     pub column: u32,
     pub depth: usize,
@@ -214,6 +216,7 @@ impl StepHook for Debugger {
         };
         let info = StopInfo {
             reason,
+            file: frame.file().map(PathBuf::from),
             line: span.line,
             column: span.column,
             depth,
