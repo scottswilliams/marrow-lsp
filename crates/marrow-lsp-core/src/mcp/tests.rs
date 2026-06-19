@@ -1,8 +1,9 @@
 use super::*;
 
-use marrow_check::test_support::{commit_then_check, root_place, store_id_of};
+use marrow_check::test_support::{commit_then_check, member_catalog_id, root_place, store_id_of};
 use marrow_store::key::SavedKey;
-use marrow_store::tree::{StoreUid, TreeStore};
+use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
+use marrow_store::value::{SavedValue, encode_value};
 
 fn assert_contract(result: &Json, status: &str, description: &str, missing_facts: &[&str]) {
     let contract = &result["contract"];
@@ -218,6 +219,29 @@ pub fn show()
     }
     drop(store);
 
+    (dir, file)
+}
+
+fn native_counter_project_with_value(value: i64) -> (tempfile::TempDir, PathBuf) {
+    let (dir, file) = native_counter_project([1]);
+    let root = dir.path();
+    let program = commit_then_check(root).unwrap();
+    let place = root_place(&program, "counter").unwrap();
+    let store_id = store_id_of(&place).unwrap();
+    let value_id = member_catalog_id(&place, "value").unwrap();
+    let path = vec![DataPathSegment::Member(
+        marrow_store::cell::CatalogId::new(value_id).unwrap(),
+    )];
+    let store = TreeStore::open(&root.join("data/marrow.redb")).unwrap();
+    store
+        .write_data_value(
+            &store_id,
+            &[SavedKey::Int(1)],
+            &path,
+            encode_value(&SavedValue::Int(value)).unwrap(),
+        )
+        .unwrap();
+    drop(store);
     (dir, file)
 }
 
@@ -797,6 +821,31 @@ fn data_tools_refuse_when_not_enabled() {
             "serve/attach data boundaries",
         ],
     );
+
+    let read = data_read(
+        Path::new("/nope/project/src/main.mw"),
+        crate::data_explorer::DataReadRequest {
+            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
+                "counter".into(),
+            )],
+            preview_limit: None,
+        },
+        false,
+    );
+    assert_eq!(read["dataAccess"], "disabled");
+    assert_contract(
+        &read,
+        "presentation-only",
+        "data value preview helper",
+        &[
+            "catalog-bound saved-place identity",
+            "versioned source/store generation",
+            "bounded presence facts",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
+        ],
+    );
 }
 
 #[test]
@@ -892,6 +941,45 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
         &[
             "catalog-bound saved-place identity",
             "versioned source/store generation",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
+        ],
+    );
+}
+
+#[test]
+fn data_read_returns_bounded_value_preview_when_enabled() {
+    let (_dir, file) = native_counter_project_with_value(42);
+
+    let result = data_read(
+        &file,
+        crate::data_explorer::DataReadRequest {
+            segments: vec![
+                crate::data_explorer::DataPathSegmentDto::Root("counter".into()),
+                crate::data_explorer::DataPathSegmentDto::Key(
+                    crate::data_explorer::DataKeyDto::Int(1),
+                ),
+                crate::data_explorer::DataPathSegmentDto::Field("value".into()),
+            ],
+            preview_limit: Some(32),
+        },
+        true,
+    );
+
+    assert_eq!(result["available"], true, "{result}");
+    assert_eq!(result["presence"], "value_only", "{result}");
+    assert_eq!(result["value"], "42", "{result}");
+    assert_eq!(result["value_truncated"], false, "{result}");
+    assert_store_snapshot(&result["store_snapshot"]);
+    assert_contract(
+        &result,
+        "presentation-only",
+        "data value preview helper",
+        &[
+            "catalog-bound saved-place identity",
+            "versioned source/store generation",
+            "bounded presence facts",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",

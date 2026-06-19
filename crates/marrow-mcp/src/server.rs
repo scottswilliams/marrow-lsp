@@ -7,10 +7,11 @@
 
 use std::path::PathBuf;
 
-use marrow_lsp_core::data_explorer::DataChildrenRequest;
+use marrow_lsp_core::data_explorer::{DataChildrenRequest, DataReadRequest};
 use marrow_lsp_core::mcp::{
     self, COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
-    RESOURCE_SCHEMA_MISSING_FACTS, RUN_MISSING_FACTS, RunMode, SAVED_DATA_MISSING_FACTS,
+    DATA_READ_MISSING_FACTS, RESOURCE_SCHEMA_MISSING_FACTS, RUN_MISSING_FACTS, RunMode,
+    SAVED_DATA_MISSING_FACTS,
 };
 use serde_json::{Value as Json, json};
 
@@ -259,6 +260,44 @@ pub fn tools() -> Json {
             },
         },
         {
+            "name": "mw_data_read",
+            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview for one typed saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path, clamps `preview_limit`, and reads nothing when data access is disabled. Presence detection remains Marrow-owned presentation behavior, not a bounded production read contract. Missing catalog-bound saved-place identity, versioned source/store generation, watch/refresh facts, integrity and repair facts, bounded presence facts, and serve/attach data boundaries; not a stable production data API.",
+            "_meta": marrow_meta(json!({
+                "status": "presentation-only",
+                "stableProductionApi": false,
+                "description": "data value preview helper",
+                "missingFacts": DATA_READ_MISSING_FACTS,
+                "dataAccess": "gated",
+                "basis": "Marrow typed data read tooling",
+                "boundedness": {
+                    "valuePreview": "limit-clamped"
+                },
+                "presenceDetection": "Marrow-owned presentation helper; not a bounded production read contract",
+                "pathSurface": {
+                    "segments": "typed-saved-data-path",
+                    "savedPathString": "absent",
+                },
+            })),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": string_prop("Absolute path to any .mw file inside the project."),
+                    "segments": {
+                        "type": "array",
+                        "description": "Typed saved-data path segments, for example [{\"kind\":\"root\",\"value\":\"books\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}},{\"kind\":\"field\",\"value\":\"title\"}].",
+                        "minItems": 1,
+                        "items": data_path_segment_schema(),
+                    },
+                    "preview_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum rendered preview characters; the core clamps oversized requests.",
+                    },
+                },
+                "required": ["file", "segments"],
+            },
+        },
+        {
             "name": "mw_data_integrity",
             "description": "Debug/admin advisory over the current schema and real store: scan the project's real stored data and report capped/current-schema advisory findings, such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type, plus Marrow store_snapshot metadata. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation. Gated behind data access; returns a refusal envelope and reads nothing when disabled. This is not source/store compatibility validation or repair.",
             "_meta": marrow_meta(json!({
@@ -365,6 +404,11 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
             let request = data_children_request(arguments)?;
             Ok(mcp::data_children(&file, request, policy.allow_data))
         }
+        "mw_data_read" => {
+            let file = required_path(arguments, "file")?;
+            let request = data_read_request(arguments)?;
+            Ok(mcp::data_read(&file, request, policy.allow_data))
+        }
         "mw_data_integrity" => {
             let file = required_path(arguments, "file")?;
             Ok(mcp::data_integrity(&file, policy.allow_data))
@@ -415,8 +459,29 @@ fn optional_array(arguments: &Json, key: &str) -> Result<Vec<Json>, String> {
 }
 
 fn data_children_request(arguments: &Json) -> Result<DataChildrenRequest, String> {
-    serde_json::from_value(arguments.clone())
-        .map_err(|error| format!("invalid mw_data_children arguments: {error}"))
+    let request: DataChildrenRequest = serde_json::from_value(arguments.clone())
+        .map_err(|error| format!("invalid mw_data_children arguments: {error}"))?;
+    if request.segments.is_empty() {
+        return Err("invalid mw_data_children arguments: `segments` must not be empty".to_string());
+    }
+    if request.limit == 0 {
+        return Err("invalid mw_data_children arguments: `limit` must be at least 1".to_string());
+    }
+    Ok(request)
+}
+
+fn data_read_request(arguments: &Json) -> Result<DataReadRequest, String> {
+    let request: DataReadRequest = serde_json::from_value(arguments.clone())
+        .map_err(|error| format!("invalid mw_data_read arguments: {error}"))?;
+    if request.segments.is_empty() {
+        return Err("invalid mw_data_read arguments: `segments` must not be empty".to_string());
+    }
+    if request.preview_limit == Some(0) {
+        return Err(
+            "invalid mw_data_read arguments: `preview_limit` must be at least 1".to_string(),
+        );
+    }
+    Ok(request)
 }
 
 /// A required path argument as a `PathBuf`.
@@ -458,6 +523,7 @@ mod tests {
             "mw_resource_schema",
             "mw_saved_roots",
             "mw_data_children",
+            "mw_data_read",
             "mw_data_integrity",
             "mw_run",
         ] {
@@ -584,6 +650,27 @@ mod tests {
             "Marrow-owned"
         );
 
+        let data_read = contract(tools, "mw_data_read");
+        assert_eq!(data_read["status"], "presentation-only");
+        assert_eq!(data_read["stableProductionApi"], false);
+        assert_eq!(data_read["description"], "data value preview helper");
+        assert_eq!(
+            strings(&data_read["missingFacts"]),
+            DATA_READ_MISSING_FACTS.to_vec()
+        );
+        assert_eq!(data_read["dataAccess"], "gated");
+        assert_eq!(data_read["basis"], "Marrow typed data read tooling");
+        assert_eq!(data_read["boundedness"]["valuePreview"], "limit-clamped");
+        assert_eq!(
+            data_read["presenceDetection"],
+            "Marrow-owned presentation helper; not a bounded production read contract"
+        );
+        assert_eq!(
+            data_read["pathSurface"]["segments"],
+            "typed-saved-data-path"
+        );
+        assert_eq!(data_read["pathSurface"]["savedPathString"], "absent");
+
         let names: Vec<&str> = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -602,6 +689,10 @@ mod tests {
             tool(tools, "mw_data_children")["inputSchema"]["required"],
             json!(["file", "segments", "limit"])
         );
+        assert_eq!(
+            tool(tools, "mw_data_read")["inputSchema"]["required"],
+            json!(["file", "segments"])
+        );
         let segments = &tool(tools, "mw_data_children")["inputSchema"]["properties"]["segments"];
         assert_eq!(segments["minItems"], 1);
         assert_eq!(segments.get("maxItems"), None);
@@ -612,6 +703,9 @@ mod tests {
             .map(|schema| schema["properties"]["kind"]["const"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(segment_kinds, vec!["root", "field", "layer", "key"]);
+        let read_segments = &tool(tools, "mw_data_read")["inputSchema"]["properties"]["segments"];
+        assert_eq!(read_segments["minItems"], 1);
+        assert_eq!(read_segments.get("maxItems"), None);
     }
 
     #[test]
@@ -726,6 +820,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
+        let result = call(
+            "mw_data_read",
+            &json!({
+                "file": "/nope/x.mw",
+                "segments": [{ "kind": "root", "value": "counter" }],
+            }),
+            policy,
+        )
+        .unwrap();
+        assert_eq!(result["dataAccess"], "disabled");
     }
 
     #[test]
@@ -748,20 +852,57 @@ mod tests {
     #[test]
     fn mw_data_children_rejects_invalid_typed_arguments() {
         let policy = Policy { allow_data: true };
-        let error = call(
-            "mw_data_children",
-            &json!({
+        for arguments in [
+            json!({
                 "file": "/nope/project/src/main.mw",
                 "segments": "counter",
                 "limit": 1,
             }),
-            policy,
-        )
-        .expect_err("mw_data_children must deserialize typed request arguments");
-        assert!(
-            error.contains("mw_data_children"),
-            "invalid data children args should name the tool: {error}"
-        );
+            json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": [],
+                "limit": 1,
+            }),
+            json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "limit": 0,
+            }),
+        ] {
+            let error = call("mw_data_children", &arguments, policy)
+                .expect_err("mw_data_children must validate typed request arguments");
+            assert!(
+                error.contains("mw_data_children"),
+                "invalid data children args should name the tool: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mw_data_read_rejects_invalid_typed_arguments() {
+        let policy = Policy { allow_data: true };
+        for arguments in [
+            json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": "counter",
+            }),
+            json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": [],
+            }),
+            json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "preview_limit": 0,
+            }),
+        ] {
+            let error = call("mw_data_read", &arguments, policy)
+                .expect_err("mw_data_read must validate typed request arguments");
+            assert!(
+                error.contains("mw_data_read"),
+                "invalid data read args should name the tool: {error}"
+            );
+        }
     }
 
     #[test]

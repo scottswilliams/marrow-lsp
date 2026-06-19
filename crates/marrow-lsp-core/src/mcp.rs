@@ -31,7 +31,7 @@ use marrow_store::tree::TreeStore;
 use serde_json::{Map, Value as Json, json};
 
 use crate::completion::completion;
-use crate::data_explorer::DataChildrenRequest;
+use crate::data_explorer::{DataChildrenRequest, DataReadRequest};
 use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
@@ -62,6 +62,14 @@ pub const SAVED_DATA_MISSING_FACTS: &[&str] = &[
 pub const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
     "versioned source/store generation",
+    "watch/refresh facts",
+    "integrity and repair facts",
+    "serve/attach data boundaries",
+];
+pub const DATA_READ_MISSING_FACTS: &[&str] = &[
+    "catalog-bound saved-place identity",
+    "versioned source/store generation",
+    "bounded presence facts",
     "watch/refresh facts",
     "integrity and repair facts",
     "serve/attach data boundaries",
@@ -104,6 +112,10 @@ fn saved_data_contract() -> Json {
 
 fn data_children_contract() -> Json {
     presentation_contract("bounded typed data helper", DATA_CHILDREN_MISSING_FACTS)
+}
+
+fn data_read_contract() -> Json {
+    presentation_contract("data value preview helper", DATA_READ_MISSING_FACTS)
 }
 
 fn data_integrity_contract() -> Json {
@@ -492,6 +504,63 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
                 "children": [],
                 "truncated": false,
                 "cursor": Json::Null,
+                "store_snapshot": Json::Null,
+                "error": error,
+            }),
+            contract,
+        ),
+    }
+}
+
+/// `mw_data_read`: a bounded rendered preview for one typed saved-data path.
+/// Gated like [`data_children`]: disabled data access refuses before project
+/// loading, while enabled access checks the project and opens the native store
+/// read-only for one shared Marrow tooling read.
+pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Json {
+    let contract = data_read_contract();
+    if !allow_data {
+        return data_disabled(contract);
+    }
+    let unavailable = json!({
+        "available": false,
+        "presence": "absent",
+        "value": Json::Null,
+        "value_truncated": false,
+        "store_snapshot": Json::Null,
+    });
+    let workspace = match load_project(file, None) {
+        Ok((workspace, _)) => workspace,
+        Err(error) => {
+            let mut value = unavailable.clone();
+            value["error"] = json!(error);
+            return with_contract(value, contract);
+        }
+    };
+    let reader = workspace.project().and_then(LiveStore::for_project);
+    let program = match data_program(&workspace) {
+        Ok(program) => program,
+        Err(error) => {
+            let mut value = unavailable.clone();
+            value["error"] = json!(error);
+            return with_contract(value, contract);
+        }
+    };
+    let Some(reader) = reader else {
+        return with_contract(unavailable, contract);
+    };
+    match reader.data_read(&program, request) {
+        crate::store::Availability::Unavailable => with_contract(unavailable, contract),
+        crate::store::Availability::Available(Ok(result)) => {
+            let mut result = serde_json::to_value(result).expect("data read DTO must serialize");
+            result["available"] = json!(true);
+            with_contract(result, contract)
+        }
+        crate::store::Availability::Available(Err(error)) => with_contract(
+            json!({
+                "available": true,
+                "presence": "absent",
+                "value": Json::Null,
+                "value_truncated": false,
                 "store_snapshot": Json::Null,
                 "error": error,
             }),

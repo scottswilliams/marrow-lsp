@@ -122,6 +122,10 @@ fn initialize_list_tools_then_call_mw_check() {
         "mw_data_children listed, got {names:?}"
     );
     assert!(
+        names.contains(&"mw_data_read"),
+        "mw_data_read listed, got {names:?}"
+    );
+    assert!(
         !names.contains(&"mw_saved_get") && !names.contains(&"mw_saved_children"),
         "old saved-data child/get tools stay absent, got {names:?}"
     );
@@ -237,6 +241,34 @@ fn data_tools_refuse_without_the_opt_in() {
     assert_eq!(
         structured["contract"]["description"],
         "bounded typed data helper"
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "mw_data_read",
+                "arguments": {
+                    "file": "/nope/project/src/main.mw",
+                    "segments": [{ "kind": "root", "value": "counter" }]
+                }
+            }
+        }),
+    );
+    let response = wait_for(&mut stdout, 4, Duration::from_secs(10));
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["dataAccess"], "disabled",
+        "without the opt-in, mw_data_read must refuse before loading the file, got {response}"
+    );
+    assert_eq!(structured["available"], false);
+    assert_eq!(structured["contract"]["status"], "presentation-only");
+    assert_eq!(
+        structured["contract"]["description"],
+        "data value preview helper"
     );
 
     let _ = server.0.kill();

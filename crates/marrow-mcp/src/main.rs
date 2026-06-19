@@ -9,7 +9,7 @@
 //! only protocol messages.
 //!
 //! ## Data-access gate
-//! The data tools (`mw_saved_*`) read a project's real stored data, so they are a
+//! The saved-root and data-inspection tools read a project's real stored data, so they are a
 //! data-exfiltration boundary. They are disabled unless the operator opts in at
 //! launch with `MARROW_MCP_ALLOW_DATA=1` (or the `--allow-data` flag). When
 //! disabled, those tools return a clear refusal and read nothing. Execution
@@ -229,6 +229,24 @@ fn summarize(name: &str, result: &Json) -> String {
                     }
                 }
             }
+            "mw_data_read" => {
+                if result.get("available").and_then(Json::as_bool) != Some(true) {
+                    "data unavailable".to_string()
+                } else if let Some(value) = result.get("value").and_then(Json::as_str) {
+                    let base = clip(value);
+                    if result.get("value_truncated").and_then(Json::as_bool) == Some(true) {
+                        format!("{base} (truncated)")
+                    } else {
+                        base
+                    }
+                } else {
+                    result
+                        .get("presence")
+                        .and_then(Json::as_str)
+                        .map(clip)
+                        .unwrap_or_else(|| "absent".to_string())
+                }
+            }
             "mw_data_integrity" => {
                 if result.get("available").and_then(Json::as_bool) != Some(true) {
                     "data unavailable".to_string()
@@ -426,7 +444,7 @@ mod tests {
 
     use marrow_lsp_core::mcp::{
         COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
-        RUN_MISSING_FACTS, SAVED_DATA_MISSING_FACTS,
+        DATA_READ_MISSING_FACTS, RUN_MISSING_FACTS, SAVED_DATA_MISSING_FACTS,
     };
 
     /// Drive the server loop over an in-memory stdin and collect its line-framed
@@ -540,6 +558,36 @@ mod tests {
             (
                 "mw_data_children",
                 json!({ "available": false, "children": [], "truncated": false }),
+                "data unavailable",
+            ),
+            (
+                "mw_data_read",
+                json!({
+                    "available": true,
+                    "presence": "value_only",
+                    "value": "42",
+                    "value_truncated": false,
+                }),
+                "42",
+            ),
+            (
+                "mw_data_read",
+                json!({
+                    "available": true,
+                    "presence": "absent",
+                    "value": Json::Null,
+                    "value_truncated": false,
+                }),
+                "absent",
+            ),
+            (
+                "mw_data_read",
+                json!({
+                    "available": false,
+                    "presence": "absent",
+                    "value": Json::Null,
+                    "value_truncated": false,
+                }),
                 "data unavailable",
             ),
             (
@@ -681,6 +729,21 @@ mod tests {
                     ),
                 }),
                 "bounded typed data helper (presentation-only: catalog-bound saved-place identity +4): 2 children (truncated)",
+            ),
+            (
+                "mw_data_read",
+                json!({
+                    "available": true,
+                    "presence": "value_only",
+                    "value": "42",
+                    "value_truncated": false,
+                    "contract": contract(
+                        "presentation-only",
+                        "data value preview helper",
+                        DATA_READ_MISSING_FACTS,
+                    ),
+                }),
+                "data value preview helper (presentation-only: catalog-bound saved-place identity +5): 42",
             ),
             (
                 "mw_run",
