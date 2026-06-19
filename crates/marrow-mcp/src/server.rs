@@ -266,17 +266,17 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_integrity",
-            "description": "Debug/admin advisory over the current schema and real store: scan the project's real stored data and report capped/current-schema advisory findings such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation. Gated behind data access; returns a refusal envelope and reads nothing when disabled. This is not catalog-epoch/store-generation-bound production validation or repair.",
+            "description": "Debug/admin advisory over the current schema and real store: scan the project's real stored data and report capped/current-schema advisory findings, such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type, plus Marrow store_snapshot metadata. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation. Gated behind data access; returns a refusal envelope and reads nothing when disabled. This is not source/store compatibility validation or repair.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
                 "description": "debug/admin advisory",
                 "basis": "current schema and real store",
                 "missingFacts": [
-                    "catalog/store identity",
-                    "store generation",
-                    "catalog epoch/digest",
-                    "typed repair or drift facts",
+                    "source/store compatibility verdicts",
+                    "drift witnesses",
+                    "typed repair facts",
+                    "stable production integrity DTOs",
                 ],
                 "dataAccess": "gated",
                 "scope": "capped-current-schema-advisory",
@@ -652,11 +652,16 @@ mod tests {
         assert_eq!(
             strings(&integrity["missingFacts"]),
             vec![
-                "catalog/store identity",
-                "store generation",
-                "catalog epoch/digest",
-                "typed repair or drift facts"
+                "source/store compatibility verdicts",
+                "drift witnesses",
+                "typed repair facts",
+                "stable production integrity DTOs"
             ]
+        );
+        assert!(
+            tool(tools, "mw_data_integrity")["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("store_snapshot metadata"))
         );
         assert_eq!(integrity["dataAccess"], "gated");
         assert_eq!(integrity["scope"], "capped-current-schema-advisory");

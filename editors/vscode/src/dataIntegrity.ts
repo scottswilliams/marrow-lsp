@@ -23,6 +23,7 @@ interface DataIntegrityResult {
   findings: Finding[];
   scanned: number;
   truncated: boolean;
+  store_snapshot: unknown | null;
 }
 
 const REQUEST_DATA_INTEGRITY = "marrow/dataIntegrity";

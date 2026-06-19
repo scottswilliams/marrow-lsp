@@ -1688,6 +1688,7 @@ fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
     );
     assert_eq!(result["findings"].as_array().map(Vec::len), Some(0));
     assert_eq!(result["truncated"].as_bool(), Some(false));
+    assert_eq!(result["store_snapshot"], serde_json::Value::Null);
 
     let _ = server.0.kill();
 }

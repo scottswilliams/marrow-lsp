@@ -740,15 +740,16 @@ fn data_tools_refuse_when_not_enabled() {
     );
     let integrity = data_integrity(&file, false);
     assert_eq!(integrity["dataAccess"], "disabled");
+    assert_eq!(integrity["store_snapshot"], Json::Null);
     assert_contract(
         &integrity,
         "presentation-only",
         "debug/admin advisory",
         &[
-            "catalog/store identity",
-            "store generation",
-            "catalog epoch/digest",
-            "typed repair or drift facts",
+            "source/store compatibility verdicts",
+            "drift witnesses",
+            "typed repair facts",
+            "stable production integrity DTOs",
         ],
     );
 
@@ -787,6 +788,39 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
         &[
             "catalog-bound saved-place identity",
             "stable saved-data DTOs",
+        ],
+    );
+}
+
+#[test]
+fn data_integrity_returns_snapshot_metadata_when_enabled() {
+    let (_dir, file) = native_counter_project(1..=1);
+
+    let result = data_integrity(&file, true);
+
+    assert_eq!(result["available"], true, "{result}");
+    assert_store_snapshot(&result["store_snapshot"]);
+    assert!(
+        result["scanned"]
+            .as_u64()
+            .is_some_and(|scanned| scanned > 0)
+    );
+    let codes = result["findings"]
+        .as_array()
+        .expect("findings array")
+        .iter()
+        .map(|finding| finding["code"].as_str().expect("finding code"))
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"data.incomplete"), "{result}");
+    assert_contract(
+        &result,
+        "presentation-only",
+        "debug/admin advisory",
+        &[
+            "source/store compatibility verdicts",
+            "drift witnesses",
+            "typed repair facts",
+            "stable production integrity DTOs",
         ],
     );
 }

@@ -3,13 +3,13 @@
 //! account for.
 //!
 //! The scan is bounded and on demand only. It delegates integrity semantics to
-//! Marrow's canonical tooling visitor.
+//! Marrow's canonical tooling sample.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use marrow_check::CheckedProgram;
 use marrow_check::tooling::{self, IntegrityProblem};
-use marrow_store::StoreError;
+use marrow_json::DataSnapshotJson;
 
 use crate::store::{Availability, LiveStore};
 
@@ -20,7 +20,7 @@ const INTEGRITY_SCAN_LIMIT: usize = 5000;
 
 /// One stored record the current schema cannot account for: the human path text,
 /// Marrow tooling problem code, message, and optional help text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
     /// The canonical Marrow path text (`^books(1).title`), or `?<hex>` of the raw
     /// key when it does not decode, so a corrupt key stays visible.
@@ -31,25 +31,17 @@ pub struct Finding {
     pub help: Option<String>,
 }
 
-/// The result of a schema-change-impact scan: every finding, how many entries were
-/// scanned, and whether the store held more past the cap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SchemaImpact {
-    pub findings: Vec<Finding>,
-    pub scanned: usize,
-    pub truncated: bool,
-}
-
 /// `marrow/dataIntegrity` reply: whether the store could be read, plus the scan's
 /// findings, the count scanned, and whether the store held more past the cap. When
 /// `available` is false the findings are empty and the editor shows an unavailable
 /// state rather than an error — the same soft-degrade the data-roots view uses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DataIntegrityResult {
     pub available: bool,
     pub findings: Vec<Finding>,
     pub scanned: usize,
     pub truncated: bool,
+    pub store_snapshot: Option<DataSnapshotJson>,
 }
 
 impl DataIntegrityResult {
@@ -59,6 +51,7 @@ impl DataIntegrityResult {
             findings: Vec::new(),
             scanned: 0,
             truncated: false,
+            store_snapshot: None,
         }
     }
 }
@@ -73,15 +66,12 @@ pub fn data_integrity(reader: Option<&LiveStore>, program: &CheckedProgram) -> D
         return DataIntegrityResult::unavailable();
     };
     match scan_data_integrity(reader, program, INTEGRITY_SCAN_LIMIT) {
-        Availability::Available(SchemaImpact {
-            findings,
-            scanned,
-            truncated,
-        }) => DataIntegrityResult {
+        Availability::Available(stamped) => DataIntegrityResult {
             available: true,
-            findings,
-            scanned,
-            truncated,
+            findings: stamped.data.problems.into_iter().map(finding_for).collect(),
+            scanned: stamped.data.items_checked,
+            truncated: stamped.data.truncated,
+            store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
         },
         Availability::Unavailable => DataIntegrityResult::unavailable(),
     }
@@ -93,41 +83,10 @@ fn scan_data_integrity(
     reader: &LiveStore,
     program: &CheckedProgram,
     limit: usize,
-) -> Availability<SchemaImpact> {
+) -> Availability<tooling::StampedData<tooling::IntegrityProblemSample>> {
     let limit = limit.min(INTEGRITY_SCAN_LIMIT);
-    reader.with_tree_result(|store| {
-        let mut findings = Vec::new();
-        let mut scanned = 0usize;
-        let mut truncated = false;
-        let result = tooling::visit_integrity_problems(store, program, |outcome| {
-            if scanned == limit {
-                truncated = true;
-                return Err(StoreError::LimitExceeded {
-                    limit: "data integrity preview",
-                });
-            }
-            scanned += 1;
-            if let Some(problem) = outcome.problem {
-                findings.push(finding_for(problem));
-            }
-            Ok(())
-        });
-        match result {
-            Ok(()) => Ok(SchemaImpact {
-                findings,
-                scanned,
-                truncated: false,
-            }),
-            Err(StoreError::LimitExceeded {
-                limit: "data integrity preview",
-            }) if truncated => Ok(SchemaImpact {
-                findings,
-                scanned,
-                truncated: true,
-            }),
-            Err(error) => Err(error),
-        }
-    })
+    reader
+        .with_tree_result(|store| tooling::stamped_integrity_problem_details(program, store, limit))
 }
 
 fn finding_for(problem: IntegrityProblem) -> Finding {

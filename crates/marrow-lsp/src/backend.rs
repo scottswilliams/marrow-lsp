@@ -154,6 +154,7 @@ impl Backend {
                 findings: Vec::new(),
                 scanned: 0,
                 truncated: false,
+                store_snapshot: None,
             });
         };
         Ok(data_integrity(reader.as_ref(), program))

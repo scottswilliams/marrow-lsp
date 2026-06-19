@@ -56,10 +56,10 @@ const SAVED_DATA_MISSING_FACTS: &[&str] = &[
 ];
 const DATA_CHILDREN_MISSING_FACTS: &[&str] = &["catalog-bound saved-place identity"];
 const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
-    "catalog/store identity",
-    "store generation",
-    "catalog epoch/digest",
-    "typed repair or drift facts",
+    "source/store compatibility verdicts",
+    "drift witnesses",
+    "typed repair facts",
+    "stable production integrity DTOs",
 ];
 const RUN_MISSING_FACTS: &[&str] = &[
     "canonical function-entry facts",
@@ -510,10 +510,17 @@ fn data_program(workspace: &Workspace) -> Result<CheckedProgram, String> {
 pub fn data_integrity(file: &Path, allow_data: bool) -> Json {
     let contract = data_integrity_contract();
     if !allow_data {
-        return data_disabled(contract);
+        let mut disabled = data_disabled(contract);
+        disabled["store_snapshot"] = Json::Null;
+        return disabled;
     }
-    let unavailable =
-        json!({ "available": false, "findings": [], "scanned": 0, "truncated": false });
+    let unavailable = json!({
+        "available": false,
+        "findings": [],
+        "scanned": 0,
+        "truncated": false,
+        "store_snapshot": Json::Null,
+    });
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
         Err(error) => {
