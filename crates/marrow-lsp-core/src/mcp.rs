@@ -13,17 +13,19 @@
 //!   transport gates it behind an explicit opt-in and passes `allow_data = false`
 //!   otherwise; the function then returns a clear refusal envelope and never
 //!   touches the store.
-//! - **Execution** ([`run`]) evaluates a function over a *fresh* [`TreeStore`] —
-//!   never the project's real store — under a locked-down [`Host`] that grants
-//!   only a deterministic clock and a captured log: no filesystem, no environment,
-//!   no maintenance. Projects that still need a baseline catalog identity return a
-//!   blocker instead of letting this tool write durable state.
+//! - **Execution** ([`run`]) evaluates a function through Marrow's fresh-memory
+//!   project session — never the project's real store — under a locked-down
+//!   [`Host`] that grants only a deterministic clock and a captured log: no
+//!   filesystem, no environment, no maintenance.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckedProgram, type_at};
-use marrow_run::{CheckedEntryCall, Host, RunOutput, RuntimeError, Value, run_entry_with_host};
+use marrow_run::{
+    CheckedEntryCall, Host, ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError,
+    RunOutput, RuntimeError, SessionEntry, Value, run_entry_with_host,
+};
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
 use serde_json::{Map, Value as Json, json};
@@ -568,11 +570,12 @@ pub enum RunMode {
 /// `mw_run`: execute Marrow to confirm behavior — always sandboxed.
 ///
 /// **Run mode** checks the project (`analyze_project` via the workspace), then
-/// evaluates `entry` (`"module::fn"`) over a *fresh* [`TreeStore`] under a
-/// locked-down [`Host`]: a fixed clock and a captured log only — no filesystem, no
-/// environment, no maintenance. Non-empty `args` are blocked because Marrow does
-/// not yet expose stable typed run argument facts. The result carries the returned
-/// `value`, the captured `output`, and any check `diagnostics`.
+/// evaluates `entry` (`"module::fn"`) through Marrow's fresh-memory project
+/// session under a locked-down [`Host`]: a fixed clock and a captured log only —
+/// no filesystem, no environment, no maintenance. Non-empty `args` are blocked
+/// because Marrow does not yet expose stable typed run argument facts. The result
+/// carries the returned `value`, the captured `output`, and any check
+/// `diagnostics`.
 ///
 /// **Test mode** runs `check_tests` then, for every public zero-parameter test
 /// function, runs it over its *own* fresh [`TreeStore`] under the same locked host,
@@ -617,14 +620,9 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
         return json!({ "diagnostics": diagnostics, "output": "" });
     }
 
-    let program = &snapshot.program;
-    if crate::catalog_admission::requires_accepted_catalog_identity(program) {
-        return run_catalog_refusal();
-    }
-
     match mode {
-        RunMode::Run => run_entry(program, entry),
-        RunMode::Test => run_tests(&root, &config, program),
+        RunMode::Run => run_entry(&root, entry),
+        RunMode::Test => run_tests(&root, &config, &snapshot.program),
     }
 }
 
@@ -633,16 +631,6 @@ fn run_args_refusal() -> Json {
         "diagnostics": [{
             "code": "mcp.run.args",
             "message": "mw_run args are blocked until typed run argument facts from Marrow are available"
-        }],
-        "output": "",
-    })
-}
-
-fn run_catalog_refusal() -> Json {
-    json!({
-        "diagnostics": [{
-            "code": "mcp.run.catalog",
-            "message": "blocked-on-marrow: mw_run will not establish accepted catalog identity; use Marrow's production catalog flow or wait for read-only run admission facts"
         }],
         "output": "",
     })
@@ -663,10 +651,9 @@ fn load_project_for_run(
     Ok((workspace, root, config))
 }
 
-/// Evaluate one `entry` over a fresh [`TreeStore`] under the locked host, returning
-/// `{ value?, output, diagnostics: [] }` or a runtime-fault envelope. The store is
-/// brand new for this call and dropped when it returns; nothing persists.
-fn run_entry(program: &CheckedProgram, entry: Option<&str>) -> Json {
+/// Evaluate one `entry` through Marrow's fresh-memory session under the locked
+/// host, returning `{ value?, output, diagnostics: [] }` or a fault envelope.
+fn run_entry(root: &Path, entry: Option<&str>) -> Json {
     let Some(entry) = entry else {
         return json!({
             "diagnostics": [{
@@ -675,17 +662,18 @@ fn run_entry(program: &CheckedProgram, entry: Option<&str>) -> Json {
             "output": ""
         });
     };
-    let store = TreeStore::memory();
-    let host = locked_host();
-    let runtime = program.runtime();
-    let call = match CheckedEntryCall::new(&runtime, entry, Vec::new()) {
-        Ok(call) => call,
-        Err(error) => return runtime_error_json(&error, String::new()),
+    let open = ProjectOpen::run()
+        .with_entry_override(entry)
+        .with_fresh_memory_store();
+    let session = match ProjectSession::open(root, open) {
+        Ok(session) => session,
+        Err(error) => return project_session_error_json(&error, String::new()),
     };
+    let host = locked_host();
     let mut output = String::new();
-    match run_entry_with_host(&store, &host, &call, &mut output) {
+    match session.invoke(SessionEntry::new(entry, &host, &mut output)) {
         Ok(result) => run_output_json(result, output),
-        Err(error) => runtime_error_json(&error, output),
+        Err(error) => project_invoke_error_json(&error, output),
     }
 }
 
@@ -795,6 +783,23 @@ fn runtime_error_json(error: &RuntimeError, output: String) -> Json {
             "message": error.message,
             "line": error.span.line,
             "character": error.span.column,
+        }],
+        "output": truncate(output),
+    })
+}
+
+fn project_invoke_error_json(error: &ProjectInvokeError, output: String) -> Json {
+    match error {
+        ProjectInvokeError::Runtime(error) => runtime_error_json(error, output),
+        ProjectInvokeError::Session(error) => project_session_error_json(error, output),
+    }
+}
+
+fn project_session_error_json(error: &ProjectSessionError, output: String) -> Json {
+    json!({
+        "diagnostics": [{
+            "code": error.code(),
+            "message": error.message(),
         }],
         "output": truncate(output),
     })

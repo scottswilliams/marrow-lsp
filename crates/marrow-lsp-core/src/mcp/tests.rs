@@ -190,6 +190,12 @@ resource Counter
     required value: int
 
 store ^counter(id: int): Counter
+
+pub fn show()
+    if exists(^counter(1))
+        print(\"present\")
+        return
+    print(\"absent\")
 ",
     )
     .unwrap();
@@ -589,7 +595,7 @@ fn run_fault_preserves_output_printed_before_the_fault() {
 }
 
 #[test]
-fn run_blocks_shelf_fixture_until_catalog_identity_is_established() {
+fn run_uses_fresh_memory_for_shelf_fixture_without_establishing_catalog_identity() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/shelf")
         .canonicalize()
@@ -601,16 +607,10 @@ fn run_blocks_shelf_fixture_until_catalog_identity_is_established() {
     std::fs::copy(fixture.join("src/shelf/sample.mw"), src.join("sample.mw")).unwrap();
     let file = src.join("sample.mw");
     let result = run(&file, Some("shelf::sample::main"), &[], RunMode::Run);
-    assert_eq!(
-        result["diagnostics"][0]["code"], "mcp.run.catalog",
-        "{result}"
-    );
+    assert_eq!(result["diagnostics"], json!([]), "{result}");
     assert!(
-        result["diagnostics"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("accepted catalog identity"),
-        "durable fixture should block on catalog identity, got {result}"
+        result["output"].as_str().unwrap().contains("Small Gods"),
+        "fresh-memory run should execute the fixture over an in-memory store, got {result}"
     );
     assert!(
         !dir.path().join("marrow.catalog.json").exists(),
@@ -644,23 +644,40 @@ fn run_blocks_string_arguments() {
 
 #[test]
 fn run_does_not_touch_the_real_store() {
-    // The project pins a native store and has no accepted catalog yet. A
-    // presentation-only MCP run must not establish durable project state.
-    let (dir, file) = project();
-    let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
-    assert_eq!(
-        result["diagnostics"][0]["code"], "mcp.run.catalog",
-        "{result}"
-    );
+    let (dir, file) = native_counter_project(1..=1);
     let store_file = dir.path().join("data").join("marrow.redb");
-    assert!(
-        !store_file.exists(),
-        "a sandboxed run must never create or open the project store"
-    );
+    let before = {
+        let store = TreeStore::open_read_only(&store_file).expect("open real store");
+        store
+            .read_commit_metadata()
+            .expect("read commit metadata")
+            .expect("seed helper stamps the real store")
+    };
     let catalog_file = dir.path().join("marrow.catalog.json");
+    let catalog_before = std::fs::read(&catalog_file).expect("seed helper writes catalog");
+
+    let result = run(&file, Some("app::counter::show"), &[], RunMode::Run);
+    assert_eq!(result["diagnostics"], json!([]), "{result}");
     assert!(
-        !catalog_file.exists(),
-        "a presentation-only run must not write the accepted catalog"
+        result["output"].as_str().unwrap().contains("absent"),
+        "fresh-memory run must not read records from the real store: {result}"
+    );
+
+    let after = {
+        let store = TreeStore::open_read_only(&store_file).expect("reopen real store");
+        store
+            .read_commit_metadata()
+            .expect("read commit metadata")
+            .expect("real store remains stamped")
+    };
+    assert_eq!(
+        before, after,
+        "fresh-memory run must not advance the real store commit"
+    );
+    assert_eq!(
+        catalog_before,
+        std::fs::read(&catalog_file).expect("fresh-memory run preserves catalog"),
+        "fresh-memory run must not rewrite the accepted catalog artifact"
     );
 }
 
