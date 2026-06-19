@@ -289,32 +289,41 @@ fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
-fn assert_debug_admin_value_contract(value: &Json, missing_fact: &str) {
+fn write_large_sequence_fixture(dir: &Path, item_count: usize) -> (std::path::PathBuf, u32) {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let mut source = String::from("module shelf\n\npub fn main()\n   var items: sequence[int]\n");
+    for index in 1..=item_count {
+        source.push_str(&format!("   items({index}) = {index}\n"));
+    }
+    let print_line = item_count as u32 + 5;
+    source.push_str("   print(\"done\")\n");
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+    )
+    .unwrap();
+    (file, print_line)
+}
+
+fn assert_runtime_debug_value(value: &Json) {
     assert!(
         value.get("type").is_none(),
-        "DAP contract metadata should not masquerade as a value type: {value}"
+        "runtime debug metadata should not masquerade as a value type: {value}"
     );
 
     let attributes = value["presentationHint"]["attributes"]
         .as_array()
-        .unwrap_or_else(|| panic!("DAP value should include presentation attributes: {value}"));
+        .unwrap_or_else(|| panic!("runtime debug value should include attributes: {value}"));
     assert!(
         attributes.iter().any(|attribute| attribute == "readOnly"),
-        "DAP value presentation should be read-only: {value}"
+        "runtime debug value presentation should be read-only: {value}"
     );
-
-    let contract = value["marrowContract"]
-        .as_object()
-        .unwrap_or_else(|| panic!("DAP value should include Marrow contract metadata: {value}"));
-    assert_eq!(
-        contract.get("status").and_then(Json::as_str),
-        Some("blocked-on-marrow"),
-        "DAP value contract should mark blocked status: {value}"
-    );
-    assert_eq!(
-        contract.get("blockedOn").and_then(Json::as_str),
-        Some(missing_fact),
-        "DAP value contract should name `{missing_fact}`: {value}"
+    assert!(
+        value.get("marrowContract").is_none(),
+        "runtime debug values should consume Marrow facts directly: {value}"
     );
 }
 
@@ -1667,7 +1676,7 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
         .find(|variable| variable["name"] == "title")
         .expect("a `title` local");
     assert_eq!(title["value"], "Dune", "{locals}");
-    assert_debug_admin_value_contract(title, "canonical runtime value expansion facts");
+    assert_runtime_debug_value(title);
 
     // Locals remain available through the Locals scope, but watch/REPL
     // expression evaluation waits for canonical Marrow evaluate facts.
@@ -2054,7 +2063,7 @@ fn expression_breakpoint_does_not_stop_without_stop_on_entry() {
 }
 
 #[test]
-fn dap_value_surfaces_mark_blocked_contracts() {
+fn dap_local_values_consume_runtime_debug_facts() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_value_contract_fixture(dir.path());
 
@@ -2118,12 +2127,14 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     let locals = client.response_for(locals);
     let local_vars = locals["body"]["variables"].as_array().unwrap();
     assert_eq!(local_vars.len(), 3, "{locals}");
+    assert_eq!(locals["body"]["marrowDebug"]["visibleLocalCount"], 3);
+    assert_eq!(locals["body"]["marrowDebug"]["localsTruncated"], false);
     let title = local_vars
         .iter()
         .find(|variable| variable["name"] == "title")
         .expect("a `title` local");
     assert_eq!(title["value"], "Dune", "{locals}");
-    assert_debug_admin_value_contract(title, "canonical runtime value expansion facts");
+    assert_runtime_debug_value(title);
 
     let local_page = client.request(
         "variables",
@@ -2134,6 +2145,8 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     assert_eq!(local_page_vars.len(), 1, "{local_page}");
     assert_eq!(local_page_vars[0]["name"], "title", "{local_page}");
     assert_eq!(local_page_vars[0]["value"], "Dune", "{local_page}");
+    assert_eq!(local_page["body"]["marrowDebug"]["visibleLocalCount"], 3);
+    assert_eq!(local_page["body"]["marrowDebug"]["localsTruncated"], true);
 
     let local_zero_count = client.request(
         "variables",
@@ -2169,8 +2182,9 @@ fn dap_value_surfaces_mark_blocked_contracts() {
         .find(|variable| variable["name"] == "tags")
         .expect("a `tags` local");
     assert_eq!(tags["value"], "sequence[3]", "{locals}");
-    assert_debug_admin_value_contract(tags, "canonical runtime value expansion facts");
+    assert_runtime_debug_value(tags);
     assert_eq!(tags["indexedVariables"], 3, "{locals}");
+    assert_eq!(tags["marrowDebug"]["childrenTruncated"], false);
     let tags_ref = tags["variablesReference"].as_i64().unwrap();
     assert!(tags_ref > 0, "tags should be expandable: {locals}");
 
@@ -2178,10 +2192,12 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     let expanded = client.response_for(expanded);
     let expanded_vars = expanded["body"]["variables"].as_array().unwrap();
     assert_eq!(expanded_vars.len(), 3, "{expanded}");
+    assert_eq!(expanded["body"]["marrowDebug"]["childrenTruncated"], false);
     let tag_child = &expanded["body"]["variables"][0];
-    assert_eq!(tag_child["name"], "[0]", "{expanded}");
+    assert_eq!(tag_child["name"], "[1]", "{expanded}");
     assert_eq!(tag_child["value"], "classic", "{expanded}");
-    assert_debug_admin_value_contract(tag_child, "canonical runtime value expansion facts");
+    assert_runtime_debug_value(tag_child);
+    assert!(tag_child.get("marrowDebug").is_none(), "{expanded}");
 
     let zero_count = client.request(
         "variables",
@@ -2190,8 +2206,8 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     let zero_count = client.response_for(zero_count);
     let zero_count_vars = zero_count["body"]["variables"].as_array().unwrap();
     assert_eq!(zero_count_vars.len(), 2, "{zero_count}");
-    assert_eq!(zero_count_vars[0]["name"], "[1]", "{zero_count}");
-    assert_eq!(zero_count_vars[1]["name"], "[2]", "{zero_count}");
+    assert_eq!(zero_count_vars[0]["name"], "[2]", "{zero_count}");
+    assert_eq!(zero_count_vars[1]["name"], "[3]", "{zero_count}");
 
     let named_tags = client.request(
         "variables",
@@ -2213,7 +2229,7 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     let indexed_tags = client.response_for(indexed_tags);
     let indexed_tag_vars = indexed_tags["body"]["variables"].as_array().unwrap();
     assert_eq!(indexed_tag_vars.len(), 1, "{indexed_tags}");
-    assert_eq!(indexed_tag_vars[0]["name"], "[2]", "{indexed_tags}");
+    assert_eq!(indexed_tag_vars[0]["name"], "[3]", "{indexed_tags}");
 
     let page = client.request(
         "variables",
@@ -2222,7 +2238,7 @@ fn dap_value_surfaces_mark_blocked_contracts() {
     let page = client.response_for(page);
     let page_vars = page["body"]["variables"].as_array().unwrap();
     assert_eq!(page_vars.len(), 1, "{page}");
-    assert_eq!(page_vars[0]["name"], "[1]", "{page}");
+    assert_eq!(page_vars[0]["name"], "[2]", "{page}");
     assert_eq!(page_vars[0]["value"], "space", "{page}");
 
     let durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
@@ -2243,6 +2259,110 @@ fn dap_value_surfaces_mark_blocked_contracts() {
         "dap.durableData.blocked",
         "typed durable watch/path facts",
     );
+}
+
+#[test]
+fn dap_large_local_sequences_preserve_truncation_facts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, breakpoint_line) = write_large_sequence_fixture(dir.path(), 1001);
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({ "supportsVariablePaging": true }));
+    assert_eq!(client.response_for(init)["success"], true);
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+        }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+    client.event("initialized");
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": breakpoint_line }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(
+        &response["body"]["breakpoints"][0],
+        i64::from(breakpoint_line),
+    );
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+
+    let threads = client.request("threads", json!({}));
+    let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let stack = client.request("stackTrace", json!({ "threadId": thread_id }));
+    let frames = client.response_for(stack);
+    let frame_id = frames["body"]["stackFrames"][0]["id"].as_i64().unwrap();
+
+    let scopes = client.request("scopes", json!({ "frameId": frame_id }));
+    let scopes = client.response_for(scopes);
+    let locals_ref = scopes["body"]["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scope| scope["name"] == "Locals")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a Locals scope");
+
+    let locals = client.request("variables", json!({ "variablesReference": locals_ref }));
+    let locals = client.response_for(locals);
+    assert_eq!(locals["body"]["marrowDebug"]["visibleLocalCount"], 1);
+    assert_eq!(locals["body"]["marrowDebug"]["localsTruncated"], false);
+    let local_vars = locals["body"]["variables"].as_array().unwrap();
+    let items = local_vars
+        .iter()
+        .find(|variable| variable["name"] == "items")
+        .expect("an `items` local");
+    assert_eq!(items["value"], "sequence[1001]", "{locals}");
+    assert_eq!(items["indexedVariables"], 1000, "{locals}");
+    assert_eq!(items["marrowDebug"]["childrenTruncated"], true);
+    assert!(items.get("marrowContract").is_none(), "{locals}");
+    let items_ref = items["variablesReference"].as_i64().unwrap();
+    assert!(items_ref > 0, "items should be expandable: {locals}");
+
+    let last_captured = client.request(
+        "variables",
+        json!({
+            "variablesReference": items_ref,
+            "filter": "indexed",
+            "start": 999,
+            "count": 1,
+        }),
+    );
+    let last_captured = client.response_for(last_captured);
+    assert_eq!(
+        last_captured["body"]["marrowDebug"]["childrenTruncated"],
+        true
+    );
+    let last_captured_vars = last_captured["body"]["variables"].as_array().unwrap();
+    assert_eq!(last_captured_vars.len(), 1, "{last_captured}");
+    assert_eq!(last_captured_vars[0]["name"], "[1000]", "{last_captured}");
+    assert_eq!(last_captured_vars[0]["value"], "1000", "{last_captured}");
+
+    let omitted = client.request(
+        "variables",
+        json!({
+            "variablesReference": items_ref,
+            "filter": "indexed",
+            "start": 1000,
+            "count": 1,
+        }),
+    );
+    let omitted = client.response_for(omitted);
+    assert_eq!(omitted["body"]["variables"], json!([]), "{omitted}");
+    assert_eq!(omitted["body"]["marrowDebug"]["childrenTruncated"], true);
 }
 
 #[test]

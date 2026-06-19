@@ -65,7 +65,6 @@ const VARIABLES_FILTER_INVALID: &str = "invalid variables filter";
 const ARGUMENTS_INVALID: &str = "request arguments must be an object";
 const THREAD_ID_INVALID: &str = "missing or invalid threadId";
 const FRAME_ID_INVALID: &str = "missing or invalid frameId";
-const LOCAL_VALUE_BLOCKER: &str = "canonical runtime value expansion facts";
 const ERROR_UNSUPPORTED_REQUEST: DapError =
     DapError::new("dap.unsupportedRequest", STATUS_UNSUPPORTED_REQUEST);
 const ERROR_ARGUMENTS_INVALID: DapError =
@@ -193,7 +192,7 @@ impl BreakpointBlock {
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
 #[derive(Clone)]
 enum Expandable {
-    Local(marrow_run::Value),
+    Local(marrow_run::DebugValue),
 }
 
 /// The live run-thread plus the channels to drive it.
@@ -820,28 +819,22 @@ impl<W: Write> Session<W> {
             );
             return;
         }
-        let variables = match input.reference {
+        let body = match input.reference {
             LOCALS_REF => self.locals_variables(input.page, input.filter),
-            other => {
-                let children = match self.expandables.get(&other) {
-                    Some(Expandable::Local(value)) => {
-                        crate::variables::children(value, input.page, input.filter)
-                    }
-                    None => Vec::new(),
-                };
-                self.child_variables(children)
-            }
+            other => self.expandable_variables(other, input.page, input.filter),
         };
-        self.respond(request, true, json!({ "variables": variables }));
+        self.respond(request, true, body);
     }
 
     /// The Locals scope contents: each local rendered, with a reference for any
     /// compound value the client can drill into.
-    fn locals_variables(&mut self, page: ChildPage, filter: VariablesFilter) -> Vec<Json> {
+    fn locals_variables(&mut self, page: ChildPage, filter: VariablesFilter) -> Json {
         let Some(QueryResult::Locals(snapshot)) = self.query(Query::Locals { page, filter }) else {
-            return Vec::new();
+            return variables_body(Vec::new());
         };
-        snapshot
+        let visible_local_count = snapshot.visible_local_count;
+        let locals_truncated = snapshot.locals_truncated;
+        let variables = snapshot
             .entries
             .into_iter()
             .map(|local| {
@@ -857,11 +850,41 @@ impl<W: Write> Session<W> {
                     &local.name,
                     &local.value,
                     reference,
-                    LOCAL_VALUE_BLOCKER,
                     counts,
+                    local.children_truncated,
                 )
             })
-            .collect()
+            .collect();
+        let mut body = variables_body(variables);
+        body["marrowDebug"] = json!({
+            "visibleLocalCount": visible_local_count,
+            "localsTruncated": locals_truncated,
+        });
+        body
+    }
+
+    fn expandable_variables(
+        &mut self,
+        reference: i64,
+        page: ChildPage,
+        filter: VariablesFilter,
+    ) -> Json {
+        let Some(value) = self
+            .expandables
+            .get(&reference)
+            .map(|expandable| match expandable {
+                Expandable::Local(value) => value.clone(),
+            })
+        else {
+            return variables_body(Vec::new());
+        };
+        let children_truncated = value.children_truncated();
+        let children = crate::variables::children(&value, page, filter);
+        let mut body = variables_body(self.child_variables(children));
+        body["marrowDebug"] = json!({
+            "childrenTruncated": children_truncated,
+        });
+        body
     }
 
     fn child_variables(&mut self, children: Vec<crate::variables::Child>) -> Vec<Json> {
@@ -880,8 +903,8 @@ impl<W: Write> Session<W> {
                     &child.name,
                     &child.value,
                     reference,
-                    LOCAL_VALUE_BLOCKER,
                     counts,
+                    child.children_truncated,
                 )
             })
             .collect()
@@ -1134,14 +1157,13 @@ fn variable_json(
     name: &str,
     value: &str,
     reference: i64,
-    blocked_on: &str,
     counts: Option<ChildCounts>,
+    children_truncated: Option<bool>,
 ) -> Json {
     let mut variable = json!({
         "name": name,
         "value": value,
         "presentationHint": debug_admin_presentation_hint(),
-        "marrowContract": debug_admin_contract(blocked_on),
         "variablesReference": reference,
     });
     if let Some(counts) = counts {
@@ -1152,14 +1174,16 @@ fn variable_json(
             variable["indexedVariables"] = json!(indexed);
         }
     }
+    if let Some(children_truncated) = children_truncated {
+        variable["marrowDebug"] = json!({
+            "childrenTruncated": children_truncated,
+        });
+    }
     variable
 }
 
-fn debug_admin_contract(blocked_on: &str) -> Json {
-    json!({
-        "status": "blocked-on-marrow",
-        "blockedOn": blocked_on,
-    })
+fn variables_body(variables: Vec<Json>) -> Json {
+    json!({ "variables": variables })
 }
 
 fn debug_admin_presentation_hint() -> Json {

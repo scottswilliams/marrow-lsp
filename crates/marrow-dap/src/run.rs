@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 
 use marrow_check::AnalysisIdentity;
 use marrow_run::{
-    EntryInvocation, Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry,
+    DebugValue, EntryInvocation, Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry,
     SystemNondeterminism,
 };
 
@@ -158,7 +158,7 @@ fn outcome(
         Ok(run) => {
             let rendered = run
                 .value
-                .map(|value| crate::variables::value_preview(&value))
+                .map(|value| DebugValue::from_value(value).preview())
                 .unwrap_or_default();
             Outcome {
                 output,

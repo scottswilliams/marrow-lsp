@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
-use marrow_run::{Frame, RuntimeError, StepHook, Value};
+use marrow_run::{DebugValue, Frame, RuntimeError, StepHook};
 
 use crate::step::{self, Resume, StopReason};
 use crate::variables::{self, ChildPage, VariablesFilter};
@@ -35,12 +35,12 @@ use crate::variables::{self, ChildPage, VariablesFilter};
 /// `transaction` rolls back as the run stack unwinds.
 pub const RUN_TERMINATED: &str = "run.terminated";
 
-/// A snapshot of the locals visible at a stop: each name with its one-line
-/// rendering and, for a compound value, the owned value to expand. Captured on
-/// the run-thread by cloning out of the frame, so it is `Send` and the frame
-/// borrow stays put.
+/// A snapshot of the locals visible at a stop. Captured on the run-thread from
+/// Marrow runtime debug facts, so it is `Send` and the frame borrow stays put.
 #[derive(Debug, Clone)]
 pub struct LocalsSnapshot {
+    pub visible_local_count: usize,
+    pub locals_truncated: bool,
     pub entries: Vec<LocalVar>,
 }
 
@@ -49,8 +49,9 @@ pub struct LocalsSnapshot {
 pub struct LocalVar {
     pub name: String,
     pub value: String,
-    /// The owned value to expand, present only for a compound shape.
-    pub expand: Option<Value>,
+    pub children_truncated: Option<bool>,
+    /// The owned debug value to expand, present only for a compound shape.
+    pub expand: Option<DebugValue>,
 }
 
 /// Where the run stopped, sent to the protocol thread so it can raise a DAP
@@ -58,6 +59,7 @@ pub struct LocalVar {
 #[derive(Debug, Clone)]
 pub struct StopInfo {
     pub reason: StopReason,
+    pub span: marrow_syntax::SourceSpan,
     pub file: Option<PathBuf>,
     pub line: u32,
     pub column: u32,
@@ -164,35 +166,41 @@ impl Debugger {
     /// Capture the locals at the current frame as owned, `Send` data.
     fn snapshot_locals(
         frame: &Frame<'_, '_>,
+        span: marrow_syntax::SourceSpan,
         page: ChildPage,
         filter: VariablesFilter,
     ) -> LocalsSnapshot {
-        // Frame::locals yields shadowing outer-then-inner; keep the last binding
-        // per name so the value in scope wins, matching what the run sees.
-        let mut order: Vec<&str> = Vec::new();
-        let mut latest: std::collections::HashMap<&str, &Value> = std::collections::HashMap::new();
-        for (name, value) in frame.locals() {
-            if !latest.contains_key(name) {
-                order.push(name);
-            }
-            latest.insert(name, value);
-        }
-        let entries = variables::local_children_from_refs(order, &latest, page, filter)
+        let snapshot = frame.debug_snapshot(
+            span,
+            page.to_debug_value_page(),
+            filter.to_debug_value_filter(),
+        );
+        let entries = variables::local_children(snapshot.locals)
             .into_iter()
             .map(|child| LocalVar {
                 name: child.name,
                 value: child.value,
+                children_truncated: child.children_truncated,
                 expand: child.expand,
             })
             .collect();
-        LocalsSnapshot { entries }
+        LocalsSnapshot {
+            visible_local_count: snapshot.visible_local_count,
+            locals_truncated: snapshot.locals_truncated,
+            entries,
+        }
     }
 
     /// Answer one query from the live frame, returning owned data.
-    fn answer(&self, frame: &Frame<'_, '_>, query: Query) -> QueryResult {
+    fn answer(
+        &self,
+        frame: &Frame<'_, '_>,
+        span: marrow_syntax::SourceSpan,
+        query: Query,
+    ) -> QueryResult {
         match query {
             Query::Locals { page, filter } => {
-                QueryResult::Locals(Self::snapshot_locals(frame, page, filter))
+                QueryResult::Locals(Self::snapshot_locals(frame, span, page, filter))
             }
         }
     }
@@ -201,6 +209,7 @@ impl Debugger {
     /// resumes or terminates. Returns `Ok(())` to continue the run or `Err` to
     /// unwind it (terminate). The frame is borrowed only here, on this thread.
     fn park(&mut self, info: StopInfo, frame: Frame<'_, '_>) -> Result<(), RuntimeError> {
+        let span = info.span;
         if self.events.send(RunEvent::Stopped(info)).is_err() {
             // The protocol thread is gone; unwind the run rather than hang.
             return Err(terminated());
@@ -208,7 +217,7 @@ impl Debugger {
         loop {
             match self.control.recv() {
                 Ok(Control::Query(query)) => {
-                    let answer = self.answer(&frame, query);
+                    let answer = self.answer(&frame, span, query);
                     if self.events.send(RunEvent::Answer(answer)).is_err() {
                         return Err(terminated());
                     }
@@ -249,6 +258,7 @@ impl StepHook for Debugger {
         };
         let info = StopInfo {
             reason,
+            span,
             file: frame.file().map(PathBuf::from),
             line: span.line,
             column: span.column,
