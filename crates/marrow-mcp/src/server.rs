@@ -98,6 +98,33 @@ fn data_path_segment_schema() -> Json {
     })
 }
 
+fn run_input_schema() -> Json {
+    let mut run_arg = marrow_run::entry_argument_json_schema();
+    let defs = run_arg
+        .as_object_mut()
+        .and_then(|schema| schema.remove("$defs"))
+        .expect("Marrow entry argument schema carries recursive definitions");
+    json!({
+        "type": "object",
+        "properties": {
+            "file": string_prop("Absolute path to any .mw file inside the project."),
+            "entry": string_prop("Entry selector such as `module::fn` for run mode."),
+            "args": {
+                "type": "array",
+                "items": run_arg,
+                "description": "Typed named arguments for run mode. Test mode does not accept args.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["run", "test"],
+                "description": "`run` (default) executes `entry`; `test` runs the project's tests.",
+            },
+        },
+        "required": ["file"],
+        "$defs": defs,
+    })
+}
+
 fn production_contract(description: &str) -> Json {
     json!({
         "status": "ready",
@@ -326,7 +353,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched and durable catalog state is not established. `mode: \"run\"` evaluates `entry` (\"module::fn\") as a presentation contract until Marrow exposes canonical function-entry facts; the entry string is not a stable production entry API. Non-empty `args` are blocked in every mode until Marrow exposes typed run argument facts. `mode: \"test\"` runs the project's test suite, each test over its own fresh store.",
+            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched and durable catalog state is not established. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor and accepts typed `args`. `mode: \"test\"` runs the project's test suite, each test over its own fresh store, and does not accept args.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -336,33 +363,12 @@ pub fn tools() -> Json {
                 "host": "locked-down",
                 "realStore": "never-touched",
                 "catalogState": "not-established",
-                "blockedInputs": {
-                    "args": {
-                        "status": "blocked",
-                        "blocker": "typed run argument facts",
-                        "missingFacts": ["typed run argument facts"],
-                        "appliesToModes": ["run", "test"],
-                    },
-                },
-                "presentationInputs": {
-                    "entry": {
-                        "status": "presentation-only",
-                        "blocker": "canonical function-entry facts",
-                        "missingFacts": ["canonical function-entry facts"],
-                        "stableProductionApi": false,
-                    },
+                "typedInputs": {
+                    "args": "typed run protocol DTOs",
+                    "entry": "current-session entry selector",
                 },
             })),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "entry": string_prop("Entry string such as `module::fn` (run mode); useful until Marrow exposes canonical function-entry facts, but not a stable production entry API."),
-                    "args": { "type": "array", "description": "Positional arguments are not accepted yet; non-empty args are blocked in every mode until Marrow exposes typed run argument facts." },
-                    "mode": { "type": "string", "enum": ["run", "test"], "description": "`run` (default) executes `entry`; `test` runs the project's tests." },
-                },
-                "required": ["file"],
-            },
+            "inputSchema": run_input_schema(),
         },
     ])
 }
@@ -743,35 +749,13 @@ mod tests {
         assert_eq!(run["host"], "locked-down");
         assert_eq!(run["realStore"], "never-touched");
         assert_eq!(run["catalogState"], "not-established");
-        assert_eq!(run["blockedInputs"]["args"]["status"], "blocked");
+        assert_eq!(run["typedInputs"]["args"], "typed run protocol DTOs");
         assert_eq!(
-            run["blockedInputs"]["args"]["blocker"],
-            "typed run argument facts"
+            run["typedInputs"]["entry"],
+            "current-session entry selector"
         );
-        assert_eq!(
-            strings(&run["blockedInputs"]["args"]["missingFacts"]),
-            vec!["typed run argument facts"]
-        );
-        assert_eq!(
-            run["blockedInputs"]["args"]["appliesToModes"],
-            json!(["run", "test"])
-        );
-        assert_eq!(
-            run["presentationInputs"]["entry"]["status"],
-            "presentation-only"
-        );
-        assert_eq!(
-            run["presentationInputs"]["entry"]["blocker"],
-            "canonical function-entry facts"
-        );
-        assert_eq!(
-            strings(&run["presentationInputs"]["entry"]["missingFacts"]),
-            vec!["canonical function-entry facts"]
-        );
-        assert_eq!(
-            run["presentationInputs"]["entry"]["stableProductionApi"],
-            false
-        );
+        assert!(run.get("blockedInputs").is_none());
+        assert!(run.get("presentationInputs").is_none());
 
         let removed_args_opt_in = ["allow", "Prototype", "Args"].concat();
         assert!(
@@ -779,6 +763,18 @@ mod tests {
                 .get(&removed_args_opt_in)
                 .is_none(),
             "mw_run schema must not expose an argument opt-in"
+        );
+
+        let mut expected_arg_schema = marrow_run::entry_argument_json_schema();
+        let expected_defs = expected_arg_schema
+            .as_object_mut()
+            .and_then(|schema| schema.remove("$defs"))
+            .expect("Marrow entry argument schema carries definitions");
+        let run_schema = &tool(tools, "mw_run")["inputSchema"];
+        assert_eq!(run_schema["$defs"], expected_defs);
+        assert_eq!(
+            run_schema["properties"]["args"]["items"],
+            expected_arg_schema
         );
     }
 
@@ -950,16 +946,26 @@ mod tests {
     fn optional_string_nulls_remain_absent() {
         let policy = Policy { allow_data: false };
 
-        for arguments in [
-            json!({ "file": "/x.mw", "mode": null, "args": [1] }),
-            json!({ "file": "/x.mw", "entry": null, "args": [1] }),
-        ] {
-            let result = call("mw_run", &arguments, policy).unwrap();
-            assert_eq!(
-                result["diagnostics"][0]["code"], "mcp.run.args",
-                "null optional strings should be absent so run args still block before project loading: {result}"
-            );
-        }
+        let result = call(
+            "mw_run",
+            &json!({
+                "file": "/x.mw",
+                "mode": null,
+                "entry": null,
+                "args": [{ "name": "n", "value": { "kind": "int", "value": "1" } }],
+            }),
+            policy,
+        )
+        .unwrap();
+        assert_ne!(result["diagnostics"][0]["code"], "mcp.run.args");
+        assert!(
+            result["diagnostics"][0]["message"]
+                .as_str()
+                .is_some_and(
+                    |message| message.contains("project") || message.contains("marrow.json")
+                ),
+            "null optional strings should be absent and valid typed args should reach project loading: {result}"
+        );
 
         let error = call("mw_check", &json!({ "source": null }), policy)
             .expect_err("null source should be absent, not a source snippet");
@@ -970,7 +976,28 @@ mod tests {
     }
 
     #[test]
-    fn mw_run_blocks_non_empty_args() {
+    fn mw_run_rejects_numeric_typed_int_args() {
+        let policy = Policy { allow_data: false };
+        let result = call(
+            "mw_run",
+            &json!({
+                "file": "/nope/project/src/main.mw",
+                "entry": "app::main",
+                "args": [
+                    { "name": "value", "value": { "kind": "int", "value": 1 } }
+                ],
+            }),
+            policy,
+        )
+        .unwrap();
+        assert_eq!(
+            result["diagnostics"][0]["code"], "mcp.run.args",
+            "mw_run numeric JSON entry ints must fail before project loading: {result}"
+        );
+    }
+
+    #[test]
+    fn mw_run_rejects_malformed_typed_args() {
         let policy = Policy { allow_data: false };
         let result = call(
             "mw_run",
@@ -984,26 +1011,28 @@ mod tests {
         .unwrap();
         assert_eq!(
             result["diagnostics"][0]["code"], "mcp.run.args",
-            "mw_run args must be blocked before project loading: {result}"
+            "mw_run malformed typed args must fail before project loading: {result}"
         );
     }
 
     #[test]
-    fn mw_run_blocks_non_empty_test_mode_args() {
+    fn mw_run_rejects_test_mode_args() {
         let policy = Policy { allow_data: false };
         let result = call(
             "mw_run",
             &json!({
                 "file": "/nope/project/src/main.mw",
                 "mode": "test",
-                "args": [1],
+                "args": [
+                    { "name": "value", "value": { "kind": "int", "value": "1" } }
+                ],
             }),
             policy,
         )
         .unwrap();
         assert_eq!(
             result["diagnostics"][0]["code"], "mcp.run.args",
-            "mw_run test args must be blocked before project loading: {result}"
+            "mw_run test args must be rejected before project loading: {result}"
         );
     }
 

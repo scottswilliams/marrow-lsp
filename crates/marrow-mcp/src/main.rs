@@ -757,7 +757,7 @@ mod tests {
                         RUN_MISSING_FACTS,
                     ),
                 }),
-                "sandboxed execution helper (presentation-only: canonical function-entry facts +5): value 42",
+                "sandboxed execution helper (presentation-only: transitive effect facts +3): value 42",
             ),
         ];
         for (name, result, expected) in cases {

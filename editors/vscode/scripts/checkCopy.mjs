@@ -120,16 +120,22 @@ assertMentions(
 assertMentions(
   changelogF5,
   "CHANGELOG.md F5 bullet",
-  "F5 canonical entry facts framing",
-  /canonical\s+function-entry\s+facts/i,
+  "typed debug args framing",
+  /typed\s+`args`/i,
 );
 assertMentions(
   changelogF5,
   "CHANGELOG.md F5 bullet",
-  "default entry framing",
-  /defaultEntry/i,
+  "exact scalar debug args framing",
+  /exact\s+string\s+forms/i,
 );
 assertMentions(
+  changelogF5,
+  "CHANGELOG.md F5 bullet",
+  "explicit entry framing",
+  /explicit\s+`entry`/i,
+);
+assertDoesNotMention(
   changelogF5,
   "CHANGELOG.md F5 bullet",
   "explicit entry blocked framing",
@@ -168,8 +174,79 @@ assert.equal(
 const launchProperties = marrowDebugger.configurationAttributes.launch.properties;
 assert.equal(
   Object.hasOwn(launchProperties, "entry"),
+  true,
+  "debug launch configuration should expose Marrow-admitted explicit entry selectors",
+);
+assert.match(
+  launchProperties.entry.description,
+  /defaultEntry/i,
+  "debug launch entry description must explain defaultEntry fallback",
+);
+assert.equal(
+  launchProperties.args.maxItems,
+  undefined,
+  "debug launch args must not be capped now that DAP accepts typed args",
+);
+assert.match(
+  launchProperties.args.description,
+  /typed/i,
+  "debug launch args description must name typed args",
+);
+assert.deepEqual(
+  launchProperties.args.items,
+  { $ref: "#/$defs/entryArgument" },
+  "debug launch args should use the single recursive entryArgument schema",
+);
+const launchDefs = marrowDebugger.configurationAttributes.launch.$defs;
+assert.equal(
+  launchDefs.entryArgument.additionalProperties,
   false,
-  "debug launch configuration must not expose explicit entry strings",
+  "debug launch arg objects must be closed",
+);
+assert.equal(
+  launchDefs.entryArgument.properties.name.minLength,
+  1,
+  "debug launch arg names must carry Marrow's non-empty constraint",
+);
+assert.equal(
+  launchDefs.entryArgument.properties.name.pattern,
+  "\\S",
+  "debug launch arg names must reject whitespace-only strings",
+);
+assert.deepEqual(
+  launchDefs.entryArgument.properties.value.$ref,
+  "#/$defs/entryValue",
+  "debug launch arg values must use the recursive Marrow value schema",
+);
+const launchArgValueVariants = launchDefs.entryValue.oneOf;
+assert.ok(
+  Array.isArray(launchArgValueVariants),
+  "debug launch arg value schema must expose typed Marrow variants",
+);
+const scalarVariants = launchDefs.entryScalar.oneOf;
+const intArgValue = scalarVariants.find(
+  (variant) => variant.properties?.kind?.const === "int",
+);
+assert.deepEqual(
+  intArgValue?.properties?.value,
+  { type: "string" },
+  "debug launch int args must use Marrow's exact string form",
+);
+const bytesArgValue = scalarVariants.find(
+  (variant) => variant.properties?.kind?.const === "bytes",
+);
+assert.deepEqual(
+  bytesArgValue?.properties?.value,
+  { type: "string", pattern: "^([0-9a-f]{2})*$" },
+  "debug launch bytes args must use Marrow's lowercase hex string form",
+);
+const sequenceArgValue = launchArgValueVariants.find(
+  (variant) => variant.properties?.kind?.const === "sequence",
+);
+assert.deepEqual(
+  sequenceArgValue?.properties?.value?.items,
+  { $ref: "#/$defs/entryValue" },
+  "debug launch sequence args must recurse into the typed Marrow value schema",
 );
 assert.equal(
   launchProperties.stopOnEntry.default,
@@ -186,14 +263,14 @@ const debugSnippetDescription = marrowDebugger.configurationSnippets[0].descript
 assertMentions(
   debugSnippetDescription,
   "debug snippet description",
-  "canonical function-entry facts",
-  /canonical function-entry facts/i,
+  "defaultEntry",
+  /defaultEntry/i,
 );
 const debugSnippetBody = marrowDebugger.configurationSnippets[0].body;
 assert.equal(
   Object.hasOwn(debugSnippetBody, "entry"),
   false,
-  "debug snippet must not seed a blocked entry string",
+  "default debug snippet should not force an explicit entry",
 );
 assert.equal(
   debugSnippetBody.stopOnEntry,
@@ -227,16 +304,22 @@ assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveDat
 assertMentions(
   readmeF5,
   "README.md F5 bullet",
-  "F5 canonical entry facts framing",
-  /canonical\s+function-entry\s+facts/i,
+  "typed debug args framing",
+  /typed\s+`args`/i,
 );
 assertMentions(
   readmeF5,
   "README.md F5 bullet",
-  "default entry framing",
-  /defaultEntry/i,
+  "exact scalar debug args framing",
+  /exact\s+string\s+forms/i,
 );
 assertMentions(
+  readmeF5,
+  "README.md F5 bullet",
+  "explicit entry framing",
+  /set\s+`entry`/i,
+);
+assertDoesNotMention(
   readmeF5,
   "README.md F5 bullet",
   "explicit entry blocked framing",

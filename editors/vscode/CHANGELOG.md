@@ -19,8 +19,9 @@ Initial release.
 - Document formatting.
 - The Saved Resource Inspector view for opt-in committed saved-resource inspection through
   Marrow-owned store facts.
-- F5 debugging via the `marrow-dap` adapter, with stop-on-entry, statement stepping, advisory
-  breakpoints, and variables. The project `defaultEntry` is used while canonical function-entry
-  facts are pending; explicit entry strings and line breakpoint arming remain blocked.
+- F5 debugging via the `marrow-dap` adapter, with explicit `entry`, Marrow-admitted typed `args`
+  where `int`, `date`, and `bytes` use exact string forms, stop-on-entry, statement stepping,
+  advisory breakpoints, and variables. Durable-data debugger inspection and line breakpoint arming
+  remain blocked until Marrow exposes the canonical facts behind those surfaces.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
   debug adapter (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`).

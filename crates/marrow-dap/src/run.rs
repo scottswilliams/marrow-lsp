@@ -9,8 +9,10 @@ use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
+use marrow_check::AnalysisIdentity;
 use marrow_run::{
-    Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry, SystemNondeterminism,
+    EntryInvocation, Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry,
+    SystemNondeterminism,
 };
 
 use crate::debugger::{Control, Debugger, RunEvent};
@@ -33,19 +35,39 @@ pub struct RunHandle {
     pub events: Receiver<RunEvent>,
 }
 
+struct RunRequest {
+    project_dir: std::path::PathBuf,
+    entry: Option<String>,
+    analysis_identity: AnalysisIdentity,
+    ephemeral_entry_identity: bool,
+    invocation: EntryInvocation,
+    stop_on_entry: bool,
+}
+
 /// Start the run on a dedicated thread. Project preparation and invocation happen
 /// there, so session internals never cross the protocol/run boundary.
 pub fn spawn(
     project_dir: std::path::PathBuf,
     entry: Option<String>,
+    analysis_identity: AnalysisIdentity,
+    ephemeral_entry_identity: bool,
+    invocation: EntryInvocation,
     stop_on_entry: bool,
 ) -> Result<RunHandle, String> {
     let (event_tx, event_rx) = channel::<RunEvent>();
     let (control_tx, control_rx) = channel::<Control>();
+    let request = RunRequest {
+        project_dir,
+        entry,
+        analysis_identity,
+        ephemeral_entry_identity,
+        invocation,
+        stop_on_entry,
+    };
 
     let handle = thread::Builder::new()
         .name("marrow-dap-run".to_string())
-        .spawn(move || run_on_thread(project_dir, entry, stop_on_entry, event_tx, control_rx))
+        .spawn(move || run_on_thread(request, event_tx, control_rx))
         .map_err(|error| format!("could not start the run thread: {error}"))?;
 
     Ok(RunHandle {
@@ -60,13 +82,25 @@ pub fn spawn(
 /// this thread.
 /// Returns the [`Outcome`].
 fn run_on_thread(
-    project_dir: std::path::PathBuf,
-    requested_entry: Option<String>,
-    stop_on_entry: bool,
+    request: RunRequest,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
 ) -> Option<Outcome> {
-    let launch = match crate::project::prepare(&project_dir, requested_entry.as_deref()) {
+    let RunRequest {
+        project_dir,
+        entry,
+        analysis_identity,
+        ephemeral_entry_identity,
+        invocation,
+        stop_on_entry,
+    } = request;
+    let launch = match crate::project::prepare_admitted(
+        &project_dir,
+        entry.as_deref(),
+        &analysis_identity,
+        ephemeral_entry_identity,
+        invocation,
+    ) {
         Ok(launch) => launch,
         Err(error) => {
             return Some(Outcome {
@@ -75,15 +109,19 @@ fn run_on_thread(
             });
         }
     };
-    let crate::project::Launch { session, entry } = launch;
+    let crate::project::Launch {
+        session,
+        invocation,
+        ..
+    } = launch;
     let debugger = Debugger::new(stop_on_entry, events, control);
-    run_with_session(&session, &entry, debugger)
+    run_with_session(&session, invocation, debugger)
 }
 
 /// Run the entry through the project session, threading the debugger.
 fn run_with_session(
     session: &ProjectSession,
-    entry: &str,
+    invocation: EntryInvocation,
     mut debugger: Debugger,
 ) -> Option<Outcome> {
     // A debug run gets a real clock and a captured log sink, so `std::clock`/
@@ -94,7 +132,7 @@ fn run_with_session(
         .with_log_sink(std::rc::Rc::clone(&log));
     let mut output = String::new();
     let result = session.invoke(
-        SessionEntry::new(entry, &host, &mut output)
+        SessionEntry::protocol(invocation, &host, &mut output)
             .with_hook(&mut debugger)
             .with_isolated_writes(),
     );

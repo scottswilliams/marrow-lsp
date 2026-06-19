@@ -21,10 +21,11 @@ Rust binaries. No parsing or position math runs in TypeScript.
   tooling facts and does not accept editor-authored saved paths.
   Refreshes automatically when `marrow.json` is saved, and on demand from the view title.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
-  project's `defaultEntry` while Marrow's canonical function-entry facts are pending. F5 remains
-  useful for launch, stop-on-entry, stepping, advisory breakpoints, and variables. Explicit
-  entry strings, durable-data debugger inspection, and line breakpoint arming are blocked until
-  Marrow exposes the canonical facts behind those surfaces.
+  project's `defaultEntry`, or set `entry` and typed `args` in `launch.json`. Marrow admits
+  the args; `int`, `date`, and `bytes` use exact string forms. F5 remains useful for launch,
+  stop-on-entry, stepping, advisory breakpoints, and variables. Durable-data debugger inspection
+  and line breakpoint arming remain blocked until Marrow exposes the canonical facts behind
+  those surfaces.
 
 ## Requirements
 

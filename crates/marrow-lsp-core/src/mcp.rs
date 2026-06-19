@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckedProgram, type_at};
 use marrow_run::{
-    CheckedEntryCall, Host, ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError,
-    RunOutput, RuntimeError, SessionEntry, Value, run_entry_with_host,
+    CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation, Host,
+    ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError, RunOutput, RuntimeError,
+    SessionEntry, Value, run_entry_with_host,
 };
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
@@ -81,12 +82,10 @@ pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "stable production integrity DTOs",
 ];
 pub const RUN_MISSING_FACTS: &[&str] = &[
-    "canonical function-entry facts",
     "transitive effect facts",
     "durable-scope facts",
     "transaction facts",
     "runtime generation facts",
-    "typed run protocol DTOs",
 ];
 
 fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
@@ -648,17 +647,17 @@ pub enum RunMode {
 /// `mw_run`: execute Marrow to confirm behavior — always sandboxed.
 ///
 /// **Run mode** checks the project (`analyze_project` via the workspace), then
-/// evaluates `entry` (`"module::fn"`) through Marrow's fresh-memory project
-/// session under a locked-down [`Host`]: a fixed clock and a captured log only —
-/// no filesystem, no environment, no maintenance. Non-empty `args` are blocked
-/// because Marrow does not yet expose stable typed run argument facts. The result
-/// carries the returned `value`, the captured `output`, and any check
+/// evaluates `entry` through Marrow's fresh-memory project session under a
+/// locked-down [`Host`]: a fixed clock and a captured log only — no filesystem,
+/// no environment, no maintenance. Typed `args` are decoded from the wire and
+/// admitted by Marrow's entry descriptor for the current checked program. The
+/// result carries the returned `value`, the captured `output`, and any check
 /// `diagnostics`.
 ///
 /// **Test mode** runs `check_tests` then, for every public zero-parameter test
-/// function, runs it over its *own* fresh [`TreeStore`] under the same locked host,
-/// reporting per-test pass/fail/error. `entry` is ignored; non-empty `args` are
-/// blocked for both modes until Marrow owns typed run arguments.
+/// function, runs it over its *own* fresh [`TreeStore`] under the same locked
+/// host, reporting per-test pass/fail/error. `entry` is ignored; `args` are only
+/// accepted in run mode.
 ///
 /// The project's real store is never opened in either mode, so an agent can run
 /// code with no risk to managed data.
@@ -667,8 +666,12 @@ pub fn run(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Js
 }
 
 fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
-    if !args.is_empty() {
-        return run_args_refusal();
+    let args = match marrow_run::entry_arguments_from_json(args) {
+        Ok(args) => args,
+        Err(error) => return run_args_error(&error.message()),
+    };
+    if matches!(mode, RunMode::Test) && !args.is_empty() {
+        return run_args_error("mw_run test mode does not accept entry args");
     }
 
     let (workspace, root, config) = match load_project_for_run(file) {
@@ -699,16 +702,16 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
     }
 
     match mode {
-        RunMode::Run => run_entry(&root, entry),
+        RunMode::Run => run_entry(&root, entry, args),
         RunMode::Test => run_tests(&root, &config, &snapshot.program),
     }
 }
 
-fn run_args_refusal() -> Json {
+fn run_args_error(message: &str) -> Json {
     json!({
         "diagnostics": [{
             "code": "mcp.run.args",
-            "message": "mw_run args are blocked until typed run argument facts from Marrow are available"
+            "message": message
         }],
         "output": "",
     })
@@ -731,25 +734,29 @@ fn load_project_for_run(
 
 /// Evaluate one `entry` through Marrow's fresh-memory session under the locked
 /// host, returning `{ value?, output, diagnostics: [] }` or a fault envelope.
-fn run_entry(root: &Path, entry: Option<&str>) -> Json {
-    let Some(entry) = entry else {
-        return json!({
-            "diagnostics": [{
-                "message": "blocked-on-marrow entry string: run mode needs `entry`; Marrow resolves it through canonical function-entry facts, and this is not a stable production entry API"
-            }],
-            "output": ""
-        });
-    };
-    let open = ProjectOpen::run()
-        .with_entry_override(entry)
-        .with_fresh_memory_store();
+fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json {
+    let mut open = ProjectOpen::run().with_fresh_memory_store();
+    if let Some(entry) = entry {
+        open = open.with_entry_override(entry);
+    }
     let session = match ProjectSession::open(root, open) {
         Ok(session) => session,
         Err(error) => return project_session_error_json(&error, String::new()),
     };
+    let Some(entry) = session.run_entry() else {
+        return project_session_error_json(&ProjectSessionError::NoEntry, String::new());
+    };
+    let descriptor = match EntryDescriptor::resolve(session.runtime_program(), entry) {
+        Ok(descriptor) => descriptor,
+        Err(error) => return entry_descriptor_error_json(error, String::new()),
+    };
+    let invocation = EntryInvocation {
+        identity: descriptor.identity,
+        arguments: args,
+    };
     let host = locked_host();
     let mut output = String::new();
-    match session.invoke(SessionEntry::new(entry, &host, &mut output)) {
+    match session.invoke(SessionEntry::protocol(invocation, &host, &mut output)) {
         Ok(result) => run_output_json(result, output),
         Err(error) => project_invoke_error_json(&error, output),
     }
@@ -864,6 +871,24 @@ fn runtime_error_json(error: &RuntimeError, output: String) -> Json {
         }],
         "output": truncate(output),
     })
+}
+
+fn entry_descriptor_error_json(error: EntryDescriptorError, output: String) -> Json {
+    json!({
+        "diagnostics": [{
+            "code": "mcp.run.entry",
+            "message": entry_descriptor_error_message(error),
+        }],
+        "output": truncate(output),
+    })
+}
+
+fn entry_descriptor_error_message(error: EntryDescriptorError) -> &'static str {
+    match error {
+        EntryDescriptorError::Ambiguous => "entry selector is ambiguous",
+        EntryDescriptorError::Private => "entry selector resolves to a private function",
+        EntryDescriptorError::Missing => "entry selector does not resolve to a public function",
+    }
 }
 
 fn project_invoke_error_json(error: &ProjectInvokeError, output: String) -> Json {

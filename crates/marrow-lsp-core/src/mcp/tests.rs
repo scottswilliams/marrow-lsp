@@ -445,18 +445,16 @@ fn run_executes_a_pure_function_and_returns_its_value() {
         "presentation-only",
         "sandboxed execution helper",
         &[
-            "canonical function-entry facts",
             "transitive effect facts",
             "durable-scope facts",
             "transaction facts",
             "runtime generation facts",
-            "typed run protocol DTOs",
         ],
     );
 }
 
 #[test]
-fn run_blocks_non_empty_args_before_loading() {
+fn run_rejects_malformed_typed_args_before_loading() {
     let result = run(
         Path::new("/nope/project/src/main.mw"),
         Some("app::main"),
@@ -465,8 +463,8 @@ fn run_blocks_non_empty_args_before_loading() {
     );
     let message = result["diagnostics"][0]["message"].as_str().unwrap();
     assert!(
-        message.contains("typed run argument facts from Marrow"),
-        "non-empty run args should be blocked before project loading: {result}"
+        message.contains("run argument 0 must be an object"),
+        "malformed run args should fail before project loading: {result}"
     );
     assert_eq!(result["output"], "");
     assert_contract(
@@ -474,32 +472,36 @@ fn run_blocks_non_empty_args_before_loading() {
         "presentation-only",
         "sandboxed execution helper",
         &[
-            "canonical function-entry facts",
             "transitive effect facts",
             "durable-scope facts",
             "transaction facts",
             "runtime generation facts",
-            "typed run protocol DTOs",
         ],
     );
 }
 
 #[test]
-fn run_without_entry_frames_the_blocked_entry_contract() {
+fn run_rejects_numeric_typed_int_args_before_loading() {
+    let result = run(
+        Path::new("/nope/project/src/main.mw"),
+        Some("app::main"),
+        &[json!({ "name": "n", "value": { "kind": "int", "value": 1 } })],
+        RunMode::Run,
+    );
+    assert_eq!(
+        result["diagnostics"][0]["code"], "mcp.run.args",
+        "numeric JSON entry ints should be rejected by Marrow protocol admission before project loading: {result}"
+    );
+}
+
+#[test]
+fn run_without_entry_reports_the_session_entry_error() {
     let (_dir, file) = pure_project();
     let result = run(&file, None, &[], RunMode::Run);
     let message = result["diagnostics"][0]["message"].as_str().unwrap();
     assert!(
-        message.contains("blocked-on-marrow entry string"),
-        "missing entry should frame entry as blocked: {result}"
-    );
-    assert!(
-        message.contains("canonical function-entry facts"),
-        "missing entry should name the blocking facts: {result}"
-    );
-    assert!(
-        message.contains("not a stable production entry API"),
-        "missing entry should not imply a stable entry API: {result}"
+        message.contains("no entry"),
+        "missing entry should report the Marrow session error: {result}"
     );
     assert_eq!(result["output"], "");
     assert_contract(
@@ -507,12 +509,10 @@ fn run_without_entry_frames_the_blocked_entry_contract() {
         "presentation-only",
         "sandboxed execution helper",
         &[
-            "canonical function-entry facts",
             "transitive effect facts",
             "durable-scope facts",
             "transaction facts",
             "runtime generation facts",
-            "typed run protocol DTOs",
         ],
     );
 }
@@ -580,7 +580,7 @@ fn run_value_json_caps_large_resource_field_names() {
 }
 
 #[test]
-fn run_contract_marks_entry_string_as_presentation_only() {
+fn run_entry_uses_canonical_descriptor_invocation() {
     let (_dir, file) = pure_project();
     let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
     assert_eq!(result["diagnostics"], json!([]), "{result}");
@@ -593,12 +593,10 @@ fn run_contract_marks_entry_string_as_presentation_only() {
         "presentation-only",
         "sandboxed execution helper",
         &[
-            "canonical function-entry facts",
             "transitive effect facts",
             "durable-scope facts",
             "transaction facts",
             "runtime generation facts",
-            "typed run protocol DTOs",
         ],
     );
 }
@@ -651,19 +649,20 @@ fn output_truncation_preserves_utf8_boundaries() {
 }
 
 #[test]
-fn run_blocks_string_arguments() {
+fn run_accepts_typed_string_arguments() {
     let (_dir, file) = pure_project();
     let result = run(
         &file,
         Some("shelf::books::greet"),
-        &[json!("Ada")],
+        &[json!({
+            "name": "name",
+            "value": { "kind": "string", "value": "Ada" }
+        })],
         RunMode::Run,
     );
-    let message = result["diagnostics"][0]["message"].as_str().unwrap();
-    assert!(
-        message.contains("typed run argument facts from Marrow"),
-        "string args should be blocked: {result}"
-    );
+
+    assert_eq!(result["diagnostics"], json!([]), "{result}");
+    assert_eq!(result["value"], "hi Ada", "{result}");
 }
 
 #[test]
@@ -744,23 +743,26 @@ pub fn fails()
         "presentation-only",
         "sandboxed execution helper",
         &[
-            "canonical function-entry facts",
             "transitive effect facts",
             "durable-scope facts",
             "transaction facts",
             "runtime generation facts",
-            "typed run protocol DTOs",
         ],
     );
 }
 
 #[test]
-fn run_test_mode_blocks_args() {
+fn run_test_mode_rejects_args() {
     let (_dir, file) = pure_project();
-    let result = run(&file, None, &[json!(1)], RunMode::Test);
+    let result = run(
+        &file,
+        None,
+        &[json!({ "name": "value", "value": { "kind": "int", "value": "1" } })],
+        RunMode::Test,
+    );
     assert_eq!(
         result["diagnostics"][0]["code"], "mcp.run.args",
-        "test mode args should be blocked before running tests: {result}"
+        "test mode args should be rejected before running tests: {result}"
     );
 }
 

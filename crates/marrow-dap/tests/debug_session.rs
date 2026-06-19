@@ -171,9 +171,8 @@ fn stopped_fixture_client() -> (tempfile::TempDir, Client) {
     (dir, client)
 }
 
-/// Write a fixture whose entry would need a launch argument if that surface were
-/// available. Launch blocks before running it until Marrow exposes typed facts.
-fn write_blocked_arg_fixture(dir: &Path) {
+/// Write a fixture whose entry accepts a typed string argument.
+fn write_arg_fixture(dir: &Path) {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let source = "module shelf\n\
@@ -1092,9 +1091,9 @@ fn malformed_resume_thread_ids_fail_before_state_checks() {
 }
 
 #[test]
-fn launch_blocks_non_empty_args_by_default_until_typed_facts_exist() {
+fn launch_accepts_explicit_entry_with_typed_args() {
     let dir = tempfile::tempdir().unwrap();
-    write_blocked_arg_fixture(dir.path());
+    write_arg_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -1106,21 +1105,76 @@ fn launch_blocks_non_empty_args_by_default_until_typed_facts_exist() {
         "launch",
         json!({
             "project": dir.path().display().to_string(),
-            "args": ["Dune"],
+            "entry": "shelf::main",
+            "args": [
+                { "name": "title", "value": { "kind": "string", "value": "Dune" } }
+            ],
         }),
     );
-    let blocked = client.response_for(launch);
-    assert_blocked_response(
-        &blocked,
-        "dap.launchArgs.blocked",
-        "typed launch argument decoding facts",
+    assert_launch_success(&client.response_for(launch));
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+
+    let output = client.event("output");
+    assert!(
+        output["body"]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Dune")),
+        "typed launch arg should reach the entry: {output}"
     );
+    client.event("terminated");
+}
+
+#[test]
+fn configuration_done_rejects_source_changed_after_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    write_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "entry": "shelf::main",
+            "args": [
+                { "name": "title", "value": { "kind": "string", "value": "Dune" } }
+            ],
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    std::fs::write(
+        dir.path().join("src").join("shelf.mw"),
+        "module shelf\n\npub fn main(title: string)\n    print(\"configurationDone-version\")\n",
+    )
+    .unwrap();
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let output = client.event("output");
+    assert_eq!(output["body"]["category"], "stderr", "{output}");
+    let text = output["body"]["output"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("changed between launch and configurationDone"),
+        "configurationDone should reject a run whose admitted launch identity drifted: {output}"
+    );
+    assert!(
+        !text.contains("configurationDone-version"),
+        "the changed program must not run after launch identity drift: {output}"
+    );
+    client.event("terminated");
 }
 
 #[test]
 fn launch_rejects_non_array_args_as_protocol_validation() {
     let dir = tempfile::tempdir().unwrap();
-    write_blocked_arg_fixture(dir.path());
+    write_arg_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -1142,12 +1196,87 @@ fn launch_rejects_non_array_args_as_protocol_validation() {
         "invalid-params",
         None,
     );
+    assert!(
+        rejected["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("`args` must be an array")),
+        "non-array args should fail at the DAP array-shape boundary: {rejected}"
+    );
+}
+
+#[test]
+fn launch_rejects_malformed_typed_args_as_protocol_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "args": [1],
+        }),
+    );
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchArgs.invalidType",
+        "invalid-params",
+        None,
+    );
+    assert!(
+        rejected["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("run argument 0 must be an object")),
+        "malformed launch args should preserve Marrow admission details: {rejected}"
+    );
+}
+
+#[test]
+fn launch_rejects_numeric_typed_int_args_as_protocol_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    write_arg_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+    client.event("initialized");
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "entry": "shelf::main",
+            "args": [
+                { "name": "title", "value": { "kind": "int", "value": 1 } }
+            ],
+        }),
+    );
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchArgs.invalidType",
+        "invalid-params",
+        None,
+    );
+    assert!(
+        rejected["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("needs string field `value`")),
+        "numeric int launch args should report Marrow's exact admission detail: {rejected}"
+    );
 }
 
 #[test]
 fn launch_rejects_concrete_non_string_entry_as_protocol_validation() {
     let dir = tempfile::tempdir().unwrap();
-    write_blocked_arg_fixture(dir.path());
+    write_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -1174,7 +1303,7 @@ fn launch_rejects_concrete_non_string_entry_as_protocol_validation() {
 #[test]
 fn launch_treats_null_entry_as_absent() {
     let dir = tempfile::tempdir().unwrap();
-    write_blocked_arg_fixture(dir.path());
+    write_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -1196,7 +1325,7 @@ fn launch_treats_null_entry_as_absent() {
 #[test]
 fn launch_rejects_concrete_non_boolean_stop_on_entry_as_protocol_validation() {
     let dir = tempfile::tempdir().unwrap();
-    write_blocked_arg_fixture(dir.path());
+    write_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -1223,7 +1352,7 @@ fn launch_rejects_concrete_non_boolean_stop_on_entry_as_protocol_validation() {
 #[test]
 fn launch_treats_null_stop_on_entry_as_absent() {
     let dir = tempfile::tempdir().unwrap();
-    write_blocked_arg_fixture(dir.path());
+    write_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -1263,7 +1392,7 @@ fn launch_rejects_blank_project_as_protocol_validation() {
 #[test]
 fn malformed_launch_does_not_arm_configuration_done() {
     let dir = tempfile::tempdir().unwrap();
-    write_blocked_arg_fixture(dir.path());
+    write_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -1417,7 +1546,7 @@ fn launch_blocks_invalid_utf8_catalog_repair_without_writing() {
 }
 
 #[test]
-fn launch_rejects_explicit_entry_strings_until_canonical_facts_exist() {
+fn launch_accepts_explicit_zero_arg_entry() {
     let dir = tempfile::tempdir().unwrap();
     write_fixture(dir.path());
 
@@ -1434,12 +1563,7 @@ fn launch_rejects_explicit_entry_strings_until_canonical_facts_exist() {
             "entry": "shelf::main",
         }),
     );
-    let blocked = client.response_for(launch);
-    assert_blocked_response(
-        &blocked,
-        "dap.launchEntry.blocked",
-        "canonical function-entry facts",
-    );
+    assert_launch_success(&client.response_for(launch));
 }
 
 #[test]

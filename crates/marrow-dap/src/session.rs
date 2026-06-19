@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
+use marrow_run::{EntryArgument, EntryInvocation};
 use serde_json::{Value as Json, json};
 
 use crate::debugger::{Control, Query, QueryResult, RunEvent, StopInfo};
@@ -37,7 +38,6 @@ const STATUS_INVALID_PARAMS: &str = "invalid-params";
 const STATUS_INVALID_STATE: &str = "invalid-state";
 const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
-const LAUNCH_ARGS_FACTS: &str = "typed launch argument decoding facts";
 const STOP_POINT_FACTS: &str = "canonical stop-point facts";
 const BREAKPOINT_EXPRESSION_FACTS: &str = "canonical stop-point and breakpoint expression facts";
 const EXPRESSION_EVALUATE_FACTS: &str = "canonical expression/evaluate facts";
@@ -46,8 +46,6 @@ const DURABLE_WATCH_PATH_FACTS: &str = "typed durable watch/path facts";
 const RAW_DATA_INSPECTION_BLOCKED: &str =
     "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
 const EXPRESSION_EVALUATE_BLOCKED: &str = "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow";
-const LAUNCH_ARGS_BLOCKED: &str =
-    "blocked-on-marrow: DAP launch args need typed launch argument decoding facts from Marrow";
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
 const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP conditional/hit-condition/logpoint breakpoints need canonical stop-point and breakpoint expression facts from Marrow";
@@ -79,8 +77,6 @@ const ERROR_LAUNCH_ENTRY_INVALID_TYPE: DapError =
     DapError::new("dap.launchEntry.invalidType", STATUS_INVALID_PARAMS);
 const ERROR_LAUNCH_STOP_ON_ENTRY_INVALID_TYPE: DapError =
     DapError::new("dap.launchStopOnEntry.invalidType", STATUS_INVALID_PARAMS);
-const ERROR_LAUNCH_ARGS_BLOCKED: DapError =
-    DapError::blocked("dap.launchArgs.blocked", LAUNCH_ARGS_FACTS);
 const ERROR_BREAKPOINT_UNVERIFIED: DapError =
     DapError::blocked("dap.breakpoint.unverified", STOP_POINT_FACTS);
 const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
@@ -224,6 +220,10 @@ pub struct Session<W: Write> {
 /// Launch state held until `configurationDone` starts the run.
 struct PendingLaunch {
     project_dir: PathBuf,
+    entry: Option<String>,
+    analysis_identity: marrow_check::AnalysisIdentity,
+    ephemeral_entry_identity: bool,
+    invocation: EntryInvocation,
     stop_on_entry: bool,
 }
 
@@ -238,8 +238,17 @@ enum BreakpointSource {
 }
 
 struct DapInputError {
-    message: &'static str,
+    message: String,
     contract: DapError,
+}
+
+impl DapInputError {
+    fn new(message: impl Into<String>, contract: DapError) -> Self {
+        Self {
+            message: message.into(),
+            contract,
+        }
+    }
 }
 
 struct VariablesInput {
@@ -486,8 +495,8 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        match validate_args(arguments.get("args")) {
-            Ok(()) => {}
+        let args = match parse_launch_args(arguments.get("args")) {
+            Ok(args) => args,
             Err(error) => {
                 self.respond_error(request, error.message, error.contract);
                 return;
@@ -500,12 +509,16 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        // Prepare the project now so a bad project fails launch before the client
-        // sends configurationDone. The run thread prepares again when it starts.
-        match crate::project::prepare(&project_dir, entry) {
-            Ok(_) => {
+        // Prepare now so a bad project fails launch. The run thread reopens the
+        // project and requires the admitted source/config and entry identity to match.
+        match crate::project::prepare(&project_dir, entry, &args) {
+            Ok(launch) => {
                 self.pending = Some(PendingLaunch {
                     project_dir,
+                    entry: entry.map(str::to_string),
+                    analysis_identity: launch.analysis_identity,
+                    ephemeral_entry_identity: launch.ephemeral_entry_identity,
+                    invocation: launch.invocation,
                     stop_on_entry,
                 });
                 self.respond(request, true, json!({}));
@@ -584,7 +597,14 @@ impl<W: Write> Session<W> {
             );
             return;
         };
-        match crate::run::spawn(pending.project_dir, None, pending.stop_on_entry) {
+        match crate::run::spawn(
+            pending.project_dir,
+            pending.entry,
+            pending.analysis_identity,
+            pending.ephemeral_entry_identity,
+            pending.invocation,
+            pending.stop_on_entry,
+        ) {
             Ok(running) => {
                 self.running = Some(Running {
                     handle: running.handle,
@@ -1043,10 +1063,10 @@ fn request_arguments(request: &Json) -> Result<Json, DapInputError> {
     match request.get("arguments") {
         None | Some(Json::Null) => Ok(json!({})),
         Some(value @ Json::Object(_)) => Ok(value.clone()),
-        Some(_) => Err(DapInputError {
-            message: ARGUMENTS_INVALID,
-            contract: ERROR_ARGUMENTS_INVALID,
-        }),
+        Some(_) => Err(DapInputError::new(
+            ARGUMENTS_INVALID,
+            ERROR_ARGUMENTS_INVALID,
+        )),
     }
 }
 
@@ -1091,17 +1111,11 @@ fn parse_variables_filter(arguments: &Json) -> Result<VariablesFilter, DapInputE
 }
 
 fn variables_page_invalid() -> DapInputError {
-    DapInputError {
-        message: VARIABLES_PAGE_INVALID,
-        contract: ERROR_VARIABLES_PAGE_INVALID,
-    }
+    DapInputError::new(VARIABLES_PAGE_INVALID, ERROR_VARIABLES_PAGE_INVALID)
 }
 
 fn variables_filter_invalid() -> DapInputError {
-    DapInputError {
-        message: VARIABLES_FILTER_INVALID,
-        contract: ERROR_VARIABLES_FILTER_INVALID,
-    }
+    DapInputError::new(VARIABLES_FILTER_INVALID, ERROR_VARIABLES_FILTER_INVALID)
 }
 
 fn parse_variables_reference(arguments: &Json) -> Result<i64, DapInputError> {
@@ -1110,10 +1124,10 @@ fn parse_variables_reference(arguments: &Json) -> Result<i64, DapInputError> {
         .and_then(Json::as_i64)
         .filter(|reference| *reference > 0)
     else {
-        return Err(DapInputError {
-            message: VARIABLES_REFERENCE_INVALID,
-            contract: ERROR_VARIABLES_REFERENCE_INVALID,
-        });
+        return Err(DapInputError::new(
+            VARIABLES_REFERENCE_INVALID,
+            ERROR_VARIABLES_REFERENCE_INVALID,
+        ));
     };
     Ok(reference)
 }
@@ -1147,16 +1161,16 @@ fn parse_singleton_id(
 ) -> Result<(), DapInputError> {
     match arguments.get(field).and_then(Json::as_i64) {
         Some(value) if value == expected => Ok(()),
-        _ => Err(DapInputError { message, contract }),
+        _ => Err(DapInputError::new(message, contract)),
     }
 }
 
 fn breakpoint_source(arguments: &Json) -> Result<BreakpointSource, DapInputError> {
     let Some(source) = arguments.get("source").and_then(Json::as_object) else {
-        return Err(DapInputError {
-            message: BREAKPOINT_SOURCE_INVALID,
-            contract: ERROR_BREAKPOINT_SOURCE_INVALID,
-        });
+        return Err(DapInputError::new(
+            BREAKPOINT_SOURCE_INVALID,
+            ERROR_BREAKPOINT_SOURCE_INVALID,
+        ));
     };
     if source
         .get("sourceReference")
@@ -1169,15 +1183,14 @@ fn breakpoint_source(arguments: &Json) -> Result<BreakpointSource, DapInputError
         return path
             .as_str()
             .map(|_| BreakpointSource::Path)
-            .ok_or(DapInputError {
-                message: BREAKPOINT_SOURCE_INVALID,
-                contract: ERROR_BREAKPOINT_SOURCE_INVALID,
+            .ok_or_else(|| {
+                DapInputError::new(BREAKPOINT_SOURCE_INVALID, ERROR_BREAKPOINT_SOURCE_INVALID)
             });
     }
-    Err(DapInputError {
-        message: BREAKPOINT_SOURCE_INVALID,
-        contract: ERROR_BREAKPOINT_SOURCE_INVALID,
-    })
+    Err(DapInputError::new(
+        BREAKPOINT_SOURCE_INVALID,
+        ERROR_BREAKPOINT_SOURCE_INVALID,
+    ))
 }
 
 fn requested_breakpoints(arguments: &Json) -> Result<Vec<RequestedBreakpoint>, DapInputError> {
@@ -1185,25 +1198,24 @@ fn requested_breakpoints(arguments: &Json) -> Result<Vec<RequestedBreakpoint>, D
         return Ok(Vec::new());
     };
     let Some(points) = points.as_array() else {
-        return Err(DapInputError {
-            message: BREAKPOINTS_INVALID,
-            contract: ERROR_BREAKPOINTS_INVALID,
-        });
+        return Err(DapInputError::new(
+            BREAKPOINTS_INVALID,
+            ERROR_BREAKPOINTS_INVALID,
+        ));
     };
     Ok(points.iter().map(requested_breakpoint).collect())
 }
 
 fn parse_evaluate_input(arguments: &Json) -> Result<EvaluateInput<'_>, DapInputError> {
     let Some(expression) = arguments.get("expression").and_then(Json::as_str) else {
-        return Err(DapInputError {
-            message: EVALUATE_EXPRESSION_INVALID,
-            contract: ERROR_EVALUATE_EXPRESSION_INVALID,
-        });
+        return Err(DapInputError::new(
+            EVALUATE_EXPRESSION_INVALID,
+            ERROR_EVALUATE_EXPRESSION_INVALID,
+        ));
     };
     let context = match arguments.get("context") {
-        Some(context) => Some(context.as_str().ok_or(DapInputError {
-            message: EVALUATE_CONTEXT_INVALID,
-            contract: ERROR_EVALUATE_CONTEXT_INVALID,
+        Some(context) => Some(context.as_str().ok_or_else(|| {
+            DapInputError::new(EVALUATE_CONTEXT_INVALID, ERROR_EVALUATE_CONTEXT_INVALID)
         })?),
         None => None,
     };
@@ -1244,10 +1256,10 @@ fn breakpoint_block(point: &Json) -> BreakpointBlock {
 fn parse_project(arguments: &Json) -> Result<&str, DapInputError> {
     match arguments.get("project") {
         Some(Json::String(project)) if !project.trim().is_empty() => Ok(project),
-        _ => Err(DapInputError {
-            message: "launch needs a non-empty `project` directory",
-            contract: ERROR_LAUNCH_PROJECT_INVALID_PARAMS,
-        }),
+        _ => Err(DapInputError::new(
+            "launch needs a non-empty `project` directory",
+            ERROR_LAUNCH_PROJECT_INVALID_PARAMS,
+        )),
     }
 }
 
@@ -1255,10 +1267,10 @@ fn parse_entry(arguments: &Json) -> Result<Option<&str>, DapInputError> {
     match arguments.get("entry") {
         None | Some(Json::Null) => Ok(None),
         Some(Json::String(entry)) => Ok(Some(entry)),
-        Some(_) => Err(DapInputError {
-            message: "`entry` must be a string when present",
-            contract: ERROR_LAUNCH_ENTRY_INVALID_TYPE,
-        }),
+        Some(_) => Err(DapInputError::new(
+            "`entry` must be a string when present",
+            ERROR_LAUNCH_ENTRY_INVALID_TYPE,
+        )),
     }
 }
 
@@ -1266,32 +1278,26 @@ fn parse_stop_on_entry(arguments: &Json) -> Result<bool, DapInputError> {
     match arguments.get("stopOnEntry") {
         None | Some(Json::Null) => Ok(false),
         Some(Json::Bool(stop_on_entry)) => Ok(*stop_on_entry),
-        Some(_) => Err(DapInputError {
-            message: "`stopOnEntry` must be a boolean",
-            contract: ERROR_LAUNCH_STOP_ON_ENTRY_INVALID_TYPE,
-        }),
+        Some(_) => Err(DapInputError::new(
+            "`stopOnEntry` must be a boolean",
+            ERROR_LAUNCH_STOP_ON_ENTRY_INVALID_TYPE,
+        )),
     }
 }
 
-/// Parse the optional launch `args` array. Non-empty values are blocked until
-/// Marrow exposes typed launch argument facts.
-fn validate_args(args: Option<&Json>) -> Result<(), DapInputError> {
+/// Parse the optional launch `args` array into Marrow's typed entry DTOs.
+fn parse_launch_args(args: Option<&Json>) -> Result<Vec<EntryArgument>, DapInputError> {
     let Some(array) = args else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let Some(items) = array.as_array() else {
-        return Err(DapInputError {
-            message: "`args` must be an array",
-            contract: ERROR_LAUNCH_ARGS_INVALID_TYPE,
-        });
+        return Err(DapInputError::new(
+            "`args` must be an array",
+            ERROR_LAUNCH_ARGS_INVALID_TYPE,
+        ));
     };
-    if !items.is_empty() {
-        return Err(DapInputError {
-            message: LAUNCH_ARGS_BLOCKED,
-            contract: ERROR_LAUNCH_ARGS_BLOCKED,
-        });
-    }
-    Ok(())
+    marrow_run::entry_arguments_from_json(items)
+        .map_err(|error| DapInputError::new(error.message(), ERROR_LAUNCH_ARGS_INVALID_TYPE))
 }
 
 #[cfg(test)]

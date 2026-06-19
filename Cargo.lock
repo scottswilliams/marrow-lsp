@@ -546,6 +546,7 @@ name = "marrow-mcp"
 version = "0.1.0"
 dependencies = [
  "marrow-lsp-core",
+ "marrow-run",
  "marrow-store",
  "serde_json",
  "tempfile",

@@ -213,16 +213,172 @@
                 "description": "Path to the Marrow project (the directory containing marrow.json).",
                 "default": "${workspaceFolder}"
               },
+              "entry": {
+                "type": "string",
+                "description": "Entry selector such as module::fn. Omit to use defaultEntry from marrow.json."
+              },
               "args": {
                 "type": "array",
-                "description": "Launch arguments for the Marrow entry. Non-empty values are blocked until Marrow exposes typed launch argument facts.",
-                "maxItems": 0,
+                "description": "Typed named arguments for the Marrow entry. Each item has a parameter name and a typed value object.",
+                "items": {
+                  "$ref": "#/$defs/entryArgument"
+                },
                 "default": []
               },
               "stopOnEntry": {
                 "type": "boolean",
                 "description": "Break at the first statement of the entry.",
                 "default": true
+              }
+            },
+            "$defs": {
+              "entryArgument": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "description": "Entry parameter name."
+                  },
+                  "value": {
+                    "$ref": "#/$defs/entryValue",
+                    "description": "Typed value object admitted by Marrow through the debug adapter. Scalar int, date, and bytes values use exact string forms."
+                  }
+                },
+                "required": ["name", "value"],
+                "additionalProperties": false
+              },
+              "entryScalar": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "int" },
+                      "value": { "type": "string" }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "bool" },
+                      "value": { "type": "boolean" }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "string" },
+                      "value": { "type": "string" }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "decimal" },
+                      "value": { "type": "string" }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "date" },
+                      "value": { "type": "string" }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "instant" },
+                      "value": { "type": "string" }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "duration" },
+                      "value": { "type": "string" }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "bytes" },
+                      "value": {
+                        "type": "string",
+                        "pattern": "^([0-9a-f]{2})*$"
+                      }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "entryValue": {
+                "oneOf": [
+                  { "$ref": "#/$defs/entryScalar/oneOf/0" },
+                  { "$ref": "#/$defs/entryScalar/oneOf/1" },
+                  { "$ref": "#/$defs/entryScalar/oneOf/2" },
+                  { "$ref": "#/$defs/entryScalar/oneOf/3" },
+                  { "$ref": "#/$defs/entryScalar/oneOf/4" },
+                  { "$ref": "#/$defs/entryScalar/oneOf/5" },
+                  { "$ref": "#/$defs/entryScalar/oneOf/6" },
+                  { "$ref": "#/$defs/entryScalar/oneOf/7" },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "enum_member" },
+                      "member_catalog_id": {
+                        "type": "string",
+                        "pattern": "^cat_[0-9a-f]{32}$"
+                      }
+                    },
+                    "required": ["kind", "member_catalog_id"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "identity" },
+                      "store_catalog_id": {
+                        "type": "string",
+                        "pattern": "^cat_[0-9a-f]{32}$"
+                      },
+                      "keys": {
+                        "type": "array",
+                        "items": { "$ref": "#/$defs/entryScalar" }
+                      }
+                    },
+                    "required": ["kind", "store_catalog_id", "keys"],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "const": "sequence" },
+                      "value": {
+                        "type": "array",
+                        "items": { "$ref": "#/$defs/entryValue" }
+                      }
+                    },
+                    "required": ["kind", "value"],
+                    "additionalProperties": false
+                  }
+                ]
               }
             }
           }
@@ -240,7 +396,7 @@
         "configurationSnippets": [
           {
             "label": "Marrow: Debug default entry",
-            "description": "Debug the defaultEntry from marrow.json while canonical function-entry facts are pending.",
+            "description": "Debug the defaultEntry from marrow.json. Set entry in launch.json to choose another entry.",
             "body": {
               "type": "marrow",
               "request": "launch",
