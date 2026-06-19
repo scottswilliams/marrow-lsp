@@ -77,6 +77,10 @@ fn range_text<'a>(source: &'a str, index: &LineIndex, range: Range) -> &'a str {
     &source[start..end]
 }
 
+fn range_for(source: &str, start: usize, end: usize) -> Range {
+    LineIndex::new(source.to_string()).range(start, end)
+}
+
 #[test]
 fn definition_of_a_local_use_jumps_to_its_binding() {
     let source = "module a\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
@@ -96,7 +100,7 @@ fn definition_of_a_local_use_jumps_to_its_binding() {
 }
 
 #[test]
-fn definition_from_saved_root_use_is_blocked_without_canonical_fact() {
+fn definition_from_saved_root_use_jumps_to_store_declaration() {
     let source = "\
 module a
 
@@ -111,12 +115,21 @@ pub fn f(): string
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
 
-    let use_offset = offset_of(source, "return ^books") + "return ^".len();
-    assert!(definition(&snapshot, &index, &indices, &file, use_offset).is_none());
+    let use_offset = offset_of(source, "^books(1)");
+    let location = definition(&snapshot, &index, &indices, &file, use_offset)
+        .expect("saved root use resolves through catalog facts");
+    let line_index = indices.0.get(&file).unwrap();
+
+    assert_eq!(range_text(source, line_index, location.range), "^books");
+    let declaration = offset_of(source, "store ^books") + "store ".len();
+    assert_eq!(
+        location.range,
+        range_for(source, declaration, declaration + "^books".len())
+    );
 }
 
 #[test]
-fn definition_from_saved_root_use_caret_is_blocked_without_canonical_fact() {
+fn definition_from_saved_member_use_jumps_to_resource_member() {
     let source = "\
 module a
 
@@ -126,37 +139,60 @@ resource Book
 store ^books(id: int): Book
 
 pub fn f(): string
-    return ^books(1).title ?? \"\"
+    const title: string = \"fallback\"
+    const draft = Book(title: title)
+    return ^books(1).title ?? draft.title
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
 
-    let use_offset = offset_of(source, "return ^books") + "return ".len();
-    assert!(definition(&snapshot, &index, &indices, &file, use_offset).is_none());
+    let use_offset = offset_of(source, ".title ??") + 1;
+    let location = definition(&snapshot, &index, &indices, &file, use_offset)
+        .expect("saved member use resolves through catalog facts");
+    let line_index = indices.0.get(&file).unwrap();
+
+    assert_eq!(range_text(source, line_index, location.range), "title");
+    let declaration = offset_of(source, "required title") + "required ".len();
+    assert_eq!(
+        location.range,
+        range_for(source, declaration, declaration + "title".len()),
+        "saved member navigation must land on the member declaration, not the same-named local or constructor argument"
+    );
 }
 
 #[test]
-fn definition_from_saved_root_declaration_is_blocked_without_canonical_fact() {
+fn definition_from_store_index_use_jumps_to_index_declaration() {
     let source = "\
 module a
 
 resource Book
     required title: string
+    required shelf: string
 
 store ^books(id: int): Book
+    index byShelf(shelf, id)
 
-pub fn f(): string
-    return ^books(1).title ?? \"\"
+pub fn f(): int
+    return count(^books.byShelf(\"fiction\"))
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
 
-    let declaration = offset_of(source, "store ^books") + "store ^".len();
-    assert!(definition(&snapshot, &index, &indices, &file, declaration + 1).is_none());
+    let use_offset = offset_of(source, ".byShelf") + 1;
+    let location = definition(&snapshot, &index, &indices, &file, use_offset)
+        .expect("store index use resolves through catalog facts");
+    let line_index = indices.0.get(&file).unwrap();
+
+    assert_eq!(range_text(source, line_index, location.range), "byShelf");
+    let declaration = offset_of(source, "index byShelf") + "index ".len();
+    assert_eq!(
+        location.range,
+        range_for(source, declaration, declaration + "byShelf".len())
+    );
 }
 
 #[test]
-fn definition_from_saved_root_declaration_caret_is_blocked_without_canonical_fact() {
+fn references_from_saved_root_use_honor_include_declaration() {
     let source = "\
 module a
 
@@ -167,12 +203,146 @@ store ^books(id: int): Book
 
 pub fn f(): string
     return ^books(1).title ?? \"\"
+
+pub fn g(): string
+    return ^books(2).title ?? \"\"
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
 
-    let declaration_caret = offset_of(source, "store ^books") + "store ".len();
-    assert!(definition(&snapshot, &index, &indices, &file, declaration_caret).is_none());
+    let use_offset = offset_of(source, "^books(1)");
+    let with = references(&snapshot, &index, &indices, &file, use_offset, true)
+        .expect("saved root references resolve through catalog facts");
+    let without = references(&snapshot, &index, &indices, &file, use_offset, false)
+        .expect("saved root references resolve through catalog facts");
+    let line_index = indices.0.get(&file).unwrap();
+    let with_texts: Vec<&str> = with
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+    let without_texts: Vec<&str> = without
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+
+    assert_eq!(with_texts, vec!["^books", "^books", "^books"]);
+    assert_eq!(without_texts, vec!["^books", "^books"]);
+
+    let declaration = offset_of(source, "store ^books") + "store ".len();
+    let declaration_range = range_for(source, declaration, declaration + "^books".len());
+    assert!(
+        with.iter()
+            .any(|location| location.range == declaration_range),
+        "include_declaration=true should include the store declaration"
+    );
+    assert!(
+        without
+            .iter()
+            .all(|location| location.range != declaration_range),
+        "include_declaration=false should exclude the store declaration"
+    );
+}
+
+#[test]
+fn references_from_saved_member_use_honor_exact_use_spans_and_include_declaration() {
+    let source = "\
+module a
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+pub fn f(): string
+    return ^books(1).title ?? \"\"
+
+pub fn g(): string
+    return ^books(2).title ?? \"\"
+";
+    let (snapshot, file, indices) = analyze(source);
+    let index = build_binding_index(&snapshot);
+    let line_index = indices.0.get(&file).unwrap();
+
+    let use_offset = offset_of(source, ".title ??") + 1;
+    let with = references(&snapshot, &index, &indices, &file, use_offset, true)
+        .expect("saved member references resolve through catalog facts");
+    let without = references(&snapshot, &index, &indices, &file, use_offset, false)
+        .expect("saved member references resolve through catalog facts");
+    let with_texts: Vec<&str> = with
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+    let without_texts: Vec<&str> = without
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+
+    assert_eq!(with_texts, vec!["title", "title", "title"]);
+    assert_eq!(without_texts, vec!["title", "title"]);
+
+    let declaration = offset_of(source, "required title") + "required ".len();
+    let declaration_range = range_for(source, declaration, declaration + "title".len());
+    assert!(
+        with.iter()
+            .any(|location| location.range == declaration_range)
+    );
+    assert!(
+        without
+            .iter()
+            .all(|location| location.range != declaration_range)
+    );
+}
+
+#[test]
+fn references_from_store_index_use_honor_exact_use_spans_and_include_declaration() {
+    let source = "\
+module a
+
+resource Book
+    required title: string
+    required shelf: string
+
+store ^books(id: int): Book
+    index byShelf(shelf, id)
+
+pub fn f(): int
+    return count(^books.byShelf(\"fiction\"))
+
+pub fn g(): int
+    return count(^books.byShelf(\"history\"))
+";
+    let (snapshot, file, indices) = analyze(source);
+    let index = build_binding_index(&snapshot);
+    let line_index = indices.0.get(&file).unwrap();
+
+    let use_offset = offset_of(source, ".byShelf") + 1;
+    let with = references(&snapshot, &index, &indices, &file, use_offset, true)
+        .expect("store index references resolve through catalog facts");
+    let without = references(&snapshot, &index, &indices, &file, use_offset, false)
+        .expect("store index references resolve through catalog facts");
+    let with_texts: Vec<&str> = with
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+    let without_texts: Vec<&str> = without
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+
+    assert_eq!(with_texts, vec!["byShelf", "byShelf", "byShelf"]);
+    assert_eq!(without_texts, vec!["byShelf", "byShelf"]);
+
+    let declaration = offset_of(source, "index byShelf") + "index ".len();
+    let declaration_range = range_for(source, declaration, declaration + "byShelf".len());
+    assert!(
+        with.iter()
+            .any(|location| location.range == declaration_range)
+    );
+    assert!(
+        without
+            .iter()
+            .all(|location| location.range != declaration_range)
+    );
 }
 
 #[test]
@@ -196,7 +366,7 @@ pub fn f(n: int): int
     // so resolving *from its declaration* would land on the enclosing function;
     // resolving from a use lands on the parameter binding.
     let outer_return = source.rfind("return n").unwrap() + "return ".len();
-    let refs = references(&index, &indices, &file, outer_return, true)
+    let refs = references(&snapshot, &index, &indices, &file, outer_return, true)
         .expect("references for the parameter");
     let lines: Vec<u32> = refs.iter().map(|r| r.range.start.line).collect();
 
@@ -226,8 +396,8 @@ fn references_can_exclude_the_declaration() {
     // Query from the use so the parameter binding resolves (its declaration has
     // no span of its own). `with` keeps the declaration; `without` drops it.
     let use_offset = offset_of(source, "return n") + "return ".len();
-    let with = references(&index, &indices, &file, use_offset, true).unwrap();
-    let without = references(&index, &indices, &file, use_offset, false).unwrap();
+    let with = references(&snapshot, &index, &indices, &file, use_offset, true).unwrap();
+    let without = references(&snapshot, &index, &indices, &file, use_offset, false).unwrap();
     assert_eq!(
         with.len(),
         without.len() + 1,
@@ -1041,7 +1211,7 @@ fn f(): b::Status
     let index = build_binding_index(&snapshot);
 
     let annotation = offset_of(app_source, "const current: b::Status") + "const current: b::".len();
-    let refs = references(&index, &indices, app_file, annotation + 1, true)
+    let refs = references(&snapshot, &index, &indices, app_file, annotation + 1, true)
         .expect("references for enum annotation");
     let texts: Vec<&str> = refs
         .iter()
@@ -1062,7 +1232,8 @@ fn f(): b::Status
         "declaration, return annotation, local annotation, and literal prefix are enum refs"
     );
 
-    let without_decl = references(&index, &indices, app_file, annotation + 1, false).unwrap();
+    let without_decl =
+        references(&snapshot, &index, &indices, app_file, annotation + 1, false).unwrap();
     assert_eq!(
         without_decl.len(),
         refs.len() - 1,
@@ -1073,6 +1244,58 @@ fn f(): b::Status
             .iter()
             .all(|text| *text != "active" && *text != "Color"),
         "enum references should not include member values or another enum: {texts:?}"
+    );
+}
+
+#[test]
+fn references_from_enum_literal_prefix_stay_on_binding_index() {
+    let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+    let app_source = "\
+module app
+use a::b
+
+fn f(): b::Status
+    const current: b::Status = b::Status::active
+    return b::Status::archived
+";
+    let (snapshot, paths, indices) =
+        analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+    let status_file = &paths[0];
+    let app_file = &paths[1];
+    let index = build_binding_index(&snapshot);
+
+    let literal_prefix = offset_of(app_source, "b::Status::active") + "b::".len();
+    let refs = references(
+        &snapshot,
+        &index,
+        &indices,
+        app_file,
+        literal_prefix + 1,
+        true,
+    )
+    .expect("references for enum literal prefix");
+    let texts: Vec<&str> = refs
+        .iter()
+        .map(|location| {
+            let path = location.uri.to_file_path().unwrap();
+            let (source, line_index) = if path == *status_file {
+                (status_source, indices.0.get(status_file).unwrap())
+            } else {
+                (app_source, indices.0.get(app_file).unwrap())
+            };
+            range_text(source, line_index, location.range)
+        })
+        .collect();
+
+    assert_eq!(
+        texts,
+        vec!["Status", "Status", "Status", "Status", "Status"],
+        "catalog use-site references must not truncate enum references from type annotations"
     );
 }
 

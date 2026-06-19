@@ -473,10 +473,12 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
         let indices = snapshot_indices(workspace, documents);
+        let snapshot = workspace.latest().expect("ensured just above");
         let index = workspace
             .binding_index_cached()
             .expect("ensured just above");
         Ok(navigation::references(
+            snapshot,
             index,
             &indices,
             &path,

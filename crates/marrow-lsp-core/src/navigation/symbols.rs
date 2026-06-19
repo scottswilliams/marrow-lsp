@@ -4,6 +4,7 @@ use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
 use marrow_check::{BindingIndex, RenameSafety, SymbolRef};
 
 use super::{
+    catalog_uses,
     indices::FileIndex,
     module_paths::{self, ModulePathDefinition},
     source_names::{is_valid_rename, name_in_span, name_in_span_at, symbol_name},
@@ -49,6 +50,9 @@ pub fn definition(
         Some(ModulePathDefinition::NoDefinition) => return None,
         None => {}
     }
+    if let Some(location) = catalog_uses::definition(snapshot, indices, file, offset) {
+        return Some(location);
+    }
     if module_paths::saved_root_syntax_at(snapshot, file, offset) {
         return None;
     }
@@ -58,12 +62,18 @@ pub fn definition(
 
 /// Every reference to the symbol at byte `offset` in `file`, as LSP locations.
 pub fn references(
+    snapshot: &marrow_check::AnalysisSnapshot,
     index: &BindingIndex,
     indices: &impl FileIndex,
     file: &Path,
     offset: usize,
     include_declaration: bool,
 ) -> Option<Vec<Location>> {
+    if let Some(locations) =
+        catalog_uses::references(snapshot, indices, file, offset, include_declaration)
+    {
+        return Some(locations);
+    }
     let definition = index.definition(file, offset)?;
     let refs = index.references(&definition);
     let locations = refs
