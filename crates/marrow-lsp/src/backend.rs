@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use marrow_lsp_core::data_explorer::{
     DataChildViewsResponse, DataChildrenError, DataChildrenRequest, DataKeyDto, DataPresenceDto,
-    DataReadRequest, DataReadResponse, SavedRootsResult, saved_roots,
+    DataReadRequest, DataReadResponse, DataRequestValidationError, SavedRootsResult, saved_roots,
+    validate_data_children_request, validate_data_read_request,
 };
 use marrow_lsp_core::data_integrity::{DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
@@ -90,6 +91,8 @@ impl Backend {
         &self,
         request: DataChildrenRequest,
     ) -> jsonrpc::Result<DataChildViewsResponse> {
+        let request = validate_data_children_request(request)
+            .map_err(|error| invalid_data_request("marrow/dataChildren", error))?;
         let state = self.state.lock().await;
         let reader = self.reader(&state.workspace);
         let Some(program) = state.workspace.fresh_program(&state.documents) else {
@@ -117,6 +120,8 @@ impl Backend {
     /// `marrow/dataRead`: read and render one saved-data path for the
     /// committed-store inspector.
     pub async fn data_read(&self, request: DataReadRequest) -> jsonrpc::Result<DataReadResponse> {
+        let request = validate_data_read_request(request)
+            .map_err(|error| invalid_data_request("marrow/dataRead", error))?;
         let state = self.state.lock().await;
         let reader = self.reader(&state.workspace);
         let Some(program) = state.workspace.fresh_program(&state.documents) else {
@@ -264,6 +269,10 @@ fn data_read_error(error: DataChildrenError) -> DataReadResponse {
         store_snapshot: None,
         error: Some(error),
     }
+}
+
+fn invalid_data_request(method: &str, error: DataRequestValidationError) -> jsonrpc::Error {
+    jsonrpc::Error::invalid_params(format!("invalid {method} params: {}", error.message()))
 }
 
 #[tower_lsp::async_trait]

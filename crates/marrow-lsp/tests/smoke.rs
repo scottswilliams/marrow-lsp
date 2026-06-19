@@ -1621,6 +1621,78 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
 }
 
 #[test]
+fn custom_data_requests_reject_invalid_typed_envelopes() {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    for (id, method, params) in [
+        (
+            2,
+            "marrow/dataChildren",
+            json!({ "segments": [], "limit": 1, "cursor": null }),
+        ),
+        (
+            3,
+            "marrow/dataChildren",
+            json!({ "segments": [{ "kind": "root", "value": "counter" }], "limit": 0 }),
+        ),
+        (4, "marrow/dataRead", json!({ "segments": [] })),
+        (
+            5,
+            "marrow/dataRead",
+            json!({
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "preview_limit": 0
+            }),
+        ),
+    ] {
+        send(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }),
+        );
+        let response = wait_for_response(&mut stdout, id, Duration::from_secs(10));
+        assert_eq!(
+            response["error"]["code"], -32602,
+            "invalid {method} envelope should fail before project loading, got {response}"
+        );
+        assert!(
+            response.get("result").is_none(),
+            "invalid {method} envelope must not include a result: {response}"
+        );
+    }
+
+    let _ = server.0.kill();
+}
+
+#[test]
 fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

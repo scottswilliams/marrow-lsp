@@ -74,11 +74,52 @@ pub struct DataReadResponse {
     pub error: Option<DataChildrenError>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataRequestValidationError {
+    EmptySegments,
+    ZeroLimit,
+    ZeroPreviewLimit,
+}
+
+impl DataRequestValidationError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::EmptySegments => "`segments` must not be empty",
+            Self::ZeroLimit => "`limit` must be at least 1",
+            Self::ZeroPreviewLimit => "`preview_limit` must be at least 1",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum DataChildrenError {
     Path(DataPathErrorDto),
     Store(DataStoreErrorDto),
+}
+
+pub fn validate_data_children_request(
+    request: DataChildrenRequest,
+) -> Result<DataChildrenRequest, DataRequestValidationError> {
+    if request.segments.is_empty() {
+        return Err(DataRequestValidationError::EmptySegments);
+    }
+    if request.limit == 0 {
+        return Err(DataRequestValidationError::ZeroLimit);
+    }
+    Ok(request)
+}
+
+pub fn validate_data_read_request(
+    request: DataReadRequest,
+) -> Result<DataReadRequest, DataRequestValidationError> {
+    if request.segments.is_empty() {
+        return Err(DataRequestValidationError::EmptySegments);
+    }
+    if request.preview_limit == Some(0) {
+        return Err(DataRequestValidationError::ZeroPreviewLimit);
+    }
+    Ok(request)
 }
 
 pub fn data_children_page(
@@ -154,6 +195,40 @@ mod tests {
     use marrow_store::key::SavedKey;
     use marrow_store::tree::{DataPathSegment, TreeStore};
     use marrow_store::value::{SavedValue, encode_value};
+
+    #[test]
+    fn data_request_validation_rejects_empty_paths_and_zero_limits() {
+        assert_eq!(
+            validate_data_children_request(DataChildrenRequest {
+                segments: Vec::new(),
+                limit: 1,
+                cursor: None,
+            }),
+            Err(DataRequestValidationError::EmptySegments)
+        );
+        assert_eq!(
+            validate_data_children_request(DataChildrenRequest {
+                segments: vec![DataPathSegmentDto::Root("counter".into())],
+                limit: 0,
+                cursor: None,
+            }),
+            Err(DataRequestValidationError::ZeroLimit)
+        );
+        assert_eq!(
+            validate_data_read_request(DataReadRequest {
+                segments: Vec::new(),
+                preview_limit: None,
+            }),
+            Err(DataRequestValidationError::EmptySegments)
+        );
+        assert_eq!(
+            validate_data_read_request(DataReadRequest {
+                segments: vec![DataPathSegmentDto::Root("counter".into())],
+                preview_limit: Some(0),
+            }),
+            Err(DataRequestValidationError::ZeroPreviewLimit)
+        );
+    }
 
     #[test]
     fn a_missing_reader_answers_unavailable() {

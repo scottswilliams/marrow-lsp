@@ -7,7 +7,10 @@
 
 use std::path::PathBuf;
 
-use marrow_lsp_core::data_explorer::{DataChildrenRequest, DataReadRequest};
+use marrow_lsp_core::data_explorer::{
+    DataChildrenRequest, DataReadRequest, DataRequestValidationError,
+    validate_data_children_request, validate_data_read_request,
+};
 use marrow_lsp_core::mcp::{
     self, COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
     DATA_READ_MISSING_FACTS, RESOURCE_SCHEMA_MISSING_FACTS, RUN_MISSING_FACTS, RunMode,
@@ -461,27 +464,18 @@ fn optional_array(arguments: &Json, key: &str) -> Result<Vec<Json>, String> {
 fn data_children_request(arguments: &Json) -> Result<DataChildrenRequest, String> {
     let request: DataChildrenRequest = serde_json::from_value(arguments.clone())
         .map_err(|error| format!("invalid mw_data_children arguments: {error}"))?;
-    if request.segments.is_empty() {
-        return Err("invalid mw_data_children arguments: `segments` must not be empty".to_string());
-    }
-    if request.limit == 0 {
-        return Err("invalid mw_data_children arguments: `limit` must be at least 1".to_string());
-    }
-    Ok(request)
+    validate_data_children_request(request)
+        .map_err(|error| invalid_data_request("mw_data_children", error))
 }
 
 fn data_read_request(arguments: &Json) -> Result<DataReadRequest, String> {
     let request: DataReadRequest = serde_json::from_value(arguments.clone())
         .map_err(|error| format!("invalid mw_data_read arguments: {error}"))?;
-    if request.segments.is_empty() {
-        return Err("invalid mw_data_read arguments: `segments` must not be empty".to_string());
-    }
-    if request.preview_limit == Some(0) {
-        return Err(
-            "invalid mw_data_read arguments: `preview_limit` must be at least 1".to_string(),
-        );
-    }
-    Ok(request)
+    validate_data_read_request(request).map_err(|error| invalid_data_request("mw_data_read", error))
+}
+
+fn invalid_data_request(tool: &str, error: DataRequestValidationError) -> String {
+    format!("invalid {tool} arguments: {}", error.message())
 }
 
 /// A required path argument as a `PathBuf`.
