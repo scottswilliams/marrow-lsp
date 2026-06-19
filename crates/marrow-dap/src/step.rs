@@ -36,6 +36,7 @@ pub enum StopReason {
     Step,
     Pause,
     Entry,
+    Breakpoint,
 }
 
 impl StopReason {
@@ -45,6 +46,7 @@ impl StopReason {
             StopReason::Step => "step",
             StopReason::Pause => "pause",
             StopReason::Entry => "entry",
+            StopReason::Breakpoint => "breakpoint",
         }
     }
 }

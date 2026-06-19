@@ -15,7 +15,7 @@ use marrow_run::{
     SystemNondeterminism,
 };
 
-use crate::debugger::{Control, Debugger, RunEvent};
+use crate::debugger::{ArmedBreakpoints, Control, Debugger, RunEvent};
 
 /// The result of a finished run, sent back through the join handle: anything the
 /// run printed plus its outcome message (the returned value rendered, or a fault
@@ -42,6 +42,7 @@ struct RunRequest {
     ephemeral_entry_identity: bool,
     invocation: EntryInvocation,
     stop_on_entry: bool,
+    breakpoints: ArmedBreakpoints,
 }
 
 /// Start the run on a dedicated thread. Project preparation and invocation happen
@@ -53,6 +54,7 @@ pub fn spawn(
     ephemeral_entry_identity: bool,
     invocation: EntryInvocation,
     stop_on_entry: bool,
+    breakpoints: ArmedBreakpoints,
 ) -> Result<RunHandle, String> {
     let (event_tx, event_rx) = channel::<RunEvent>();
     let (control_tx, control_rx) = channel::<Control>();
@@ -63,6 +65,7 @@ pub fn spawn(
         ephemeral_entry_identity,
         invocation,
         stop_on_entry,
+        breakpoints,
     };
 
     let handle = thread::Builder::new()
@@ -93,6 +96,7 @@ fn run_on_thread(
         ephemeral_entry_identity,
         invocation,
         stop_on_entry,
+        breakpoints,
     } = request;
     let launch = match crate::project::prepare_admitted(
         &project_dir,
@@ -114,7 +118,7 @@ fn run_on_thread(
         invocation,
         ..
     } = launch;
-    let debugger = Debugger::new(stop_on_entry, events, control);
+    let debugger = Debugger::new(stop_on_entry, breakpoints, events, control);
     run_with_session(&session, invocation, debugger)
 }
 

@@ -21,7 +21,8 @@
 //! rolling back any open transaction. The frame borrow is thus confined to one
 //! thread by construction; the channels carry only `Send` owned data.
 
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
 use marrow_run::{Frame, RuntimeError, StepHook, Value};
@@ -63,6 +64,22 @@ pub struct StopInfo {
     pub depth: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ArmedBreakpoints {
+    lines_by_file: HashMap<PathBuf, HashSet<u32>>,
+}
+
+impl ArmedBreakpoints {
+    pub fn insert(&mut self, file: PathBuf, line: u32) {
+        self.lines_by_file.entry(file).or_default().insert(line);
+    }
+
+    fn contains(&self, file: Option<&Path>, line: u32) -> bool {
+        file.and_then(|file| self.lines_by_file.get(file))
+            .is_some_and(|lines| lines.contains(&line))
+    }
+}
+
 /// A question the protocol thread asks the parked run-thread. Each is answered
 /// from the live frame and store and returns owned, `Send` data.
 #[derive(Debug)]
@@ -85,6 +102,8 @@ pub enum QueryResult {
 pub enum Control {
     /// Answer a query and keep serving (the run stays parked).
     Query(Query),
+    /// Replace the currently armed source-line breakpoints.
+    SetBreakpoints(ArmedBreakpoints),
     /// Resume the run with the given step mode.
     Resume(Resume),
     /// Abort the run (terminate/disconnect): the hook returns `Err`.
@@ -107,6 +126,7 @@ pub struct Debugger {
     mode: Resume,
     /// Set once at launch to stop before the first statement (`stopOnEntry`).
     stop_on_entry: bool,
+    breakpoints: ArmedBreakpoints,
     /// True after the entry stop has been taken, so it fires at most once.
     entered: bool,
     events: Sender<RunEvent>,
@@ -115,11 +135,17 @@ pub struct Debugger {
 
 impl Debugger {
     /// Build the hook for a launch: whether to stop on entry, and the channel ends.
-    pub fn new(stop_on_entry: bool, events: Sender<RunEvent>, control: Receiver<Control>) -> Self {
+    pub fn new(
+        stop_on_entry: bool,
+        breakpoints: ArmedBreakpoints,
+        events: Sender<RunEvent>,
+        control: Receiver<Control>,
+    ) -> Self {
         Debugger {
             // Until the client steps, run freely unless stop-on-entry fires.
             mode: Resume::Continue,
             stop_on_entry,
+            breakpoints,
             entered: false,
             events,
             control,
@@ -187,6 +213,9 @@ impl Debugger {
                         return Err(terminated());
                     }
                 }
+                Ok(Control::SetBreakpoints(breakpoints)) => {
+                    self.breakpoints = breakpoints;
+                }
                 Ok(Control::Resume(mode)) => {
                     self.mode = mode;
                     return Ok(());
@@ -207,8 +236,12 @@ impl StepHook for Debugger {
         let depth = frame.depth();
         let reason = if self.is_entry_stop() {
             Some(StopReason::Entry)
+        } else if let Some(reason) = step::decide(self.mode, depth) {
+            Some(reason)
+        } else if self.breakpoints.contains(frame.file(), span.line) {
+            Some(StopReason::Breakpoint)
         } else {
-            step::decide(self.mode, depth)
+            None
         };
 
         let Some(reason) = reason else {

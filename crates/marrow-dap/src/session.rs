@@ -6,16 +6,16 @@
 //! as [`Query`] messages and answered from owned data. The session never borrows
 //! the runtime frame — that lives only on the run-thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
 use marrow_run::{EntryArgument, EntryInvocation};
 use serde_json::{Value as Json, json};
 
-use crate::debugger::{Control, Query, QueryResult, RunEvent, StopInfo};
+use crate::debugger::{ArmedBreakpoints, Control, Query, QueryResult, RunEvent, StopInfo};
 use crate::protocol::write_message;
 use crate::step::Resume;
 use crate::variables::{ChildCounts, ChildPage, VariablesFilter};
@@ -54,6 +54,7 @@ const BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: &str =
     "DAP sourceReference breakpoint sources are not supported";
 const BREAKPOINTS_INVALID: &str = "`breakpoints` must be an array";
 const BREAKPOINT_INVALID_LINE: &str = "missing or invalid breakpoint line";
+const BREAKPOINT_NO_STOP_POINT: &str = "no executable Marrow stop point at this source line";
 const HOVER_EVALUATE_BLOCKED: &str =
     "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
 const EVALUATE_EXPRESSION_INVALID: &str = "missing or invalid evaluate expression";
@@ -77,6 +78,8 @@ const ERROR_LAUNCH_ENTRY_INVALID_TYPE: DapError =
     DapError::new("dap.launchEntry.invalidType", STATUS_INVALID_PARAMS);
 const ERROR_LAUNCH_STOP_ON_ENTRY_INVALID_TYPE: DapError =
     DapError::new("dap.launchStopOnEntry.invalidType", STATUS_INVALID_PARAMS);
+const ERROR_LAUNCH_ALREADY_CONFIGURED: DapError =
+    DapError::new("dap.launch.alreadyConfigured", STATUS_INVALID_STATE);
 const ERROR_BREAKPOINT_UNVERIFIED: DapError =
     DapError::blocked("dap.breakpoint.unverified", STOP_POINT_FACTS);
 const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
@@ -93,6 +96,8 @@ const ERROR_BREAKPOINTS_INVALID: DapError =
     DapError::new("dap.breakpoint.breakpointsInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_INVALID_LINE: DapError =
     DapError::new("dap.breakpoint.invalidLine", STATUS_INVALID_PARAMS);
+const ERROR_BREAKPOINT_NO_STOP_POINT: DapError =
+    DapError::new("dap.breakpoint.noStopPoint", STATUS_INVALID_PARAMS);
 const ERROR_CONFIGURATION_NOT_READY: DapError =
     DapError::new("dap.launch.notConfigured", STATUS_INVALID_STATE);
 const ERROR_RUN_INVALID: DapError = DapError::new("dap.run.invalid", STATUS_RUNTIME_ERROR);
@@ -209,6 +214,8 @@ pub struct Session<W: Write> {
     running: Option<Running>,
     /// Pending launch captured between `launch` and `configurationDone`.
     pending: Option<PendingLaunch>,
+    stop_points: Option<StopPointIndex>,
+    breakpoints: HashMap<PathBuf, Vec<RequestedBreakpoint>>,
     supports_variable_paging: bool,
     /// The dynamic reference registry for the current stop, cleared on resume.
     expandables: HashMap<i64, Expandable>,
@@ -227,14 +234,52 @@ struct PendingLaunch {
     stop_on_entry: bool,
 }
 
+#[derive(Clone)]
 enum RequestedBreakpoint {
     Valid { line: u32, block: BreakpointBlock },
     InvalidLine,
 }
 
 enum BreakpointSource {
-    Path,
+    Path(PathBuf),
     SourceReference,
+}
+
+#[derive(Clone, Default)]
+struct StopPointIndex {
+    runtime_files_by_canonical_file: HashMap<PathBuf, HashMap<u32, HashSet<PathBuf>>>,
+}
+
+impl StopPointIndex {
+    fn from_runtime(program: &marrow_check::CheckedRuntimeProgram) -> Self {
+        let mut index = Self::default();
+        for point in program.stop_points() {
+            let Some(path) = program.file_path(point.file_id) else {
+                continue;
+            };
+            let runtime_path = path.to_path_buf();
+            let canonical_path = normalize_existing_path(runtime_path.clone());
+            index
+                .runtime_files_by_canonical_file
+                .entry(canonical_path)
+                .or_default()
+                .entry(point.span.line)
+                .or_default()
+                .insert(runtime_path);
+        }
+        index
+    }
+
+    fn verifies(&self, source: &Path, line: u32) -> bool {
+        self.runtime_files(source, line)
+            .is_some_and(|paths| !paths.is_empty())
+    }
+
+    fn runtime_files(&self, source: &Path, line: u32) -> Option<&HashSet<PathBuf>> {
+        self.runtime_files_by_canonical_file
+            .get(source)
+            .and_then(|lines| lines.get(&line))
+    }
 }
 
 struct DapInputError {
@@ -269,6 +314,8 @@ impl<W: Write> Session<W> {
             seq: 0,
             running: None,
             pending: None,
+            stop_points: None,
+            breakpoints: HashMap::new(),
             supports_variable_paging: false,
             expandables: HashMap::new(),
             next_ref: FIRST_DYNAMIC_REF,
@@ -457,9 +504,7 @@ impl<W: Write> Session<W> {
         }
     }
 
-    /// `initialize`: advertise the small capability set the debugger supports,
-    /// then announce readiness with the `initialized` event so the client sends
-    /// breakpoints.
+    /// `initialize`: advertise the small capability set the debugger supports.
     fn on_initialize(&mut self, request: &Json, arguments: &Json) {
         self.supports_variable_paging = arguments
             .get("supportsVariablePaging")
@@ -474,12 +519,22 @@ impl<W: Write> Session<W> {
                 "supportsEvaluateForHovers": false,
             }),
         );
-        self.event("initialized", json!({}));
     }
 
     /// `launch`: validate and stash the launch arguments. The run does not start
     /// until `configurationDone`.
     fn on_launch(&mut self, request: &Json, arguments: &Json) {
+        if self.pending.is_some() || self.running.is_some() {
+            self.respond_error(
+                request,
+                "launch is already configured or running",
+                ERROR_LAUNCH_ALREADY_CONFIGURED,
+            );
+            return;
+        }
+        self.pending = None;
+        self.stop_points = None;
+        self.breakpoints.clear();
         let project = match parse_project(arguments) {
             Ok(project) => project,
             Err(error) => {
@@ -487,7 +542,7 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        let project_dir = PathBuf::from(project);
+        let project_dir = normalize_existing_path(PathBuf::from(project));
         let entry = match parse_entry(arguments) {
             Ok(entry) => entry,
             Err(error) => {
@@ -513,6 +568,9 @@ impl<W: Write> Session<W> {
         // project and requires the admitted source/config and entry identity to match.
         match crate::project::prepare(&project_dir, entry, &args) {
             Ok(launch) => {
+                self.stop_points = Some(StopPointIndex::from_runtime(
+                    launch.session.runtime_program(),
+                ));
                 self.pending = Some(PendingLaunch {
                     project_dir,
                     entry: entry.map(str::to_string),
@@ -522,6 +580,7 @@ impl<W: Write> Session<W> {
                     stop_on_entry,
                 });
                 self.respond(request, true, json!({}));
+                self.event("initialized", json!({}));
             }
             Err(error) => {
                 let contract = DapError::from_launch_error(&error);
@@ -530,11 +589,11 @@ impl<W: Write> Session<W> {
         }
     }
 
-    /// `setBreakpoints`: return unverified advisory breakpoints. Requested lines
-    /// are not armed until Marrow provides canonical stop-point facts.
+    /// `setBreakpoints`: replace the requested source breakpoints and verify
+    /// plain line breakpoints when a launch has provided Marrow stop-point facts.
     fn on_set_breakpoints(&mut self, request: &Json, arguments: &Json) {
-        match breakpoint_source(arguments) {
-            Ok(BreakpointSource::Path) => {}
+        let source = match breakpoint_source(arguments) {
+            Ok(BreakpointSource::Path(source)) => source,
             Ok(BreakpointSource::SourceReference) => {
                 self.respond_error(
                     request,
@@ -547,7 +606,7 @@ impl<W: Write> Session<W> {
                 self.respond_error(request, error.message, error.contract);
                 return;
             }
-        }
+        };
 
         let requested = match requested_breakpoints(arguments) {
             Ok(requested) => requested,
@@ -557,22 +616,25 @@ impl<W: Write> Session<W> {
             }
         };
 
-        let advisory = self.resolve_breakpoints(&requested);
-        self.respond(request, true, json!({ "breakpoints": advisory }));
+        if self.stop_points.is_some() {
+            if requested.is_empty() {
+                self.breakpoints.remove(&source);
+            } else {
+                self.breakpoints.insert(source.clone(), requested.clone());
+            }
+            self.update_running_breakpoints();
+        }
+        let breakpoints = self.resolve_breakpoints(&source, &requested);
+        self.respond(request, true, json!({ "breakpoints": breakpoints }));
     }
 
-    /// Return unverified breakpoint objects for the requested source lines.
-    fn resolve_breakpoints(&self, requested: &[RequestedBreakpoint]) -> Vec<Json> {
+    /// Return breakpoint objects for the requested source lines.
+    fn resolve_breakpoints(&self, source: &Path, requested: &[RequestedBreakpoint]) -> Vec<Json> {
         requested
             .iter()
             .map(|breakpoint| match breakpoint {
                 RequestedBreakpoint::Valid { line, block } => {
-                    json!({
-                        "verified": false,
-                        "line": *line,
-                        "message": block.message(),
-                        "marrowContract": block.contract().metadata(),
-                    })
+                    self.resolved_breakpoint(source, *line, *block)
                 }
                 RequestedBreakpoint::InvalidLine => {
                     json!({
@@ -583,6 +645,57 @@ impl<W: Write> Session<W> {
                 }
             })
             .collect()
+    }
+
+    fn resolved_breakpoint(&self, source: &Path, line: u32, block: BreakpointBlock) -> Json {
+        if matches!(block, BreakpointBlock::Expression) {
+            return unverified_breakpoint(line, block.message(), block.contract());
+        }
+        match &self.stop_points {
+            Some(stop_points) if stop_points.verifies(source, line) => {
+                json!({ "verified": true, "line": line })
+            }
+            Some(_) => unverified_breakpoint(
+                line,
+                BREAKPOINT_NO_STOP_POINT,
+                ERROR_BREAKPOINT_NO_STOP_POINT,
+            ),
+            None => unverified_breakpoint(line, block.message(), block.contract()),
+        }
+    }
+
+    fn armed_breakpoints(&self) -> ArmedBreakpoints {
+        let mut armed = ArmedBreakpoints::default();
+        let Some(stop_points) = &self.stop_points else {
+            return armed;
+        };
+        for (source, requested) in &self.breakpoints {
+            for breakpoint in requested {
+                let RequestedBreakpoint::Valid {
+                    line,
+                    block: BreakpointBlock::StopPoint,
+                } = breakpoint
+                else {
+                    continue;
+                };
+                let Some(runtime_files) = stop_points.runtime_files(source, *line) else {
+                    continue;
+                };
+                for runtime_file in runtime_files {
+                    armed.insert(runtime_file.clone(), *line);
+                }
+            }
+        }
+        armed
+    }
+
+    fn update_running_breakpoints(&mut self) {
+        let armed = self.armed_breakpoints();
+        if let Some(running) = self.running.as_ref()
+            && running.stopped_at.is_some()
+        {
+            let _ = running.control.send(Control::SetBreakpoints(armed));
+        }
     }
 
     /// `configurationDone`: start the run-thread with the captured launch. The
@@ -597,6 +710,7 @@ impl<W: Write> Session<W> {
             );
             return;
         };
+        let breakpoints = self.armed_breakpoints();
         match crate::run::spawn(
             pending.project_dir,
             pending.entry,
@@ -604,6 +718,7 @@ impl<W: Write> Session<W> {
             pending.ephemeral_entry_identity,
             pending.invocation,
             pending.stop_on_entry,
+            breakpoints,
         ) {
             Ok(running) => {
                 self.running = Some(Running {
@@ -1004,6 +1119,15 @@ enum StepKind {
     Out,
 }
 
+fn unverified_breakpoint(line: u32, message: &str, contract: DapError) -> Json {
+    json!({
+        "verified": false,
+        "line": line,
+        "message": message,
+        "marrowContract": contract.metadata(),
+    })
+}
+
 /// Build a DAP `Variable` object. A zero reference marks a leaf; a non-zero one
 /// lets the client expand it.
 fn variable_json(
@@ -1182,7 +1306,7 @@ fn breakpoint_source(arguments: &Json) -> Result<BreakpointSource, DapInputError
     if let Some(path) = source.get("path") {
         return path
             .as_str()
-            .map(|_| BreakpointSource::Path)
+            .map(|path| BreakpointSource::Path(normalize_existing_path(PathBuf::from(path))))
             .ok_or_else(|| {
                 DapInputError::new(BREAKPOINT_SOURCE_INVALID, ERROR_BREAKPOINT_SOURCE_INVALID)
             });
@@ -1261,6 +1385,10 @@ fn parse_project(arguments: &Json) -> Result<&str, DapInputError> {
             ERROR_LAUNCH_PROJECT_INVALID_PARAMS,
         )),
     }
+}
+
+fn normalize_existing_path(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
 }
 
 fn parse_entry(arguments: &Json) -> Result<Option<&str>, DapInputError> {

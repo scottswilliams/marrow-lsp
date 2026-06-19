@@ -13,6 +13,13 @@ use std::process::{Child, Command, Stdio};
 use marrow_run::{Host, ProjectOpen, ProjectSession, SessionEntry};
 use serde_json::{Value as Json, json};
 
+const SHELF_SOURCE: &str = "module shelf\n\
+                            \n\
+                            pub fn main()\n\
+                            \x20   const id: int = 1\n\
+                            \x20   const title: string = \"Dune\"\n\
+                            \x20   print(title)\n";
+
 /// A minimal DAP client over a child process's stdio.
 struct Client {
     child: Child,
@@ -24,12 +31,23 @@ struct Client {
 impl Client {
     /// Launch the built `marrow-dap` binary and wrap its stdio.
     fn spawn() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_marrow-dap"))
+        Self::spawn_with_cwd(None)
+    }
+
+    fn spawn_in(cwd: &Path) -> Self {
+        Self::spawn_with_cwd(Some(cwd))
+    }
+
+    fn spawn_with_cwd(cwd: Option<&Path>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_marrow-dap"));
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn marrow-dap");
+            .stderr(Stdio::null());
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let mut child = command.spawn().expect("spawn marrow-dap");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Client {
@@ -125,17 +143,26 @@ impl Drop for Client {
 fn write_fixture(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    let source = "module shelf\n\
-                  \n\
-                  pub fn main()\n\
-                  \x20   const id: int = 1\n\
-                  \x20   const title: string = \"Dune\"\n\
-                  \x20   print(title)\n";
     let file = src.join("shelf.mw");
-    std::fs::write(&file, source).unwrap();
+    std::fs::write(&file, SHELF_SOURCE).unwrap();
     std::fs::write(
         dir.join("marrow.json"),
         "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+    )
+    .unwrap();
+    file
+}
+
+#[cfg(unix)]
+fn write_symlink_source_root_fixture(dir: &Path) -> std::path::PathBuf {
+    let real_src = dir.join("real_src");
+    std::fs::create_dir_all(&real_src).unwrap();
+    let file = real_src.join("shelf.mw");
+    std::fs::write(&file, SHELF_SOURCE).unwrap();
+    std::os::unix::fs::symlink(&real_src, dir.join("src_link")).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src_link\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
     )
     .unwrap();
     file
@@ -145,7 +172,6 @@ fn initialized_client() -> Client {
     let mut client = Client::spawn();
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
     client
 }
 
@@ -342,6 +368,15 @@ fn assert_breakpoint_marrow_contract(breakpoint: &Json, code: &str, blocked_on: 
     assert_breakpoint_contract(breakpoint, code, "blocked-on-marrow", Some(blocked_on));
 }
 
+fn assert_verified_breakpoint(breakpoint: &Json, line: i64) {
+    assert_eq!(breakpoint["verified"], true, "{breakpoint}");
+    assert_eq!(breakpoint["line"], line, "{breakpoint}");
+    assert!(
+        breakpoint.get("marrowContract").is_none(),
+        "verified breakpoints should not carry a blocked Marrow contract: {breakpoint}"
+    );
+}
+
 fn assert_breakpoint_contract(
     breakpoint: &Json,
     code: &str,
@@ -349,7 +384,7 @@ fn assert_breakpoint_contract(
     blocked_on: Option<&str>,
 ) {
     let contract = breakpoint["marrowContract"].as_object().unwrap_or_else(|| {
-        panic!("advisory breakpoint should include marrowContract: {breakpoint}")
+        panic!("unverified breakpoint should include marrowContract: {breakpoint}")
     });
     assert_eq!(
         contract.get("code").and_then(Json::as_str),
@@ -514,7 +549,6 @@ fn null_and_absent_request_arguments_remain_absent() {
 
     let init = client.request_without_arguments("initialize");
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let threads = client.request("threads", Json::Null);
     let threads = client.response_for(threads);
@@ -552,7 +586,6 @@ fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let set = client.request(
         "setBreakpoints",
@@ -605,7 +638,6 @@ fn malformed_breakpoints_return_ordered_invalid_contracts() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let set = client.request(
         "setBreakpoints",
@@ -656,7 +688,6 @@ fn malformed_breakpoint_source_envelopes_fail_the_request() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     for source in [
         Json::Null,
@@ -697,7 +728,6 @@ fn source_reference_breakpoint_sources_are_adapter_unsupported() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let set = client.request(
         "setBreakpoints",
@@ -720,7 +750,6 @@ fn positive_source_reference_takes_precedence_over_path() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let set = client.request(
         "setBreakpoints",
@@ -748,7 +777,6 @@ fn zero_source_reference_with_path_uses_the_path_source() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let set = client.request(
         "setBreakpoints",
@@ -778,7 +806,6 @@ fn non_array_breakpoints_fail_the_request() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let set = client.request(
         "setBreakpoints",
@@ -803,7 +830,6 @@ fn non_object_breakpoints_stay_per_entry_invalid_contracts() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let set = client.request(
         "setBreakpoints",
@@ -827,7 +853,6 @@ fn malformed_evaluate_expressions_fail_the_request() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     for arguments in [
         json!({}),
@@ -853,7 +878,6 @@ fn malformed_evaluate_contexts_fail_the_request() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     for arguments in [
         json!({ "expression": "title", "context": 7 }),
@@ -872,7 +896,6 @@ fn valid_evaluate_envelopes_keep_blocked_contracts() {
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let unknown_context = client.request(
         "evaluate",
@@ -1099,7 +1122,6 @@ fn launch_accepts_explicit_entry_with_typed_args() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1135,7 +1157,6 @@ fn configuration_done_rejects_source_changed_after_launch() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1180,7 +1201,6 @@ fn launch_rejects_non_array_args_as_protocol_validation() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1213,7 +1233,6 @@ fn launch_rejects_malformed_typed_args_as_protocol_validation() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1246,7 +1265,6 @@ fn launch_rejects_numeric_typed_int_args_as_protocol_validation() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1282,7 +1300,6 @@ fn launch_rejects_concrete_non_string_entry_as_protocol_validation() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1309,7 +1326,6 @@ fn launch_treats_null_entry_as_absent() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1331,7 +1347,6 @@ fn launch_rejects_concrete_non_boolean_stop_on_entry_as_protocol_validation() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1358,7 +1373,6 @@ fn launch_treats_null_stop_on_entry_as_absent() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1377,7 +1391,6 @@ fn launch_rejects_blank_project_as_protocol_validation() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request("launch", json!({ "project": "   " }));
     let rejected = client.response_for(launch);
@@ -1398,7 +1411,6 @@ fn malformed_launch_does_not_arm_configuration_done() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1427,7 +1439,6 @@ fn launch_rejects_missing_project_config_with_typed_contract() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1452,7 +1463,6 @@ fn launch_accepts_configured_default_entry_with_isolated_writes() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1495,7 +1505,6 @@ fn launch_blocks_native_store_catalog_repair_without_writing() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1524,7 +1533,6 @@ fn launch_blocks_invalid_utf8_catalog_repair_without_writing() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1554,7 +1562,6 @@ fn launch_accepts_explicit_zero_arg_entry() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1567,13 +1574,13 @@ fn launch_accepts_explicit_zero_arg_entry() {
 }
 
 #[test]
-fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
+fn verified_breakpoint_and_stepped_stop_exposes_locals() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
 
     let mut client = Client::spawn();
 
-    // initialize -> response + initialized event.
+    // initialize -> response.
     let init = client.request("initialize", json!({}));
     let response = client.response_for(init);
     assert_eq!(response["success"], true, "{response}");
@@ -1585,7 +1592,6 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
         response["body"].get("supportsVariablePaging").is_none(),
         "{response}"
     );
-    client.event("initialized");
 
     // launch the fixture's default entry.
     let launch = client.request(
@@ -1596,8 +1602,9 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
         }),
     );
     assert_eq!(client.response_for(launch)["success"], true);
+    client.event("initialized");
 
-    // The print statement is line 6; the breakpoint is advisory only.
+    // The print statement is line 6; Marrow stop-point facts verify the line.
     let set = client.request(
         "setBreakpoints",
         json!({
@@ -1605,16 +1612,10 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
             "breakpoints": [{ "line": 6 }],
         }),
     );
-    let advisory = client.response_for(set);
-    let breakpoints = advisory["body"]["breakpoints"].as_array().unwrap();
-    assert_eq!(breakpoints.len(), 1, "{advisory}");
-    assert_eq!(breakpoints[0]["verified"], false, "{advisory}");
-    assert_eq!(breakpoints[0]["line"], 6, "{advisory}");
-    assert_breakpoint_marrow_contract(
-        &breakpoints[0],
-        "dap.breakpoint.unverified",
-        "canonical stop-point facts",
-    );
+    let response = client.response_for(set);
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 1, "{response}");
+    assert_verified_breakpoint(&breakpoints[0], 6);
 
     // configurationDone starts at the entry stop; stepping reaches the inspection line.
     let done = client.request("configurationDone", json!({}));
@@ -1632,9 +1633,10 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
     let frames = client.response_for(stack);
     let frame = &frames["body"]["stackFrames"][0];
     assert_eq!(frame["line"], 6, "{frames}");
+    let expected_source = file.canonicalize().unwrap();
     assert_eq!(
         frame["source"]["path"],
-        file.display().to_string(),
+        expected_source.display().to_string(),
         "stack source should use the stopped frame's Marrow-owned file path: {frames}"
     );
     let frame_id = frame["id"].as_i64().unwrap();
@@ -1726,7 +1728,294 @@ fn advisory_breakpoint_does_not_arm_but_stepped_stop_exposes_locals() {
 }
 
 #[test]
-fn advisory_breakpoint_does_not_stop_without_stop_on_entry() {
+fn verified_breakpoint_stops_without_stop_on_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    client.event("terminated");
+}
+
+#[test]
+fn prelaunch_breakpoint_remains_unarmed_after_launch_prepares_stop_points() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_breakpoint_marrow_contract(
+        &response["body"]["breakpoints"][0],
+        "dap.breakpoint.unverified",
+        "canonical stop-point facts",
+    );
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn absolute_breakpoint_verifies_when_launch_project_is_relative() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = Client::spawn_in(dir.path());
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": ".",
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    client.event("terminated");
+}
+
+#[cfg(unix)]
+#[test]
+fn breakpoint_set_on_real_path_arms_symlinked_runtime_source_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_symlink_source_root_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    client.event("terminated");
+}
+
+#[test]
+fn breakpoint_set_while_stopped_is_armed_on_continue() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    assert_eq!(stop_line(&mut client), 4);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    client.event("terminated");
+}
+
+#[test]
+fn relaunch_while_stopped_does_not_clear_running_breakpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+
+    let relaunch = client.request("launch", json!({ "project": "" }));
+    let rejected = client.response_for(relaunch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launch.alreadyConfigured",
+        "invalid-state",
+        None,
+    );
+
+    let clear = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [],
+        }),
+    );
+    let response = client.response_for(clear);
+    assert_eq!(response["body"]["breakpoints"], json!([]));
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn non_stop_point_breakpoint_is_not_armed_after_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 3 }],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoint = &response["body"]["breakpoints"][0];
+    assert_eq!(breakpoint["verified"], false, "{response}");
+    assert_eq!(breakpoint["line"], 3, "{response}");
+    assert_breakpoint_contract(
+        breakpoint,
+        "dap.breakpoint.noStopPoint",
+        "invalid-params",
+        None,
+    );
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn expression_breakpoint_does_not_stop_without_stop_on_entry() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
 
@@ -1734,7 +2023,6 @@ fn advisory_breakpoint_does_not_stop_without_stop_on_entry() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1749,15 +2037,15 @@ fn advisory_breakpoint_does_not_stop_without_stop_on_entry() {
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 6 }],
+            "breakpoints": [{ "line": 6, "condition": "title == \"Dune\"" }],
         }),
     );
-    let advisory = client.response_for(set);
-    assert_eq!(advisory["body"]["breakpoints"][0]["verified"], false);
+    let response = client.response_for(set);
+    assert_eq!(response["body"]["breakpoints"][0]["verified"], false);
     assert_breakpoint_marrow_contract(
-        &advisory["body"]["breakpoints"][0],
-        "dap.breakpoint.unverified",
-        "canonical stop-point facts",
+        &response["body"]["breakpoints"][0],
+        "dap.breakpoint.expressionBlocked",
+        "canonical stop-point and breakpoint expression facts",
     );
 
     let done = client.request("configurationDone", json!({}));
@@ -1777,7 +2065,6 @@ fn dap_value_surfaces_mark_blocked_contracts() {
         json!({ "supportsVariableType": true, "supportsVariablePaging": true }),
     );
     assert_eq!(client.response_for(init)["success"], true);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -1967,7 +2254,6 @@ fn durable_data_inspection_is_blocked_by_default() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -2046,7 +2332,6 @@ fn local_state_failures_expose_typed_contracts() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let cont = client.request("continue", json!({ "threadId": 1 }));
     let cont = client.response_for(cont);
@@ -2088,7 +2373,6 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -2131,7 +2415,6 @@ fn stepping_advances_one_statement_at_a_time() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -2175,7 +2458,6 @@ fn terminate_while_stopped_unwinds_the_run_cleanly() {
 
     let init = client.request("initialize", json!({}));
     client.response_for(init);
-    client.event("initialized");
 
     let launch = client.request(
         "launch",
@@ -2234,7 +2516,7 @@ fn assert_terminates_without_stopping(client: &mut Client) {
         let message = client.read();
         assert_ne!(
             message["event"], "stopped",
-            "advisory breakpoints must not arm runtime stops: {message}"
+            "unsupported breakpoints must not arm runtime stops: {message}"
         );
         if message["type"] == "event" && message["event"] == "terminated" {
             return;

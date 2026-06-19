@@ -63,7 +63,7 @@ Marrow API or remain blocked.
 | Source intelligence | Checker-owned Marrow facts for hover, navigation, completion, signature help, module paths, type annotations, docs, builtins, operators, enum paths, saved roots, and rename safety. |
 | Data views | Versioned catalog/store generations, watch/refresh semantics, integrity and repair facts, production serve/attach boundaries, and debugger/runtime data-view contracts. Current saved-data path DTOs, child paging, and value previews are Marrow-owned but remain debug/admin presentation surfaces until those contracts exist. |
 | MCP run | A Marrow run/session mode that keeps checked execution over a fresh in-memory store without opening, reading, copying, or writing the configured project store, plus durable-scope/effect facts, transaction facts, runtime generation facts, and serve/attach boundaries. |
-| DAP | Stop points, source mapping, frame scopes, value expansion, production expression evaluation, durable watch targets, store-generation facts, and serve/attach boundaries. |
+| DAP | Frame scopes, value expansion, production expression evaluation, durable watch targets, store-generation facts, breakpoint expression facts for conditions, hit conditions, and logpoints, plus serve/attach boundaries. |
 | VS Code | Editor commands and snippets may expose only ready or presentation-only contracts. Blocked semantic inputs stay absent from schemas and snippets; exposed debug entry/arg inputs remain DAP-owned schema only. |
 
 ## Maintenance Rules
