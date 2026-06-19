@@ -71,9 +71,6 @@ Current watch items:
 - Decide upstream in Marrow whether identity decoding should reject non-canonical bool key bytes.
   The LSP must keep following `marrow-run`'s canonical identity decoder rather than becoming
   stricter on its own.
-- Track enum binding coverage as Marrow evolves. Enum declarations and enum-member values are
-  indexed today, but enum type names inside type annotations still need explicit definition facts
-  before hover and jump-to-definition can feel complete.
 
 ## Roadmap
 
