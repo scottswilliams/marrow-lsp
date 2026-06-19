@@ -549,11 +549,11 @@ mod tests {
                     "children": [],
                     "truncated": false,
                     "error": {
-                        "kind": "query",
+                        "kind": "path",
                         "value": { "code": "zero_limit" },
                     },
                 }),
-                "error: {\"kind\":\"query\",\"value\":{\"code\":\"zero_limit\"}}",
+                "error: {\"kind\":\"path\",\"value\":{\"code\":\"zero_limit\"}}",
             ),
             (
                 "mw_data_integrity",

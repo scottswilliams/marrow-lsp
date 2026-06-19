@@ -86,7 +86,7 @@ pub fn data_children_page(
     store: &TreeStore,
     request: DataChildrenRequest,
 ) -> Result<DataChildrenResult, DataChildrenError> {
-    let (segments, limit, cursor) = request.into_query_parts();
+    let (segments, limit, cursor) = request.into_path_parts();
     let stamped = tooling::stamped_data_children(
         program,
         store,
@@ -102,7 +102,7 @@ pub fn data_child_views_page(
     store: &TreeStore,
     request: DataChildrenRequest,
 ) -> Result<DataChildViewsResult, DataChildrenError> {
-    let (segments, limit, cursor) = request.into_query_parts();
+    let (segments, limit, cursor) = request.into_path_parts();
     let stamped = tooling::stamped_data_children(
         program,
         store,
@@ -119,8 +119,8 @@ pub fn data_read(
     request: DataReadRequest,
 ) -> Result<DataReadResult, DataChildrenError> {
     let preview_limit = request.preview_limit_or_default();
-    let segments = request.into_query_segments();
-    let Some(query) = tooling::resolve_data_query(program, &segments)? else {
+    let segments = request.into_path_segments();
+    let Some(resolved_path) = tooling::resolve_data_path(program, &segments)? else {
         return Ok(DataReadResult {
             presence: DataPresenceDto::Absent,
             value: None,
@@ -128,7 +128,7 @@ pub fn data_read(
             store_snapshot: None,
         });
     };
-    let stamped = tooling::stamped_preview_data_query(program, store, &query, preview_limit)
+    let stamped = tooling::stamped_preview_data_path(program, store, &resolved_path, preview_limit)
         .map_err(|error| DataChildrenError::Store(DataStoreErrorDto::from(error)))?;
     Ok(DataReadResult::from(stamped))
 }
@@ -136,7 +136,7 @@ pub fn data_read(
 impl From<ToolingError> for DataChildrenError {
     fn from(error: ToolingError) -> Self {
         match error {
-            ToolingError::Query(error) => Self::Path(DataPathErrorDto::from(error)),
+            ToolingError::Path(error) => Self::Path(DataPathErrorDto::from(error)),
             ToolingError::Store(error) => Self::Store(DataStoreErrorDto::from(error)),
         }
     }

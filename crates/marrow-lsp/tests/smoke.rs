@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
-use marrow_check::tooling::{DataChild, DataQuerySegment, data_children};
+use marrow_check::tooling::{DataChild, DataPathSegment as ToolingDataPathSegment, data_children};
 use marrow_store::cell::CatalogId;
 use marrow_store::key::SavedKey;
 use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
@@ -112,7 +112,7 @@ pub fn f()
     let page = data_children(
         &program,
         &store,
-        &[DataQuerySegment::Root("counter".into())],
+        &[ToolingDataPathSegment::Root("counter".into())],
         10,
         None,
     )
