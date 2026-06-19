@@ -1,14 +1,19 @@
-//! Document and workspace symbols from a parsed file and a checked program.
+//! Document and workspace symbols from parsed and checked project facts.
 //!
 //! Document symbols are the outline of one file: a [`DocumentSymbol`] per
 //! declaration (constant, enum, resource, function), with enum members and resource
-//! members nested beneath their parents. Workspace symbols flatten every checked
-//! module's functions, resources, enums, and constants into a project-wide list an
-//! editor's "go to symbol in workspace" searches. Both read only the parse and the
-//! checked program; nothing here re-parses or re-checks.
+//! members nested beneath their parents. Workspace symbols flatten checked and
+//! catalog-backed declarations into a project-wide list an editor's "go to symbol
+//! in workspace" searches. Nothing here re-parses or re-checks.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
-use marrow_check::CheckedProgram;
+use marrow_check::{
+    AnalysisSnapshot, CatalogDeclaration, CatalogEntryKind, CheckedFacts, EnumMemberFact,
+    ModuleFact, ModuleId, ResourceMemberFact,
+};
 use marrow_syntax::{
     Declaration, EnumDecl, EnumMember, EvolveDecl, EvolveStep, FieldDecl, FunctionDecl, GroupDecl,
     IndexDecl, ResourceDecl, ResourceMember, SourceFile, SourceSpan, StoreDecl, SurfaceDecl,
@@ -250,73 +255,284 @@ fn function_signature(function: &FunctionDecl) -> String {
     }
 }
 
-/// Every checked module's functions, resources, enums, and constants as a flat,
-/// project-wide list for "go to symbol in workspace". Each symbol is located by
-/// the `file://` URL of its module's source file and the declaration's range,
-/// computed from that file's on-disk text; a file whose URL or text is
-/// unavailable contributes no symbols.
-pub fn workspace_symbols(program: &CheckedProgram) -> Vec<SymbolInformation> {
+/// Checked functions, constants, and catalog declarations as a flat,
+/// project-wide list for "go to symbol in workspace".
+pub fn workspace_symbols(snapshot: &AnalysisSnapshot) -> Vec<SymbolInformation> {
+    let sources = WorkspaceSources::new(snapshot);
+    let containers = CatalogContainers::new(snapshot);
     let mut symbols = Vec::new();
-    for module in &program.modules {
-        let Some(url) = Url::from_file_path(&module.source_file).ok() else {
+    for module in &snapshot.program.modules {
+        let Some(source) = sources.get(&module.source_file) else {
             continue;
         };
-        let index = LineIndex::new(read_to_string(&module.source_file));
         for function in &module.functions {
             symbols.push(flat_symbol(
                 &function.name,
                 SymbolKind::FUNCTION,
-                &url,
+                source,
                 function.span,
-                &index,
-                &module.name,
+                non_empty(&module.name),
             ));
         }
         for constant in &module.constants {
             symbols.push(flat_symbol(
                 &constant.name,
                 SymbolKind::CONSTANT,
-                &url,
+                source,
                 constant.span,
-                &index,
-                &module.name,
-            ));
-        }
-        for resource in &module.resources {
-            // A resource schema carries its name but not its declaration span; the
-            // module span locates it well enough for a flat jump target.
-            symbols.push(flat_symbol(
-                &resource.name,
-                SymbolKind::STRUCT,
-                &url,
-                module.span,
-                &index,
-                &module.name,
-            ));
-        }
-        for enum_schema in &module.enums {
-            // Enum schemas carry their name but not their declaration span; the
-            // module span locates them well enough for a flat jump target.
-            symbols.push(flat_symbol(
-                &enum_schema.name,
-                SymbolKind::ENUM,
-                &url,
-                module.span,
-                &index,
-                &module.name,
+                non_empty(&module.name),
             ));
         }
     }
+    for declaration in snapshot.catalog_declarations() {
+        let Some(source) = sources.get(&declaration.file) else {
+            continue;
+        };
+        let name = catalog_symbol_name(declaration);
+        symbols.push(flat_symbol(
+            &name,
+            catalog_symbol_kind(declaration.kind),
+            source,
+            declaration.span,
+            containers.get(declaration),
+        ));
+    }
     symbols
+}
+
+struct CatalogContainers {
+    by_catalog_id: HashMap<String, String>,
+}
+
+impl CatalogContainers {
+    fn new(snapshot: &AnalysisSnapshot) -> Self {
+        let mut containers = Self {
+            by_catalog_id: HashMap::new(),
+        };
+        let facts = &snapshot.program.facts;
+        let modules = facts.modules();
+
+        for declaration in snapshot.catalog_declarations() {
+            if let Some(owner) = declaration_owner(facts, modules, declaration) {
+                containers.insert_owner(declaration.catalog_id.as_str(), owner);
+            }
+        }
+
+        containers
+    }
+
+    fn insert_owner(&mut self, catalog_id: &str, owner: String) {
+        if !owner.is_empty() {
+            self.by_catalog_id.insert(catalog_id.to_string(), owner);
+        }
+    }
+
+    fn get(&self, declaration: &CatalogDeclaration) -> Option<&str> {
+        self.by_catalog_id
+            .get(&declaration.catalog_id)
+            .map(String::as_str)
+    }
+}
+
+fn module_name(modules: &[ModuleFact], id: ModuleId) -> &str {
+    modules
+        .get(id.0 as usize)
+        .map_or("", |module| module.name.as_str())
+}
+
+fn declaration_owner(
+    facts: &CheckedFacts,
+    modules: &[ModuleFact],
+    declaration: &CatalogDeclaration,
+) -> Option<String> {
+    match declaration.kind {
+        CatalogEntryKind::Resource => facts
+            .resources()
+            .iter()
+            .find(|resource| {
+                resource.name == declaration.name
+                    && resource.name_span == declaration.span
+                    && fact_file(modules, resource.module) == Some(declaration.file.as_path())
+            })
+            .map(|resource| module_name(modules, resource.module).to_string()),
+        CatalogEntryKind::Store => facts
+            .stores()
+            .iter()
+            .find(|store| {
+                store.root == declaration.name
+                    && store.name_span == declaration.span
+                    && fact_file(modules, store.module) == Some(declaration.file.as_path())
+            })
+            .map(|store| module_name(modules, store.module).to_string()),
+        CatalogEntryKind::StoreIndex => facts.store_indexes().iter().find_map(|index| {
+            let store = facts.store(index.store);
+            (index.name == declaration.name
+                && index.name_span == declaration.span
+                && fact_file(modules, store.module) == Some(declaration.file.as_path()))
+            .then(|| {
+                let module = module_name(modules, store.module);
+                join_owner(module, vec![format!("^{}", store.root)])
+            })
+        }),
+        CatalogEntryKind::ResourceMember => facts.resource_members().iter().find_map(|member| {
+            let resource = facts.resource(member.resource);
+            (member.name == declaration.name
+                && member.name_span == declaration.span
+                && fact_file(modules, resource.module) == Some(declaration.file.as_path()))
+            .then(|| {
+                let module = module_name(modules, resource.module);
+                join_owner(module, resource_member_owner_parts(facts, member))
+            })
+        }),
+        CatalogEntryKind::Enum => facts
+            .enums()
+            .iter()
+            .find(|enum_fact| {
+                enum_fact.name == declaration.name
+                    && enum_fact.name_span == declaration.span
+                    && fact_file(modules, enum_fact.module) == Some(declaration.file.as_path())
+            })
+            .map(|enum_fact| module_name(modules, enum_fact.module).to_string()),
+        CatalogEntryKind::EnumMember => facts.enum_members().iter().find_map(|member| {
+            let enum_fact = facts.enum_(member.enum_id)?;
+            (member.name == declaration.name
+                && member.name_span == declaration.span
+                && fact_file(modules, enum_fact.module) == Some(declaration.file.as_path()))
+            .then(|| {
+                let module = module_name(modules, enum_fact.module);
+                join_owner(module, enum_member_owner_parts(facts, member))
+            })
+        }),
+    }
+}
+
+fn fact_file(modules: &[ModuleFact], id: ModuleId) -> Option<&Path> {
+    modules
+        .get(id.0 as usize)
+        .map(|module| module.source_file.as_path())
+}
+
+fn resource_member_owner_parts(facts: &CheckedFacts, member: &ResourceMemberFact) -> Vec<String> {
+    let resource = facts.resource(member.resource);
+    let mut parts = vec![resource.name.clone()];
+    let mut parents = resource_member_parent_names(facts, member);
+    parts.append(&mut parents);
+    parts
+}
+
+fn resource_member_parent_names(facts: &CheckedFacts, member: &ResourceMemberFact) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut parent = member.parent;
+    while let Some(parent_id) = parent {
+        let Some(parent_member) = facts.resource_members().get(parent_id.0 as usize) else {
+            break;
+        };
+        names.push(parent_member.name.clone());
+        parent = parent_member.parent;
+    }
+    names.reverse();
+    names
+}
+
+fn enum_member_owner_parts(facts: &CheckedFacts, member: &EnumMemberFact) -> Vec<String> {
+    let Some(enum_fact) = facts.enum_(member.enum_id) else {
+        return Vec::new();
+    };
+    let mut parts = vec![enum_fact.name.clone()];
+    let mut parents = enum_member_parent_names(facts, member);
+    parts.append(&mut parents);
+    parts
+}
+
+fn enum_member_parent_names(facts: &CheckedFacts, member: &EnumMemberFact) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut parent = member.parent;
+    while let Some(parent_id) = parent {
+        let Some(parent_member) = facts.enum_member(parent_id) else {
+            break;
+        };
+        names.push(parent_member.name.clone());
+        parent = parent_member.parent;
+    }
+    names.reverse();
+    names
+}
+
+fn join_owner(module: &str, parts: Vec<String>) -> String {
+    let mut owner = String::new();
+    if !module.is_empty() {
+        owner.push_str(module);
+    }
+    for part in parts {
+        if !owner.is_empty() {
+            owner.push_str("::");
+        }
+        owner.push_str(&part);
+    }
+    owner
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
+}
+
+struct WorkspaceSources {
+    by_file: HashMap<PathBuf, WorkspaceSource>,
+}
+
+impl WorkspaceSources {
+    fn new(snapshot: &AnalysisSnapshot) -> Self {
+        let by_file = snapshot
+            .files
+            .iter()
+            .filter_map(|file| {
+                let url = Url::from_file_path(&file.path).ok()?;
+                Some((
+                    file.path.clone(),
+                    WorkspaceSource {
+                        url,
+                        index: LineIndex::new(file.source.clone()),
+                    },
+                ))
+            })
+            .collect();
+        Self { by_file }
+    }
+
+    fn get(&self, file: &Path) -> Option<&WorkspaceSource> {
+        self.by_file.get(file)
+    }
+}
+
+struct WorkspaceSource {
+    url: Url,
+    index: LineIndex,
+}
+
+fn catalog_symbol_name(declaration: &CatalogDeclaration) -> String {
+    match declaration.kind {
+        CatalogEntryKind::Store => format!("^{}", declaration.name),
+        _ => declaration.name.clone(),
+    }
+}
+
+fn catalog_symbol_kind(kind: CatalogEntryKind) -> SymbolKind {
+    match kind {
+        CatalogEntryKind::Resource => SymbolKind::STRUCT,
+        CatalogEntryKind::Store => SymbolKind::OBJECT,
+        CatalogEntryKind::StoreIndex => SymbolKind::KEY,
+        CatalogEntryKind::ResourceMember => SymbolKind::FIELD,
+        CatalogEntryKind::Enum => SymbolKind::ENUM,
+        CatalogEntryKind::EnumMember => SymbolKind::ENUM_MEMBER,
+    }
 }
 
 fn flat_symbol(
     name: &str,
     kind: SymbolKind,
-    url: &Url,
+    source: &WorkspaceSource,
     span: SourceSpan,
-    index: &LineIndex,
-    module: &str,
+    container: Option<&str>,
 ) -> SymbolInformation {
     #[allow(deprecated)]
     SymbolInformation {
@@ -325,21 +541,17 @@ fn flat_symbol(
         tags: None,
         deprecated: None,
         location: Location {
-            uri: url.clone(),
-            range: index.range(span.start_byte, span.end_byte),
+            uri: source.url.clone(),
+            range: source.index.range(span.start_byte, span.end_byte),
         },
-        container_name: Some(module.to_string()),
+        container_name: container.map(ToString::to_string),
     }
-}
-
-fn read_to_string(path: &std::path::Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marrow_check::{ProjectSources, analyze_project};
+    use marrow_check::{AnalysisSnapshot, ProjectSources, analyze_project};
     use marrow_project::parse_config;
     use marrow_syntax::parse_source;
 
@@ -505,9 +717,8 @@ surface Books from ^books
         assert_eq!(surface.detail.as_deref(), Some("^books"));
     }
 
-    /// Analyze a one-file project on disk so the checked program has a module with
-    /// real `source_file` paths for workspace symbols to locate.
-    fn analyze(source: &str) -> CheckedProgram {
+    /// Analyze a one-file project through the production project pipeline.
+    fn analyze(source: &str) -> AnalysisSnapshot {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
@@ -521,9 +732,7 @@ surface Books from ^books
         let config =
             parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#)
                 .unwrap();
-        let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
-        std::mem::forget(dir);
-        snapshot.program
+        analyze_project(root, &config, &ProjectSources::new(), None).unwrap()
     }
 
     #[test]
@@ -541,14 +750,15 @@ resource Book
     required title: string
 
 store ^books(id: int): Book
+    index byTitle(title, id)
 
 pub fn add(title: string): Id(^books)
     var book: Book
     book.title = title
     return nextId(^books)
 ";
-        let program = analyze(source);
-        let symbols = workspace_symbols(&program);
+        let snapshot = analyze(source);
+        let symbols = workspace_symbols(&snapshot);
 
         let by_name: std::collections::HashMap<&str, SymbolKind> =
             symbols.iter().map(|s| (s.name.as_str(), s.kind)).collect();
@@ -556,11 +766,133 @@ pub fn add(title: string): Id(^books)
         assert_eq!(by_name.get("Book"), Some(&SymbolKind::STRUCT));
         assert_eq!(by_name.get("Status"), Some(&SymbolKind::ENUM));
         assert_eq!(by_name.get("LIMIT"), Some(&SymbolKind::CONSTANT));
+        assert_eq!(by_name.get("^books"), Some(&SymbolKind::OBJECT));
+        assert_eq!(by_name.get("byTitle"), Some(&SymbolKind::KEY));
+        assert_eq!(by_name.get("active"), Some(&SymbolKind::ENUM_MEMBER));
 
-        // Every symbol is located in module `a` by a `file://` URL.
         for symbol in &symbols {
-            assert_eq!(symbol.container_name.as_deref(), Some("a"));
             assert_eq!(symbol.location.uri.scheme(), "file");
         }
+        for name in ["add", "Book", "Status", "LIMIT", "^books"] {
+            let symbol = symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap_or_else(|| panic!("{name} symbol"));
+            assert_eq!(symbol.container_name.as_deref(), Some("a"));
+        }
+        let index = symbols
+            .iter()
+            .find(|symbol| symbol.name == "byTitle")
+            .expect("index symbol");
+        assert_eq!(index.container_name.as_deref(), Some("a::^books"));
+        let member = symbols
+            .iter()
+            .find(|symbol| symbol.name == "active")
+            .expect("enum member symbol");
+        assert_eq!(member.container_name.as_deref(), Some("a::Status"));
+    }
+
+    #[test]
+    fn workspace_symbols_use_analyzed_source_positions() {
+        let source = "\
+module a
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+    index byTitle(title, id)
+
+enum Status
+    active
+
+pub fn add(title: string): Id(^books)
+    return nextId(^books)
+";
+        let snapshot = analyze(source);
+        let symbols = workspace_symbols(&snapshot);
+        let book = symbols
+            .iter()
+            .find(|symbol| symbol.name == "Book")
+            .expect("Book resource symbol");
+
+        assert_eq!(book.location.range.start.line, 2);
+        assert_eq!(
+            book.location.range.start.character,
+            "resource ".len() as u32
+        );
+    }
+
+    #[test]
+    fn workspace_symbols_do_not_invent_script_containers() {
+        let source = "\
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+fn add(): Id(^books)
+    return nextId(^books)
+";
+        let snapshot = analyze(source);
+        let symbols = workspace_symbols(&snapshot);
+
+        let add = symbols
+            .iter()
+            .find(|symbol| symbol.name == "add")
+            .expect("function symbol");
+        let book = symbols
+            .iter()
+            .find(|symbol| symbol.name == "Book")
+            .expect("resource symbol");
+        let store = symbols
+            .iter()
+            .find(|symbol| symbol.name == "^books")
+            .expect("store symbol");
+
+        assert_eq!(add.container_name, None);
+        assert_eq!(book.container_name, None);
+        assert_eq!(store.container_name, None);
+    }
+
+    #[test]
+    fn workspace_symbols_label_nested_catalog_owners() {
+        let source = "\
+module a
+
+resource Book
+    required title: string
+
+resource Movie
+    required title: string
+
+store ^books(id: int): Book
+    index byTitle(title, id)
+
+enum Status
+    active
+";
+        let snapshot = analyze(source);
+        let symbols = workspace_symbols(&snapshot);
+
+        let mut title_containers: Vec<&str> = symbols
+            .iter()
+            .filter(|symbol| symbol.name == "title")
+            .filter_map(|symbol| symbol.container_name.as_deref())
+            .collect();
+        title_containers.sort_unstable();
+        assert_eq!(title_containers, ["a::Book", "a::Movie"]);
+
+        let index = symbols
+            .iter()
+            .find(|symbol| symbol.name == "byTitle")
+            .expect("store index symbol");
+        assert_eq!(index.container_name.as_deref(), Some("a::^books"));
+
+        let member = symbols
+            .iter()
+            .find(|symbol| symbol.name == "active")
+            .expect("enum member symbol");
+        assert_eq!(member.container_name.as_deref(), Some("a::Status"));
     }
 }

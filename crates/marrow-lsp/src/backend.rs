@@ -588,11 +588,11 @@ impl LanguageServer for Backend {
             workspace,
         } = &mut *state;
         // Workspace symbols need a project; recompute against any open buffer to
-        // resolve one, then flatten its modules.
+        // resolve one, then flatten its checked and catalog-backed declarations.
         let Some(file) = documents.urls().filter_map(url_to_path).next() else {
             return Ok(workspace
                 .fresh_latest(documents)
-                .map(|snapshot| symbols::workspace_symbols(&snapshot.program)));
+                .map(symbols::workspace_symbols));
         };
         if workspace.latest().is_none() {
             let _ = workspace.recompute(&file, documents);
@@ -600,7 +600,7 @@ impl LanguageServer for Backend {
         let Some(snapshot) = workspace.fresh_latest(documents) else {
             return Ok(None);
         };
-        Ok(Some(symbols::workspace_symbols(&snapshot.program)))
+        Ok(Some(symbols::workspace_symbols(snapshot)))
     }
 
     /// Complete at the cursor. Reads only the document's cached lex/parse and the
