@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedConst, CheckedFacts, CheckedFunction, CheckedParam,
-    DefItem, DirectEffectFacts, FunctionFact, MarrowType, Resolution, ResolvableKind, SymbolKind,
-    SymbolRef, resolve, type_at,
+    AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedConst, CheckedFacts, CheckedFunction,
+    CheckedParam, DefItem, DirectEffectFacts, FunctionFact, MarrowType, Resolution, ResolvableKind,
+    SymbolKind, SymbolRef, UseSiteKind, resolve, type_at,
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema};
 use marrow_syntax::{FunctionDecl, IndexDecl, Keyword, ResourceMember, TokenKind, lex_source};
@@ -84,6 +84,9 @@ pub(super) fn collect<'a>(
         return None;
     }
     if let Some(fact) = store_root_declaration_fact(snapshot, file, offset) {
+        return Some(fact);
+    }
+    if let Some(fact) = enum_annotation_fact(snapshot, file, offset) {
         return Some(fact);
     }
     if let Some(fact) = rich_symbol_fact(snapshot, index, file, offset) {
@@ -274,6 +277,25 @@ fn store_root_declaration_fact<'a>(
     })
 }
 
+fn enum_annotation_fact<'a>(
+    snapshot: &'a AnalysisSnapshot,
+    file: &Path,
+    offset: usize,
+) -> Option<HoverFact<'a>> {
+    let site = snapshot
+        .use_sites()
+        .iter()
+        .filter(|site| site.kind == UseSiteKind::Enum)
+        .filter(|site| site.file == file && source::span_covers(site.span, offset))
+        .min_by_key(|site| site.span.end_byte.saturating_sub(site.span.start_byte))?;
+    let declaration = snapshot.catalog_declaration(&site.catalog_id)?;
+    if declaration.kind != CatalogEntryKind::Enum {
+        return None;
+    }
+    let schema = enum_schema_in_file(snapshot, &declaration.file, &declaration.name)?;
+    Some(HoverFact::Enum { schema })
+}
+
 fn rich_symbol_fact<'a>(
     snapshot: &'a AnalysisSnapshot,
     index: &BindingIndex,
@@ -362,13 +384,10 @@ fn type_name_fact<'a>(
     }
     let (segments, segment_index) =
         tokens::qualified_name_at_with_position(&analyzed.source, offset)?;
-    if segment_index + 1 == segments.len() {
-        if let Some(schema) = resource_schema_for_type_name(snapshot, file, &segments) {
-            return Some(HoverFact::Resource { schema });
-        }
-        if let Some(schema) = enum_schema_for_type_name(snapshot, file, &segments) {
-            return Some(HoverFact::Enum { schema });
-        }
+    if segment_index + 1 == segments.len()
+        && let Some(schema) = resource_schema_for_type_name(snapshot, file, &segments)
+    {
+        return Some(HoverFact::Resource { schema });
     }
     None
 }
@@ -676,18 +695,6 @@ fn enum_schema_in_file<'a>(
         .enums
         .iter()
         .find(|enum_schema| enum_schema.name == name)
-}
-
-fn enum_schema_for_type_name<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    segments: &[String],
-) -> Option<&'a EnumSchema> {
-    match segments {
-        [name] => enum_schema_in_file(snapshot, file, name),
-        [] => None,
-        [_, ..] => None,
-    }
 }
 
 fn module_name_for_file<'a>(snapshot: &'a AnalysisSnapshot, file: &Path) -> Option<&'a str> {

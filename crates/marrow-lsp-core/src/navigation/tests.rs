@@ -546,6 +546,36 @@ fn f(): b::Status
 }
 
 #[test]
+fn catalog_definition_from_bare_foreign_enum_type_annotation_jumps_to_enum_name() {
+    let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+    let app_source = "\
+module app
+
+fn f(s: Status)
+    return
+";
+    let (snapshot, paths, indices) =
+        analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+    let status_file = &paths[0];
+    let app_file = &paths[1];
+
+    let annotation = offset_of(app_source, "s: Status") + "s: ".len();
+    let location = super::catalog_uses::definition(&snapshot, &indices, app_file, annotation + 1)
+        .expect("enum annotation resolves through catalog facts");
+    let line_index = indices.0.get(status_file).unwrap();
+
+    assert_eq!(
+        range_text(status_source, line_index, location.range),
+        "Status"
+    );
+}
+
+#[test]
 fn definition_from_evolve_transform_type_annotation_is_blocked_without_binding_fact() {
     let source = "\
 module a
@@ -1228,8 +1258,8 @@ fn f(): b::Status
 
     assert_eq!(
         texts,
-        vec!["Status", "Status", "Status", "Status"],
-        "declaration, return annotation, local annotation, and literal prefix are enum refs"
+        vec!["Status", "Status", "Status"],
+        "declaration, return annotation, and local annotation are enum type refs"
     );
 
     let without_decl =
@@ -1244,6 +1274,50 @@ fn f(): b::Status
             .iter()
             .all(|text| *text != "active" && *text != "Color"),
         "enum references should not include member values or another enum: {texts:?}"
+    );
+}
+
+#[test]
+fn catalog_references_from_enum_type_annotation_include_enum_sites_only() {
+    let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+    let app_source = "\
+module app
+use a::b
+
+fn f(): b::Status
+    const current: b::Status = b::Status::active
+    return current
+";
+    let (snapshot, paths, indices) =
+        analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+    let status_file = &paths[0];
+    let app_file = &paths[1];
+
+    let annotation = offset_of(app_source, "const current: b::Status") + "const current: b::".len();
+    let refs = super::catalog_uses::references(&snapshot, &indices, app_file, annotation + 1, true)
+        .expect("enum annotation references resolve through catalog facts");
+    let texts: Vec<&str> = refs
+        .iter()
+        .map(|location| {
+            let path = location.uri.to_file_path().unwrap();
+            let (source, line_index) = if path == *status_file {
+                (status_source, indices.0.get(status_file).unwrap())
+            } else {
+                (app_source, indices.0.get(app_file).unwrap())
+            };
+            range_text(source, line_index, location.range)
+        })
+        .collect();
+
+    assert_eq!(
+        texts,
+        vec!["Status", "Status", "Status"],
+        "catalog enum annotation references should not include enum literal heads"
     );
 }
 

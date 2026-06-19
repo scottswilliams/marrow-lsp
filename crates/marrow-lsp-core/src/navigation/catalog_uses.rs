@@ -37,7 +37,7 @@ pub(super) fn references(
         .use_sites()
         .iter()
         .filter(|site| site.catalog_id == target.catalog_id)
-        .filter(|site| supported_use_site(site).is_some())
+        .filter(|site| supported_reference_site(snapshot, &target, site))
         .filter_map(|site| location(&site.file, site.span, indices))
     {
         push_unique_location(&mut locations, location);
@@ -64,8 +64,10 @@ fn use_site_at<'a>(
         .filter_map(supported_use_site)
         .filter(|site| site.file == file && span_covers(site.span, offset))
         .map(|site| CatalogTarget {
+            file: site.file.as_path(),
             catalog_id: site.catalog_id.as_str(),
             span: site.span,
+            kind: CatalogTargetKind::Use(site.kind),
         })
         .min_by_key(|target| span_len(target.span))
 }
@@ -81,8 +83,10 @@ fn declaration_at<'a>(
         .filter_map(supported_declaration)
         .filter(|declaration| declaration.file == file && span_covers(declaration.span, offset))
         .map(|declaration| CatalogTarget {
+            file: declaration.file.as_path(),
             catalog_id: declaration.catalog_id.as_str(),
             span: declaration.span,
+            kind: CatalogTargetKind::Declaration,
         })
         .min_by_key(|target| span_len(target.span))
 }
@@ -90,7 +94,10 @@ fn declaration_at<'a>(
 fn supported_use_site(site: &UseSite) -> Option<&UseSite> {
     matches!(
         site.kind,
-        UseSiteKind::SavedRoot | UseSiteKind::ResourceMember | UseSiteKind::StoreIndex
+        UseSiteKind::SavedRoot
+            | UseSiteKind::ResourceMember
+            | UseSiteKind::StoreIndex
+            | UseSiteKind::Enum
     )
     .then_some(site)
 }
@@ -98,9 +105,31 @@ fn supported_use_site(site: &UseSite) -> Option<&UseSite> {
 fn supported_declaration(declaration: &CatalogDeclaration) -> Option<&CatalogDeclaration> {
     matches!(
         declaration.kind,
-        CatalogEntryKind::Store | CatalogEntryKind::ResourceMember | CatalogEntryKind::StoreIndex
+        CatalogEntryKind::Store
+            | CatalogEntryKind::ResourceMember
+            | CatalogEntryKind::StoreIndex
+            | CatalogEntryKind::Enum
     )
     .then_some(declaration)
+}
+
+fn supported_reference_site(
+    snapshot: &AnalysisSnapshot,
+    target: &CatalogTarget<'_>,
+    site: &UseSite,
+) -> bool {
+    if supported_use_site(site).is_none() {
+        return false;
+    }
+    if target.is_enum_type_annotation(snapshot) {
+        site.kind == UseSiteKind::Enum && enum_type_annotation_site(snapshot, site)
+    } else {
+        true
+    }
+}
+
+fn enum_type_annotation_site(snapshot: &AnalysisSnapshot, site: &UseSite) -> bool {
+    span_is_type_annotation(snapshot, &site.file, site.span)
 }
 
 fn location(file: &Path, span: SourceSpan, indices: &impl FileIndex) -> Option<Location> {
@@ -123,6 +152,31 @@ fn push_unique_location(locations: &mut Vec<Location>, location: Location) {
 }
 
 struct CatalogTarget<'a> {
+    file: &'a Path,
     catalog_id: &'a str,
     span: SourceSpan,
+    kind: CatalogTargetKind,
+}
+
+impl CatalogTarget<'_> {
+    fn is_enum_type_annotation(&self, snapshot: &AnalysisSnapshot) -> bool {
+        matches!(self.kind, CatalogTargetKind::Use(UseSiteKind::Enum))
+            && span_is_type_annotation(snapshot, self.file, self.span)
+    }
+}
+
+fn span_is_type_annotation(snapshot: &AnalysisSnapshot, file: &Path, span: SourceSpan) -> bool {
+    snapshot
+        .files
+        .iter()
+        .find(|analyzed| analyzed.path == file)
+        .is_some_and(|analyzed| {
+            crate::type_context::type_annotation_at(&analyzed.parsed.file, span.start_byte)
+        })
+}
+
+#[derive(Clone, Copy)]
+enum CatalogTargetKind {
+    Use(UseSiteKind),
+    Declaration,
 }

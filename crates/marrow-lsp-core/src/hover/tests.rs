@@ -81,6 +81,21 @@ fn hover_value_at(
     Some(markup.value)
 }
 
+fn assert_status_enum_hover(value: &str) {
+    assert!(
+        value.starts_with("```marrow\nenum Status\n```"),
+        "enum annotation hover should lead with the enum signature: {value}"
+    );
+    assert!(
+        value.contains("Lifecycle state."),
+        "enum annotation hover should include docs: {value}"
+    );
+    assert!(
+        value.contains("open"),
+        "enum annotation hover should include member summary: {value}"
+    );
+}
+
 #[test]
 fn hover_over_a_plain_parameter_use_shows_its_signature_fragment() {
     let source = "module a\n\npub fn f(n: int): int\n    return n\n";
@@ -2200,20 +2215,7 @@ pub fn set(status: Status)
     let HoverContents::Markup(markup) = hover.contents else {
         panic!("expected markup");
     };
-    let value = markup.value;
-
-    assert!(
-        value.starts_with("```marrow\nenum Status\n```"),
-        "enum annotation hover should lead with the enum signature: {value}"
-    );
-    assert!(
-        value.contains("Lifecycle state."),
-        "enum annotation hover should include docs: {value}"
-    );
-    assert!(
-        value.contains("open"),
-        "enum annotation hover should include member summary: {value}"
-    );
+    assert_status_enum_hover(&markup.value);
 }
 
 #[test]
@@ -2247,7 +2249,7 @@ pub fn set(Status: int)
 }
 
 #[test]
-fn hover_over_qualified_foreign_enum_type_annotation_is_blocked_without_canonical_fact() {
+fn hover_over_qualified_foreign_enum_type_annotation_uses_catalog_fact() {
     let state_source = "\
 module shelf::state
 
@@ -2273,14 +2275,12 @@ pub fn set(status: state::Status)
     );
     let index = index_for(&snapshot);
     let offset = offset_of(app_source, "state::Status") + "state::".len();
-    assert!(
-        hover_with_index(&snapshot, &index, &file, offset).is_none(),
-        "qualified enum annotations stay unavailable until Marrow exposes canonical module-path type facts"
-    );
+    let value = hover_value_at(&snapshot, &index, &file, offset).expect("a hover");
+    assert_status_enum_hover(&value);
 }
 
 #[test]
-fn hover_over_bare_foreign_enum_type_annotation_is_blocked_without_canonical_fact() {
+fn hover_over_bare_foreign_enum_type_annotation_uses_catalog_fact() {
     let other_source = "\
 module shelf::other
 
@@ -2311,9 +2311,49 @@ pub fn set(status: Status)
     );
     let index = index_for(&snapshot);
     let offset = offset_of(app_source, "status: Status") + "status: ".len();
+    let value = hover_value_at(&snapshot, &index, &file, offset).expect("a hover");
+    assert_status_enum_hover(&value);
+}
+
+#[test]
+fn hover_over_ambiguous_bare_foreign_enum_type_annotation_does_not_pick_an_enum() {
+    let first_source = "\
+module shelf::first
+
+;; First lifecycle state.
+pub enum Status
+    open
+";
+    let second_source = "\
+module shelf::second
+
+;; Second lifecycle state.
+pub enum Status
+    closed
+";
+    let app_source = "\
+module shelf::app
+
+pub fn set(status: Status)
+    return
+";
+    let (snapshot, file) = analyze_files(
+        &[
+            ("shelf/first.mw", first_source),
+            ("shelf/second.mw", second_source),
+            ("shelf/app.mw", app_source),
+        ],
+        "shelf/app.mw",
+    );
+    let index = index_for(&snapshot);
+    let offset = offset_of(app_source, "status: Status") + "status: ".len();
+    let value = hover_value_at(&snapshot, &index, &file, offset);
+
     assert!(
-        hover_with_index(&snapshot, &index, &file, offset).is_none(),
-        "foreign enum annotations stay unavailable until Marrow exposes canonical type-name facts"
+        !value.as_deref().is_some_and(|value| {
+            value.contains("First lifecycle state.") || value.contains("Second lifecycle state.")
+        }),
+        "ambiguous bare enum annotation should not pick a foreign enum: {value:?}"
     );
 }
 
