@@ -8,7 +8,10 @@
 use std::path::PathBuf;
 
 use marrow_lsp_core::data_explorer::DataChildrenRequest;
-use marrow_lsp_core::mcp::{self, RunMode};
+use marrow_lsp_core::mcp::{
+    self, COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
+    RESOURCE_SCHEMA_MISSING_FACTS, RUN_MISSING_FACTS, RunMode, SAVED_DATA_MISSING_FACTS,
+};
 use serde_json::{Value as Json, json};
 
 /// The MCP protocol version this server speaks, echoed in the `initialize` reply.
@@ -155,7 +158,7 @@ pub fn tools() -> Json {
             "description": "Presentation-only development helper: list current context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing canonical completion-context facts for any production contract; not a stable production completion API.",
             "_meta": marrow_meta(presentation_contract(
                 "development helper",
-                &["canonical completion-context facts"],
+                COMPLETION_MISSING_FACTS,
             )),
             "inputSchema": {
                 "type": "object",
@@ -175,11 +178,7 @@ pub fn tools() -> Json {
                 "stableProductionApi": false,
                 "description": "development inspection helper",
                 "basis": "current checked schema facts",
-                "missingFacts": [
-                    "catalog-bound resource/store/member identity",
-                    "presence/default facts",
-                    "typed protocol DTOs",
-                ],
+                "missingFacts": RESOURCE_SCHEMA_MISSING_FACTS,
                 "boundedness": {
                     "requiresNamedResource": true,
                     "wholeCatalog": "blocked",
@@ -197,15 +196,12 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Presentation-only saved-root listing helper: list saved root names and Marrow store_snapshot metadata from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity and stable saved-data DTOs; not a stable typed production API.",
+            "description": "Presentation-only saved-root listing helper: list saved root names and Marrow store_snapshot metadata from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-root identity, versioned source/store generation, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable typed production API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
                 "description": "saved-root listing helper",
-                "missingFacts": [
-                    "catalog-bound saved-place identity",
-                    "stable saved-data DTOs",
-                ],
+                "missingFacts": SAVED_DATA_MISSING_FACTS,
                 "dataAccess": "gated",
                 "pathSurface": {
                     "rootOnly": true,
@@ -223,14 +219,12 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_children",
-            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow store_snapshot metadata under a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity; not a stable production data API.",
+            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow store_snapshot metadata under a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, versioned source/store generation, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
                 "description": "bounded typed data helper",
-                "missingFacts": [
-                    "catalog-bound saved-place identity",
-                ],
+                "missingFacts": DATA_CHILDREN_MISSING_FACTS,
                 "dataAccess": "gated",
                 "basis": "Marrow typed data children tooling",
                 "boundedness": {
@@ -272,12 +266,7 @@ pub fn tools() -> Json {
                 "stableProductionApi": false,
                 "description": "debug/admin advisory",
                 "basis": "current schema and real store",
-                "missingFacts": [
-                    "source/store compatibility verdicts",
-                    "drift witnesses",
-                    "typed repair facts",
-                    "stable production integrity DTOs",
-                ],
+                "missingFacts": DATA_INTEGRITY_MISSING_FACTS,
                 "dataAccess": "gated",
                 "scope": "capped-current-schema-advisory",
                 "advisory": true,
@@ -300,14 +289,7 @@ pub fn tools() -> Json {
                 "status": "presentation-only",
                 "stableProductionApi": false,
                 "description": "sandboxed execution helper",
-                "missingFacts": [
-                    "canonical function-entry facts",
-                    "transitive effect facts",
-                    "durable-scope facts",
-                    "transaction facts",
-                    "runtime generation facts",
-                    "typed run protocol DTOs",
-                ],
+                "missingFacts": RUN_MISSING_FACTS,
                 "sandbox": "fresh-in-memory-store",
                 "host": "locked-down",
                 "realStore": "never-touched",
@@ -547,7 +529,7 @@ mod tests {
         assert_eq!(complete["description"], "development helper");
         assert_eq!(
             strings(&complete["missingFacts"]),
-            vec!["canonical completion-context facts"]
+            COMPLETION_MISSING_FACTS.to_vec()
         );
 
         let schema = contract(tools, "mw_resource_schema");
@@ -557,11 +539,7 @@ mod tests {
         assert_eq!(schema["basis"], "current checked schema facts");
         assert_eq!(
             strings(&schema["missingFacts"]),
-            vec![
-                "catalog-bound resource/store/member identity",
-                "presence/default facts",
-                "typed protocol DTOs"
-            ]
+            RESOURCE_SCHEMA_MISSING_FACTS.to_vec()
         );
         assert_eq!(schema["boundedness"]["requiresNamedResource"], true);
         assert_eq!(schema["boundedness"]["wholeCatalog"], "blocked");
@@ -576,10 +554,7 @@ mod tests {
         assert_eq!(saved_roots["description"], "saved-root listing helper");
         assert_eq!(
             strings(&saved_roots["missingFacts"]),
-            vec![
-                "catalog-bound saved-place identity",
-                "stable saved-data DTOs"
-            ]
+            SAVED_DATA_MISSING_FACTS.to_vec()
         );
         assert_eq!(saved_roots["dataAccess"], "gated");
         assert_eq!(saved_roots["pathSurface"]["rootOnly"], true);
@@ -595,7 +570,7 @@ mod tests {
         assert_eq!(data_children["description"], "bounded typed data helper");
         assert_eq!(
             strings(&data_children["missingFacts"]),
-            vec!["catalog-bound saved-place identity"]
+            DATA_CHILDREN_MISSING_FACTS.to_vec()
         );
         assert_eq!(data_children["dataAccess"], "gated");
         assert_eq!(data_children["boundedness"]["page"], "limit-clamped");
@@ -651,12 +626,7 @@ mod tests {
         assert_eq!(integrity["basis"], "current schema and real store");
         assert_eq!(
             strings(&integrity["missingFacts"]),
-            vec![
-                "source/store compatibility verdicts",
-                "drift witnesses",
-                "typed repair facts",
-                "stable production integrity DTOs"
-            ]
+            DATA_INTEGRITY_MISSING_FACTS.to_vec()
         );
         assert!(
             tool(tools, "mw_data_integrity")["description"]
@@ -680,17 +650,7 @@ mod tests {
         assert_eq!(run["status"], "presentation-only");
         assert_eq!(run["stableProductionApi"], false);
         assert_eq!(run["description"], "sandboxed execution helper");
-        assert_eq!(
-            strings(&run["missingFacts"]),
-            vec![
-                "canonical function-entry facts",
-                "transitive effect facts",
-                "durable-scope facts",
-                "transaction facts",
-                "runtime generation facts",
-                "typed run protocol DTOs"
-            ]
-        );
+        assert_eq!(strings(&run["missingFacts"]), RUN_MISSING_FACTS.to_vec());
         assert_eq!(run["sandbox"], "fresh-in-memory-store");
         assert_eq!(run["host"], "locked-down");
         assert_eq!(run["realStore"], "never-touched");

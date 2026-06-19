@@ -147,17 +147,27 @@ function makeClient() {
             { kind: "field", value: "value" },
           ])
         ) {
+          assert.deepEqual(params, {
+            segments: [...bytesKeyPath, { kind: "field", value: "value" }],
+            preview_limit: 2048,
+          });
           return {
             available: true,
             presence: "value_only",
             value: "42",
+            value_truncated: true,
             store_snapshot: null,
           };
         }
         if (deepEqual(params.segments, layerPath)) {
+          assert.deepEqual(params, {
+            segments: layerPath,
+            preview_limit: 2048,
+          });
           return {
             available: true,
             presence: "children_only",
+            value_truncated: false,
             store_snapshot: null,
           };
         }
@@ -267,7 +277,9 @@ try {
   ]);
 
   const values = await provider.getChildren(fields[0]);
-  assert.deepEqual(values, [{ kind: "value", label: "42" }]);
+  assert.deepEqual(values, [{ kind: "value", label: "42", valueTruncated: true }]);
+  const valueItem = provider.getTreeItem(values[0]);
+  assert.equal(valueItem.description, "truncated");
   assert.equal(
     client.calls.some((call) => call.method === "marrow/dataRead"),
     true,

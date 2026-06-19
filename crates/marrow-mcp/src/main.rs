@@ -424,6 +424,11 @@ fn write_message(out: &mut impl Write, message: &Json) {
 mod tests {
     use super::*;
 
+    use marrow_lsp_core::mcp::{
+        COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
+        RUN_MISSING_FACTS, SAVED_DATA_MISSING_FACTS,
+    };
+
     /// Drive the server loop over an in-memory stdin and collect its line-framed
     /// replies as parsed JSON.
     fn drive(requests: &[Json], policy: Policy) -> Vec<Json> {
@@ -630,7 +635,7 @@ mod tests {
                     "contract": contract(
                         "presentation-only",
                         "development helper",
-                        &["canonical completion-context facts"],
+                        COMPLETION_MISSING_FACTS,
                     ),
                 }),
                 "development helper (presentation-only: canonical completion-context facts): 3 completions",
@@ -643,10 +648,10 @@ mod tests {
                     "contract": contract(
                         "presentation-only",
                         "saved-root listing helper",
-                        &["catalog-bound saved-place identity"],
+                        SAVED_DATA_MISSING_FACTS,
                     ),
                 }),
-                "saved-root listing helper (presentation-only: catalog-bound saved-place identity): data unavailable",
+                "saved-root listing helper (presentation-only: catalog-bound saved-root identity +4): data unavailable",
             ),
             (
                 "mw_data_integrity",
@@ -658,12 +663,7 @@ mod tests {
                     "contract": contract(
                         "presentation-only",
                         "debug/admin advisory",
-                        &[
-                            "source/store compatibility verdicts",
-                            "drift witnesses",
-                            "typed repair facts",
-                            "stable production integrity DTOs",
-                        ],
+                        DATA_INTEGRITY_MISSING_FACTS,
                     ),
                 }),
                 "debug/admin advisory (presentation-only: source/store compatibility verdicts +3): clean, 10 scanned",
@@ -677,10 +677,10 @@ mod tests {
                     "contract": contract(
                         "presentation-only",
                         "bounded typed data helper",
-                        &["catalog-bound saved-place identity"],
+                        DATA_CHILDREN_MISSING_FACTS,
                     ),
                 }),
-                "bounded typed data helper (presentation-only: catalog-bound saved-place identity): 2 children (truncated)",
+                "bounded typed data helper (presentation-only: catalog-bound saved-place identity +4): 2 children (truncated)",
             ),
             (
                 "mw_run",
@@ -691,14 +691,10 @@ mod tests {
                     "contract": contract(
                         "presentation-only",
                         "sandboxed execution helper",
-                        &[
-                            "transitive effect facts",
-                            "durable-scope facts",
-                            "transaction facts",
-                        ],
+                        RUN_MISSING_FACTS,
                     ),
                 }),
-                "sandboxed execution helper (presentation-only: transitive effect facts +2): value 42",
+                "sandboxed execution helper (presentation-only: canonical function-entry facts +5): value 42",
             ),
         ];
         for (name, result, expected) in cases {

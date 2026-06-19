@@ -449,8 +449,8 @@ fn std_root_namespace_lists_modules() {
     assert_eq!(
         labels,
         [
-            "text", "bytes", "math", "json", "csv", "id", "random", "context", "audit", "error",
-            "matrix", "clock", "env", "io", "assert", "log"
+            "text", "bytes", "hash", "math", "json", "csv", "id", "random", "context", "audit",
+            "error", "matrix", "clock", "env", "io", "assert", "log"
         ]
     );
     for op in ["now", "length"] {

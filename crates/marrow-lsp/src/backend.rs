@@ -131,6 +131,7 @@ impl Backend {
                 available: true,
                 presence: result.presence,
                 value: result.value,
+                value_truncated: result.value_truncated,
                 store_snapshot: result.store_snapshot,
                 error: None,
             },
@@ -248,6 +249,7 @@ fn unavailable_data_read() -> DataReadResponse {
         available: false,
         presence: DataPresenceDto::Absent,
         value: None,
+        value_truncated: false,
         store_snapshot: None,
         error: None,
     }
@@ -258,6 +260,7 @@ fn data_read_error(error: DataChildrenError) -> DataReadResponse {
         available: true,
         presence: DataPresenceDto::Absent,
         value: None,
+        value_truncated: false,
         store_snapshot: None,
         error: Some(error),
     }

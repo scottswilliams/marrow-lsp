@@ -751,8 +751,11 @@ fn data_tools_refuse_when_not_enabled() {
         "presentation-only",
         "saved-root listing helper",
         &[
-            "catalog-bound saved-place identity",
-            "stable saved-data DTOs",
+            "catalog-bound saved-root identity",
+            "versioned source/store generation",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
         ],
     );
     let integrity = data_integrity(&file, false);
@@ -786,7 +789,13 @@ fn data_tools_refuse_when_not_enabled() {
         &children,
         "presentation-only",
         "bounded typed data helper",
-        &["catalog-bound saved-place identity"],
+        &[
+            "catalog-bound saved-place identity",
+            "versioned source/store generation",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
+        ],
     );
 }
 
@@ -803,8 +812,11 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
         "presentation-only",
         "saved-root listing helper",
         &[
-            "catalog-bound saved-place identity",
-            "stable saved-data DTOs",
+            "catalog-bound saved-root identity",
+            "versioned source/store generation",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
         ],
     );
 }
@@ -877,7 +889,13 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &["catalog-bound saved-place identity"],
+        &[
+            "catalog-bound saved-place identity",
+            "versioned source/store generation",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
+        ],
     );
 }
 
@@ -909,7 +927,13 @@ fn data_children_returns_empty_page_for_absent_members() {
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &["catalog-bound saved-place identity"],
+        &[
+            "catalog-bound saved-place identity",
+            "versioned source/store generation",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
+        ],
     );
 }
 
@@ -938,6 +962,12 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &["catalog-bound saved-place identity"],
+        &[
+            "catalog-bound saved-place identity",
+            "versioned source/store generation",
+            "watch/refresh facts",
+            "integrity and repair facts",
+            "serve/attach data boundaries",
+        ],
     );
 }

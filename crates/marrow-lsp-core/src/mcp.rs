@@ -46,24 +46,33 @@ const OUTPUT_CAP: usize = 8 * 1024;
 const RUN_VALUE_NODE_CAP: usize = 256;
 const RUN_VALUE_STRING_CAP: usize = 8 * 1024;
 
-const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
-const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
+pub const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
+pub const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
     "catalog-bound resource/store/member identity",
     "presence/default facts",
     "typed protocol DTOs",
 ];
-const SAVED_DATA_MISSING_FACTS: &[&str] = &[
-    "catalog-bound saved-place identity",
-    "stable saved-data DTOs",
+pub const SAVED_DATA_MISSING_FACTS: &[&str] = &[
+    "catalog-bound saved-root identity",
+    "versioned source/store generation",
+    "watch/refresh facts",
+    "integrity and repair facts",
+    "serve/attach data boundaries",
 ];
-const DATA_CHILDREN_MISSING_FACTS: &[&str] = &["catalog-bound saved-place identity"];
-const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
+pub const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
+    "catalog-bound saved-place identity",
+    "versioned source/store generation",
+    "watch/refresh facts",
+    "integrity and repair facts",
+    "serve/attach data boundaries",
+];
+pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "source/store compatibility verdicts",
     "drift witnesses",
     "typed repair facts",
     "stable production integrity DTOs",
 ];
-const RUN_MISSING_FACTS: &[&str] = &[
+pub const RUN_MISSING_FACTS: &[&str] = &[
     "canonical function-entry facts",
     "transitive effect facts",
     "durable-scope facts",

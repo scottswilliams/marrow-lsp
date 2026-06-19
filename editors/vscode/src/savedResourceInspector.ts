@@ -36,10 +36,16 @@ interface DataChildrenResult {
   readonly error?: unknown;
 }
 
+interface DataReadRequest {
+  readonly segments: DataPathSegment[];
+  readonly preview_limit?: number;
+}
+
 interface DataReadResult {
   readonly available: boolean;
   readonly presence: "absent" | "value_only" | "children_only";
   readonly value?: string;
+  readonly value_truncated: boolean;
   readonly store_snapshot: unknown | null;
   readonly error?: unknown;
 }
@@ -48,6 +54,7 @@ const REQUEST_SAVED_ROOTS = "marrow/savedRoots";
 const REQUEST_DATA_CHILDREN = "marrow/dataChildren";
 const REQUEST_DATA_READ = "marrow/dataRead";
 const DATA_PAGE_LIMIT = 200;
+const DATA_VALUE_PREVIEW_LIMIT = 2048;
 
 type SavedResourceNode =
   | SavedRootNode
@@ -70,6 +77,7 @@ interface SavedSegmentNode {
 interface SavedValueNode {
   readonly kind: "value";
   readonly label: string;
+  readonly valueTruncated: boolean;
 }
 
 interface SavedMoreNode {
@@ -113,6 +121,9 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     item.contextValue = node.kind === "root" ? "marrowDataRoot" : node.kind;
     if (!canExpand(node) && node.kind !== "value") {
       item.iconPath = new vscode.ThemeIcon("circle-slash");
+    }
+    if (node.kind === "value" && node.valueTruncated) {
+      item.description = "truncated";
     }
     return item;
   }
@@ -207,7 +218,11 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     }
     let result: DataReadResult;
     try {
-      result = await client.sendRequest<DataReadResult>(REQUEST_DATA_READ, { segments });
+      const request: DataReadRequest = {
+        segments,
+        preview_limit: DATA_VALUE_PREVIEW_LIMIT,
+      };
+      result = await client.sendRequest<DataReadResult>(REQUEST_DATA_READ, request);
     } catch {
       return [unavailableNode()];
     }
@@ -218,7 +233,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       return [{ kind: "blocked", label: "path unavailable" }];
     }
     if (result.value !== undefined) {
-      return [{ kind: "value", label: result.value }];
+      return [{ kind: "value", label: result.value, valueTruncated: result.value_truncated }];
     }
     if (result.presence === "absent") {
       return [{ kind: "absent", label: "absent" }];

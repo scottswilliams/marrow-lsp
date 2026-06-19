@@ -1508,7 +1508,7 @@ fn custom_saved_roots_request_answers_over_the_transport() {
 }
 
 #[test]
-fn custom_saved_data_inspector_requests_answer_over_the_transport() {
+fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
     let (_dir, file) = native_counter_fixture();
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
@@ -1614,6 +1614,7 @@ fn custom_saved_data_inspector_requests_answer_over_the_transport() {
     assert_eq!(response["result"]["available"], true);
     assert_eq!(response["result"]["presence"], "value_only");
     assert_eq!(response["result"]["value"], "42");
+    assert_eq!(response["result"]["value_truncated"], false);
     assert_store_snapshot(&response["result"]["store_snapshot"]);
 
     let _ = server.0.kill();
