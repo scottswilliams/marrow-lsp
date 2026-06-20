@@ -4,8 +4,12 @@ import { LanguageClient } from "vscode-languageclient/node";
 interface SavedRootsResult {
   available: boolean;
   roots: string[];
-  store_snapshot: unknown | null;
+  store_snapshot: StoreSnapshot | null;
 }
+
+type StoreSnapshot = JsonObject;
+type JsonObject = { readonly [key: string]: JsonValue };
+type JsonValue = string | number | boolean | null | JsonObject | readonly JsonValue[];
 
 type DataPathSegment =
   | { readonly kind: "root"; readonly value: string }
@@ -32,7 +36,7 @@ interface DataChildrenResult {
   readonly children: DataChildView[];
   readonly truncated: boolean;
   readonly cursor: DataKey | null;
-  readonly store_snapshot: unknown | null;
+  readonly store_snapshot: StoreSnapshot | null;
   readonly error?: unknown;
 }
 
@@ -46,7 +50,7 @@ interface DataReadResult {
   readonly presence: "absent" | "value_only" | "children_only";
   readonly value?: string;
   readonly value_truncated: boolean;
-  readonly store_snapshot: unknown | null;
+  readonly store_snapshot: StoreSnapshot | null;
   readonly error?: unknown;
 }
 
@@ -66,12 +70,14 @@ type SavedResourceNode =
 interface SavedRootNode {
   readonly kind: "root";
   readonly label: string;
+  readonly snapshot: StoreSnapshot | null;
 }
 
 interface SavedSegmentNode {
   readonly kind: "segment";
   readonly label: string;
   readonly segments: DataPathSegment[];
+  readonly snapshot: StoreSnapshot | null;
 }
 
 interface SavedValueNode {
@@ -85,10 +91,11 @@ interface SavedMoreNode {
   readonly label: string;
   readonly segments: DataPathSegment[];
   readonly cursor: DataKey;
+  readonly snapshot: StoreSnapshot | null;
 }
 
 interface SavedPlaceholderNode {
-  readonly kind: "unavailable" | "blocked" | "absent" | "truncated";
+  readonly kind: "unavailable" | "blocked" | "absent" | "truncated" | "changed";
   readonly label: string;
 }
 
@@ -131,13 +138,13 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
   async getChildren(node?: SavedResourceNode): Promise<SavedResourceNode[]> {
     if (node !== undefined) {
       if (node.kind === "root") {
-        return this.getDataChildren([{ kind: "root", value: node.label }]);
+        return this.getDataChildren([{ kind: "root", value: node.label }], null, node.snapshot);
       }
       if (node.kind === "segment") {
         return this.getSegmentChildren(node);
       }
       if (node.kind === "more") {
-        return this.getDataChildren(node.segments, node.cursor);
+        return this.getDataChildren(node.segments, node.cursor, node.snapshot);
       }
       return [];
     }
@@ -154,12 +161,19 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
-    return result.roots.map((root): SavedRootNode => ({ kind: "root", label: root }));
+    return result.roots.map(
+      (root): SavedRootNode => ({
+        kind: "root",
+        label: root,
+        snapshot: result.store_snapshot,
+      }),
+    );
   }
 
   private async getDataChildren(
     segments: DataPathSegment[],
-    cursor: DataKey | null = null,
+    cursor: DataKey | null,
+    expectedSnapshot: StoreSnapshot | null,
   ): Promise<SavedResourceNode[]> {
     const client = this.client;
     if (client === undefined) {
@@ -178,6 +192,9 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
+    if (!sameSnapshot(expectedSnapshot, result.store_snapshot)) {
+      return [changedNode()];
+    }
     if (result.error !== undefined) {
       return [{ kind: "blocked", label: "path unavailable" }];
     }
@@ -185,6 +202,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       kind: "segment",
       label: child.label,
       segments: [...segments, child.segment],
+      snapshot: result.store_snapshot,
     }));
     if (result.truncated) {
       if (result.cursor !== null) {
@@ -193,6 +211,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
           label: "more children",
           segments: [...segments],
           cursor: result.cursor,
+          snapshot: result.store_snapshot,
         });
       } else {
         nodes.push({ kind: "truncated", label: "additional children unavailable" });
@@ -203,15 +222,18 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
 
   private async getSegmentChildren(node: SavedSegmentNode): Promise<SavedResourceNode[]> {
     if (readsValue(node)) {
-      const read = await this.readData(node.segments);
+      const read = await this.readData(node.segments, node.snapshot);
       if (read !== undefined) {
         return read;
       }
     }
-    return this.getDataChildren(node.segments);
+    return this.getDataChildren(node.segments, null, node.snapshot);
   }
 
-  private async readData(segments: DataPathSegment[]): Promise<SavedResourceNode[] | undefined> {
+  private async readData(
+    segments: DataPathSegment[],
+    expectedSnapshot: StoreSnapshot | null,
+  ): Promise<SavedResourceNode[] | undefined> {
     const client = this.client;
     if (client === undefined) {
       return [];
@@ -229,6 +251,9 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
+    if (!sameSnapshot(expectedSnapshot, result.store_snapshot)) {
+      return [changedNode()];
+    }
     if (result.error !== undefined) {
       return [{ kind: "blocked", label: "path unavailable" }];
     }
@@ -244,6 +269,56 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
 
 function unavailableNode(): SavedPlaceholderNode {
   return { kind: "unavailable", label: "store unavailable" };
+}
+
+function changedNode(): SavedPlaceholderNode {
+  return { kind: "changed", label: "data changed; refresh" };
+}
+
+function sameSnapshot(left: StoreSnapshot | null, right: StoreSnapshot | null): boolean {
+  return sameJson(left, right);
+}
+
+function sameJson(left: JsonValue, right: JsonValue): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left === null || right === null) {
+    return false;
+  }
+  if (isJsonArray(left) || isJsonArray(right)) {
+    return sameJsonArray(left, right);
+  }
+  if (isJsonObject(left) && isJsonObject(right)) {
+    return sameJsonObject(left, right);
+  }
+  return false;
+}
+
+function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
+  return Array.isArray(value);
+}
+
+function sameJsonArray(left: JsonValue, right: JsonValue): boolean {
+  if (!isJsonArray(left) || !isJsonArray(right) || left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => sameJson(value, right[index]));
+}
+
+function isJsonObject(value: JsonValue): value is JsonObject {
+  return typeof value === "object" && value !== null && !isJsonArray(value);
+}
+
+function sameJsonObject(left: JsonObject, right: JsonObject): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+  return leftKeys.every((key) =>
+    Object.hasOwn(right, key) && sameJson(left[key], right[key]),
+  );
 }
 
 function readsValue(node: SavedSegmentNode): boolean {

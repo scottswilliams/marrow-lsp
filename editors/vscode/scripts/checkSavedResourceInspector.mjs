@@ -11,6 +11,14 @@ const extensionDir = dirname(scriptDir);
 const outDir = mkdtempSync(join(tmpdir(), "marrow-vscode-saved-resource-"));
 const tsc = join(extensionDir, "node_modules", ".bin", "tsc");
 const restoreLoad = Module._load;
+const baseSnapshot = {
+  opaque_generation: 1,
+  future_marrow_metadata: { participates_in_view_equality: true },
+};
+const staleSnapshot = {
+  ...baseSnapshot,
+  future_marrow_metadata: { participates_in_view_equality: false },
+};
 
 function installVscodeStub() {
   class EventEmitter {
@@ -55,11 +63,13 @@ function installVscodeStub() {
 function makeClient() {
   const calls = [];
   const rootPath = [{ kind: "root", value: "Root" }];
+  const staleRootPath = [{ kind: "root", value: "StaleRoot" }];
   const bytesKeyPath = [
     ...rootPath,
     { kind: "key", value: { kind: "bytes", value: [10] } },
   ];
   const layerPath = [...rootPath, { kind: "layer", value: "history" }];
+  const staleValuePath = [...rootPath, { kind: "field", value: "stale" }];
 
   return {
     calls,
@@ -67,7 +77,7 @@ function makeClient() {
       calls.push({ method, params });
       if (method === "marrow/savedRoots") {
         assert.equal(params, undefined);
-        return { available: true, roots: ["Root"], store_snapshot: null };
+        return { available: true, roots: ["Root", "StaleRoot"], store_snapshot: baseSnapshot };
       }
       if (method === "marrow/dataChildren") {
         if (deepEqual(params.segments, rootPath) && params.cursor === null) {
@@ -87,10 +97,28 @@ function makeClient() {
                 segment: { kind: "layer", value: "history" },
                 label: "history",
               },
+              {
+                segment: { kind: "field", value: "stale" },
+                label: "stale",
+              },
             ],
             truncated: true,
             cursor: { kind: "int", value: 200 },
-            store_snapshot: null,
+            store_snapshot: baseSnapshot,
+          };
+        }
+        if (deepEqual(params.segments, staleRootPath) && params.cursor === null) {
+          return {
+            available: true,
+            children: [
+              {
+                segment: { kind: "key", value: { kind: "string", value: "mixed" } },
+                label: "mixed-generation-child",
+              },
+            ],
+            truncated: false,
+            cursor: null,
+            store_snapshot: staleSnapshot,
           };
         }
         if (
@@ -107,7 +135,7 @@ function makeClient() {
             ],
             truncated: true,
             cursor: null,
-            store_snapshot: null,
+            store_snapshot: baseSnapshot,
           };
         }
         if (deepEqual(params.segments, bytesKeyPath)) {
@@ -121,7 +149,7 @@ function makeClient() {
             ],
             truncated: false,
             cursor: null,
-            store_snapshot: null,
+            store_snapshot: baseSnapshot,
           };
         }
         if (deepEqual(params.segments, layerPath)) {
@@ -135,7 +163,7 @@ function makeClient() {
             ],
             truncated: false,
             cursor: null,
-            store_snapshot: null,
+            store_snapshot: baseSnapshot,
           };
         }
         throw new Error(`unexpected dataChildren path ${JSON.stringify(params)}`);
@@ -156,7 +184,16 @@ function makeClient() {
             presence: "value_only",
             value: "42",
             value_truncated: true,
-            store_snapshot: null,
+            store_snapshot: baseSnapshot,
+          };
+        }
+        if (deepEqual(params.segments, staleValuePath)) {
+          return {
+            available: true,
+            presence: "value_only",
+            value: "mixed-generation-value",
+            value_truncated: false,
+            store_snapshot: staleSnapshot,
           };
         }
         if (deepEqual(params.segments, layerPath)) {
@@ -168,7 +205,7 @@ function makeClient() {
             available: true,
             presence: "children_only",
             value_truncated: false,
-            store_snapshot: null,
+            store_snapshot: baseSnapshot,
           };
         }
         throw new Error(`unexpected dataRead path ${JSON.stringify(params)}`);
@@ -215,29 +252,35 @@ try {
   provider.setClient(client);
 
   const roots = await provider.getChildren();
-  assert.equal(roots.length, 1);
+  assert.equal(roots.length, 2);
 
-  assert.deepEqual(roots[0], { kind: "root", label: "Root" });
+  assert.deepEqual(roots[0], { kind: "root", label: "Root", snapshot: baseSnapshot });
+  assert.deepEqual(roots[1], { kind: "root", label: "StaleRoot", snapshot: baseSnapshot });
   const keys = await provider.getChildren(roots[0]);
-  assert.equal(keys.length, 3);
+  assert.equal(keys.length, 4);
   assert.equal(keys[0].label, "server-rendered-bytes-key");
   assert.deepEqual(keys[0].segments, [
     { kind: "root", value: "Root" },
     { kind: "key", value: { kind: "bytes", value: [10] } },
   ]);
-  assert.deepEqual(keys[2], {
+  assert.deepEqual(keys[0].snapshot, baseSnapshot);
+  assert.deepEqual(keys[1].snapshot, baseSnapshot);
+  assert.deepEqual(keys[2].snapshot, baseSnapshot);
+  assert.deepEqual(keys[3], {
     kind: "more",
     label: "more children",
     segments: [{ kind: "root", value: "Root" }],
     cursor: { kind: "int", value: 200 },
+    snapshot: baseSnapshot,
   });
 
-  const moreItem = provider.getTreeItem(keys[2]);
+  const moreItem = provider.getTreeItem(keys[3]);
   assert.equal(moreItem.collapsibleState, 1, "cursor-backed continuation should expand");
 
-  const nextKeys = await provider.getChildren(keys[2]);
+  const nextKeys = await provider.getChildren(keys[3]);
   assert.equal(nextKeys.length, 2);
   assert.equal(nextKeys[0].label, "server-rendered-next-key");
+  assert.deepEqual(nextKeys[0].snapshot, baseSnapshot);
   assert.deepEqual(client.calls.at(-1), {
     method: "marrow/dataChildren",
     params: {
@@ -275,6 +318,7 @@ try {
     { kind: "key", value: { kind: "bytes", value: [10] } },
     { kind: "field", value: "value" },
   ]);
+  assert.deepEqual(fields[0].snapshot, baseSnapshot);
 
   const values = await provider.getChildren(fields[0]);
   assert.deepEqual(values, [{ kind: "value", label: "42", valueTruncated: true }]);
@@ -285,6 +329,12 @@ try {
     true,
     "field expansion should read the leaf through the server",
   );
+
+  const staleRootChildren = await provider.getChildren(roots[1]);
+  assert.deepEqual(staleRootChildren, [{ kind: "changed", label: "data changed; refresh" }]);
+
+  const staleValue = await provider.getChildren(keys[2]);
+  assert.deepEqual(staleValue, [{ kind: "changed", label: "data changed; refresh" }]);
 } finally {
   Module._load = restoreLoad;
   rmSync(outDir, { recursive: true, force: true });

@@ -15,6 +15,7 @@ const files = new Map([
   ["package.json", readExtensionFile("package.json")],
   ["README.md", readExtensionFile("README.md")],
   ["src/dataIntegrity.ts", readExtensionFile("src/dataIntegrity.ts")],
+  ["src/extension.ts", readExtensionFile("src/extension.ts")],
 ]);
 const packageJson = JSON.parse(files.get("package.json"));
 
@@ -99,6 +100,13 @@ function markdownBullet(text, source, marker) {
 
 const changelog = files.get("CHANGELOG.md");
 const changelogF5 = markdownBullet(changelog, "CHANGELOG.md", "F5 debugging");
+const changelogSavedInspector = markdownBullet(
+  changelog,
+  "CHANGELOG.md",
+  "Saved Resource Inspector",
+);
+const readme = files.get("README.md");
+const readmeSavedInspector = markdownBullet(readme, "README.md", "Saved Resource Inspector");
 assertMentions(
   changelog,
   "CHANGELOG.md",
@@ -109,7 +117,43 @@ assertMentions(
   changelog,
   "CHANGELOG.md",
   "Saved Resource Inspector framing",
-  /Saved Resource Inspector view for opt-in committed saved-resource inspection[\s\S]*Marrow-owned store\s+facts/i,
+  /Saved Resource Inspector view[\s\S]*opt-in committed\s+saved-resource inspection[\s\S]*Marrow-owned store\s+facts/i,
+);
+assertMentions(
+  changelogSavedInspector,
+  "CHANGELOG.md Saved Resource Inspector bullet",
+  "manual refresh",
+  /manual-refresh/i,
+);
+assertMentions(
+  changelogSavedInspector,
+  "CHANGELOG.md Saved Resource Inspector bullet",
+  "snapshot refusal",
+  /refuses\s+to\s+mix[\s\S]*store\s+snapshots/i,
+);
+assertMentions(
+  changelogSavedInspector,
+  "CHANGELOG.md Saved Resource Inspector bullet",
+  "no live watches",
+  /does\s+not\s+watch[\s\S]*uncommitted\s+writes[\s\S]*debuggee\s+state[\s\S]*served\s+programs/i,
+);
+assertMentions(
+  readmeSavedInspector,
+  "README.md Saved Resource Inspector bullet",
+  "manual refresh",
+  /refreshes\s+only\s+on\s+demand/i,
+);
+assertMentions(
+  readmeSavedInspector,
+  "README.md Saved Resource Inspector bullet",
+  "snapshot refusal",
+  /refuses\s+to\s+mix[\s\S]*different\s+snapshot/i,
+);
+assertDoesNotMention(
+  files.get("src/extension.ts"),
+  "src/extension.ts",
+  "Saved Resource Inspector auto-refresh on saved documents",
+  /onDidSaveTextDocument[\s\S]*dataProvider\.refresh\(\)/,
 );
 assertMentions(
   changelog,
@@ -284,7 +328,6 @@ assertMentions(
   /default/i,
 );
 
-const readme = files.get("README.md");
 const readmeF5 = markdownBullet(readme, "README.md", "Debugging (F5)");
 const readmeSourceIntelligence = markdownBullet(readme, "README.md", "Source intelligence");
 assertMentions(

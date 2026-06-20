@@ -32,11 +32,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       void dataIntegrity.run();
     }),
-    vscode.workspace.onDidSaveTextDocument((document) => {
-      if (path.basename(document.fileName) === "marrow.json") {
-        dataProvider.refresh();
-      }
-    }),
     vscode.debug.registerDebugAdapterDescriptorFactory(
       "marrow",
       new MarrowDebugAdapterFactory(context),

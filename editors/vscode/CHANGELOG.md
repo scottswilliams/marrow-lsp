@@ -17,8 +17,10 @@ Initial release.
   These are editor aids, not stable production semantic contracts.
 - Rename refuses saved-data-backed edits until Marrow exposes catalog-backed evolution facts.
 - Document formatting.
-- The Saved Resource Inspector view for opt-in committed saved-resource inspection through
-  Marrow-owned store facts.
+- The manual-refresh, generation-aware Saved Resource Inspector view for opt-in committed
+  saved-resource inspection through Marrow-owned store facts. It refuses to mix child pages or
+  value reads from different Marrow store snapshots and does not watch uncommitted writes,
+  debuggee state, or served programs.
 - F5 debugging via the `marrow-dap` adapter, with explicit `entry`, Marrow-admitted typed `args`
   where `int`, `date`, and `bytes` use exact string forms, stop-on-entry, statement stepping,
   verified plain-line and conditional breakpoints, watch/REPL local expression evaluation, and

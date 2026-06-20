@@ -18,8 +18,9 @@ Rust binaries. No parsing or position math runs in TypeScript.
 - **Formatting** — format a `.mw` document.
 - **Saved Resource Inspector** — an opt-in view (Activity Bar) that expands committed saved
   resources from the native dev store when `marrow.liveData` is enabled. It is gated on Marrow
-  tooling facts and does not accept editor-authored saved paths.
-  Refreshes automatically when `marrow.json` is saved, and on demand from the view title.
+  tooling facts, carries Marrow store snapshot metadata through expansions, refuses to mix child
+  pages or value reads from a different snapshot, and refreshes only on demand from the view title.
+  It does not accept editor-authored saved paths.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
   project's `defaultEntry`, or set `entry` and typed `args` in `launch.json`. Marrow admits
   the args; `int`, `date`, and `bytes` use exact string forms. F5 remains useful for launch,
@@ -64,9 +65,9 @@ same way, in order:
 - The bundled binaries are **platform-specific**. Each release `.vsix` targets one platform
   (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`); install the one that
   matches your machine, or point `marrow.server.path` / `marrow.dap.path` at your own build.
-- The Saved Resource Inspector is a committed-store view. It does not observe uncommitted writes or
-  live debuggee state; a disabled, busy, or missing store is treated as "unavailable" rather than
-  reporting an error.
+- The Saved Resource Inspector is a manual-refresh committed-store view. It does not watch
+  uncommitted writes, live debuggee state, or served programs; a disabled, busy, or missing store is
+  treated as "unavailable" rather than reporting an error.
 - Debugging is **statement-level** (not expression-level stepping).
 
 ## Development
