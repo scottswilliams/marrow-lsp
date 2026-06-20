@@ -203,12 +203,15 @@ fn write_arg_fixture(dir: &Path) {
     std::fs::create_dir_all(&src).unwrap();
     let source = "module shelf\n\
                   \n\
+                  pub fn default()\n\
+                  \x20   print(\"default\")\n\
+                  \n\
                   pub fn main(title: string)\n\
                   \x20   print(title)\n";
     std::fs::write(src.join("shelf.mw"), source).unwrap();
     std::fs::write(
         dir.join("marrow.json"),
-        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::default\" }, \"store\": { \"backend\": \"memory\" } }",
     )
     .unwrap();
 }
@@ -1195,7 +1198,7 @@ fn configuration_done_rejects_source_changed_after_launch() {
 
     std::fs::write(
         dir.path().join("src").join("shelf.mw"),
-        "module shelf\n\npub fn main(title: string)\n    print(\"configurationDone-version\")\n",
+        "module shelf\n\npub fn default()\n    print(\"default\")\n\npub fn main(title: string)\n    print(\"configurationDone-version\")\n",
     )
     .unwrap();
 

@@ -3,12 +3,14 @@ use std::path::Path;
 use marrow_check::{
     AnalysisSnapshot, CheckedFunction, CheckedProgram, DefItem, Resolution, ResolvableKind,
     resolve,
-    tooling::{self, ResourceConstructorSignature},
+    tooling::{
+        self, CallableArgumentStyle, CallableSignature, CallableValueShape,
+        ResourceConstructorSignature,
+    },
 };
-use marrow_schema::stdlib;
 use marrow_syntax::{Declaration, FunctionDecl, SourceSpan};
 
-use crate::{language_facts, types::render_type};
+use crate::types::render_type;
 
 pub(super) struct Signature {
     pub(super) label: String,
@@ -24,39 +26,94 @@ pub(super) struct Parameter {
 
 pub(super) fn signature_for(
     program: &CheckedProgram,
-    docs: Option<&AnalysisSnapshot>,
+    snapshot: Option<&AnalysisSnapshot>,
     file: &Path,
     segments: &[String],
 ) -> Option<Signature> {
     let from_module = module_of_file(program, file)?;
-    if let Some(signature) = builtin_signature(segments) {
+    if let Some(signature) = intrinsic_signature(snapshot, file, segments) {
         return Some(signature);
     }
     if let Some(signature) = resource_signature(program, file, segments) {
         return Some(signature);
     }
-    function_signature(program, docs, from_module, segments)
+    function_signature(program, snapshot, from_module, segments)
 }
 
-fn builtin_signature(segments: &[String]) -> Option<Signature> {
-    if let [first, module, op] = segments
-        && first == "std"
-    {
-        return stdlib::lookup(module, op).map(std_signature);
+fn intrinsic_signature(
+    snapshot: Option<&AnalysisSnapshot>,
+    file: &Path,
+    segments: &[String],
+) -> Option<Signature> {
+    match snapshot {
+        Some(snapshot) => tooling::intrinsic_callable_signature_for_file(snapshot, file, segments),
+        None => tooling::intrinsic_callable_signature(segments),
     }
+    .map(render_intrinsic_signature)
+}
 
-    let [name] = segments else {
-        return None;
-    };
-    if let Some(builtin) = language_facts::bare_function_builtins()
+fn render_intrinsic_signature(callable: CallableSignature) -> Signature {
+    let params = callable
+        .params
         .iter()
-        .find(|builtin| builtin.name == name)
-    {
-        let mut signature = signature_from_label(builtin.detail);
-        signature.documentation = Some(builtin.description.to_string());
-        return Some(signature);
+        .map(|param| render_intrinsic_parameter(param, callable.argument_style))
+        .collect::<Vec<_>>();
+    let params_label = joined_param_labels(&params);
+    let path = callable.path.join("::");
+    let label = match callable.return_shape.as_ref().map(render_callable_shape) {
+        Some(ret) => format!("{path}({params_label}): {ret}"),
+        None => format!("{path}({params_label})"),
+    };
+    Signature {
+        label,
+        documentation: join_docs(&callable.docs),
+        params,
     }
-    language_facts::scalar_conversion_detail(name).map(|detail| signature_from_label(&detail))
+}
+
+fn render_intrinsic_parameter(
+    param: &tooling::CallableParameter,
+    style: CallableArgumentStyle,
+) -> Parameter {
+    match style {
+        CallableArgumentStyle::Positional => Parameter {
+            name: None,
+            label: positional_intrinsic_parameter_label(param),
+            documentation: join_docs(&param.docs),
+        },
+        CallableArgumentStyle::NamedFields => Parameter {
+            name: Some(param.label.clone()),
+            label: format!("{}: {}", param.label, render_callable_shape(&param.shape)),
+            documentation: join_docs(&param.docs),
+        },
+    }
+}
+
+fn positional_intrinsic_parameter_label(param: &tooling::CallableParameter) -> String {
+    let label = match param.shape {
+        CallableValueShape::SavedRoot if param.label == "root" => "^root".to_string(),
+        _ => param.label.clone(),
+    };
+    if param.repeat {
+        format!("{label}...")
+    } else {
+        label
+    }
+}
+
+fn render_callable_shape(shape: &CallableValueShape) -> String {
+    match shape {
+        CallableValueShape::Type(ty) => render_type(ty),
+        CallableValueShape::Scalar => "scalar".to_string(),
+        CallableValueShape::Value => "value".to_string(),
+        CallableValueShape::Sequence => "sequence".to_string(),
+        CallableValueShape::Collection => "collection".to_string(),
+        CallableValueShape::SavedPath => "path".to_string(),
+        CallableValueShape::SavedLayer => "layer".to_string(),
+        CallableValueShape::SavedRoot => "^root".to_string(),
+        CallableValueShape::Identity => "Id".to_string(),
+        CallableValueShape::ErrorCode => "ErrorCode".to_string(),
+    }
 }
 
 fn resource_signature(
@@ -90,14 +147,14 @@ fn render_resource_constructor_signature(resource: ResourceConstructorSignature)
 
 fn function_signature(
     program: &CheckedProgram,
-    docs: Option<&AnalysisSnapshot>,
+    snapshot: Option<&AnalysisSnapshot>,
     from_module: &str,
     segments: &[String],
 ) -> Option<Signature> {
     match resolve(program, from_module, segments, ResolvableKind::Function) {
         Resolution::Found(def) => match def.item {
             DefItem::Function(function) => {
-                let docs = docs.and_then(|snapshot| {
+                let docs = snapshot.and_then(|snapshot| {
                     function_decl(snapshot, &def.module.source_file, function.span)
                 });
                 Some(checked_function_signature(function, docs))
@@ -140,61 +197,6 @@ fn checked_function_signature(
     }
 }
 
-fn std_signature(op: &stdlib::StdOp) -> Signature {
-    let params = op
-        .params
-        .iter()
-        .map(|param| Parameter {
-            name: None,
-            label: std_param_label(param),
-            documentation: None,
-        })
-        .collect::<Vec<_>>();
-    let params_label = joined_param_labels(&params);
-    let label = match std_return_label(&op.ret) {
-        Some(ret) => format!("std::{}::{}({params_label}): {ret}", op.module, op.op),
-        None => format!("std::{}::{}({params_label})", op.module, op.op),
-    };
-    Signature {
-        label,
-        documentation: None,
-        params,
-    }
-}
-
-fn signature_from_label(label: &str) -> Signature {
-    let params = label
-        .split_once('(')
-        .and_then(|(_, rest)| rest.split_once(')'))
-        .map(|(params, _)| {
-            if params.trim().is_empty() {
-                Vec::new()
-            } else {
-                params
-                    .split(',')
-                    .map(|param| {
-                        let label = param.trim().to_string();
-                        let name = label
-                            .split_once(':')
-                            .map(|(name, _)| name.trim().to_string())
-                            .or_else(|| Some(label.clone()));
-                        Parameter {
-                            name,
-                            label,
-                            documentation: None,
-                        }
-                    })
-                    .collect()
-            }
-        })
-        .unwrap_or_default();
-    Signature {
-        label: label.to_string(),
-        documentation: None,
-        params,
-    }
-}
-
 fn named_param_with_docs(name: &str, ty: &str, documentation: Option<String>) -> Parameter {
     Parameter {
         name: Some(name.to_string()),
@@ -209,24 +211,6 @@ fn joined_param_labels(params: &[Parameter]) -> String {
         .map(|param| param.label.as_str())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn std_param_label(param: &stdlib::ParamType) -> String {
-    match param {
-        stdlib::ParamType::Scalar(scalar) => scalar.name().to_string(),
-        stdlib::ParamType::ScalarAny => "scalar".to_string(),
-        stdlib::ParamType::Sequence(scalar) => format!("sequence[{}]", scalar.name()),
-        stdlib::ParamType::Error => "Error".to_string(),
-        stdlib::ParamType::Path => "path".to_string(),
-    }
-}
-
-fn std_return_label(ret: &stdlib::ReturnType) -> Option<String> {
-    match ret {
-        stdlib::ReturnType::Scalar(scalar) => Some(scalar.name().to_string()),
-        stdlib::ReturnType::Sequence(scalar) => Some(format!("sequence[{}]", scalar.name())),
-        stdlib::ReturnType::Void => None,
-    }
 }
 
 fn function_decl<'a>(

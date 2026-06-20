@@ -187,8 +187,9 @@ Goal: calls and constructors should guide the user while typing, not after diagn
 
 Expected outcomes:
 
-- Add LSP signature help for user functions, resource constructors, generated identity
-  constructors, builtins, and standard-library calls.
+- Keep LSP signature help fact-backed as Marrow exposes more callable context. User functions,
+  resource constructors, generated identity constructors, builtins, and standard-library calls are
+  already exposed through core signature help.
 - Enrich completion items with docs, parameter snippets where helpful, and correct symbol kinds.
 - Keep completion context lexer-tolerant so malformed in-progress source still gets useful
   suggestions.

@@ -124,6 +124,48 @@ fn help_with_docs_at(
     )
 }
 
+fn help_in_single_file_at(source: &str) -> Option<SignatureHelp> {
+    let offset = source.find('|').expect("a cursor marker `|`");
+    let analysis_source = source.replacen('|', "\"b\")", 1);
+    let active_source = source.replacen('|', "", 1);
+
+    let snapshot = single_file_snapshot(&analysis_source);
+    let file = snapshot
+        .files
+        .iter()
+        .find(|file| file.path.ends_with("app.mw"))
+        .expect("the analyzed app source")
+        .path
+        .clone();
+    let lexed = lex_source(&active_source);
+    signature_help(
+        &snapshot.program,
+        Some(&snapshot),
+        &file,
+        &active_source,
+        &lexed,
+        offset,
+    )
+}
+
+fn single_file_snapshot(source: &str) -> AnalysisSnapshot {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("app.mw");
+    std::fs::write(&file, source).unwrap();
+
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
+    analyze_project(root, &config, &ProjectSources::new(), None).unwrap()
+}
+
 fn signature_label(help: &SignatureHelp) -> &str {
     &help.signatures[0].label
 }
@@ -240,7 +282,7 @@ fn resource_constructor_signature_help_includes_resource_and_field_docs() {
 }
 
 #[test]
-fn bare_builtin_signature_help_includes_language_facts_description() {
+fn bare_builtin_signature_help_includes_canonical_description() {
     let (snapshot, file) = project_snapshot();
     let help = help_with_docs_at(
         &snapshot,
@@ -249,7 +291,8 @@ fn bare_builtin_signature_help_includes_language_facts_description() {
     )
     .expect("signature help");
 
-    assert_eq!(signature_label(&help), "count(layer): int");
+    assert_eq!(signature_label(&help), "count(collection): int");
+    assert_eq!(parameter_labels(&help), vec!["collection".to_string()]);
     assert_eq!(
         signature_documentation(&help),
         "Returns child count for a saved path, 1 for a scalar, or 0 when absent."
@@ -424,6 +467,44 @@ fn std_operation_uses_canonical_table_signature() {
 }
 
 #[test]
+fn imported_std_operation_uses_contextual_callable_signature() {
+    let help = help_in_single_file_at(
+        "module app\n\
+        use std::text\n\
+        fn run(): bool\n    \
+        return text::contains(\"abc\", |\n",
+    )
+    .expect("signature help");
+
+    assert_eq!(
+        signature_label(&help),
+        "std::text::contains(string, string): bool"
+    );
+    assert_eq!(
+        parameter_labels(&help),
+        vec!["string".to_string(), "string".to_string()]
+    );
+    assert_eq!(help.active_parameter, Some(1));
+}
+
+#[test]
+fn imported_std_operation_fails_closed_for_source_alias_collision() {
+    let help = help_in_single_file_at(
+        "module app\n\
+        use std::text\n\
+        resource Book\n    \
+        title: string\n\
+        store ^books(id: int): Book\n\
+        surface text from ^books\n    \
+        fields title\n\
+        fn run(): bool\n    \
+        return text::contains(\"abc\", |\n",
+    );
+
+    assert!(help.is_none());
+}
+
+#[test]
 fn scalar_conversion_uses_canonical_conversion_signature() {
     let (program, file) = project();
     let help = help_at(
@@ -436,6 +517,91 @@ fn scalar_conversion_uses_canonical_conversion_signature() {
     assert_eq!(signature_label(&help), "int(value): int");
     assert_eq!(parameter_labels(&help), vec!["value".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
+}
+
+#[test]
+fn identity_constructor_uses_canonical_callable_signature() {
+    let (program, file) = project();
+    let help = help_at(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn run(): Id(^books)\n    return Id(|\n",
+    )
+    .expect("signature help");
+
+    assert_eq!(signature_label(&help), "Id(^root, key...): Id");
+    assert_eq!(
+        parameter_labels(&help),
+        vec!["^root".to_string(), "key...".to_string()]
+    );
+    assert_eq!(help.active_parameter, Some(0));
+}
+
+#[test]
+fn identity_constructor_repeated_key_parameter_stays_active() {
+    let (program, file) = project();
+    let help = help_at(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn run(): Id(^books)\n    return Id(^books, |\n",
+    )
+    .expect("signature help");
+
+    assert_eq!(signature_label(&help), "Id(^root, key...): Id");
+    assert_eq!(help.active_parameter, Some(1));
+}
+
+#[test]
+fn error_constructor_uses_named_canonical_callable_signature() {
+    let (program, file) = project();
+    let help = help_at(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn run(): Error\n    return Error(message: |\n",
+    )
+    .expect("signature help");
+
+    assert_eq!(
+        signature_label(&help),
+        "Error(code: ErrorCode, message: string, help: string, data: unknown): Error"
+    );
+    assert_eq!(
+        parameter_labels(&help),
+        vec![
+            "code: ErrorCode".to_string(),
+            "message: string".to_string(),
+            "help: string".to_string(),
+            "data: unknown".to_string(),
+        ]
+    );
+    assert_eq!(help.active_parameter, Some(1));
+}
+
+#[test]
+fn collection_builtins_use_canonical_collection_shape() {
+    let (program, file) = project();
+    let help = help_at(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn run(items: unknown): unknown\n    return reversed(|\n",
+    )
+    .expect("signature help");
+
+    assert_eq!(signature_label(&help), "reversed(collection): sequence");
+    assert_eq!(parameter_labels(&help), vec!["collection".to_string()]);
+    assert_eq!(help.active_parameter, Some(0));
+}
+
+#[test]
+fn non_callable_checker_operations_return_no_signature_help() {
+    let (program, file) = project();
+    let help = help_at(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn run(): absent\n    return write(|\n",
+    );
+
+    assert!(help.is_none());
 }
 
 #[test]
@@ -476,7 +642,7 @@ fn builtin_call_in_return_context_keeps_signature_help() {
     )
     .expect("signature help");
 
-    assert_eq!(signature_label(&help), "count(layer): int");
+    assert_eq!(signature_label(&help), "count(collection): int");
     assert_eq!(help.active_parameter, Some(0));
 }
 
@@ -750,4 +916,22 @@ resource Badge
     assert_eq!(signature_label(&help), "Badge(value: int): Badge");
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
+}
+
+#[test]
+fn signature_help_has_no_local_intrinsic_callable_model() {
+    let source = include_str!("signatures.rs");
+    for forbidden in [
+        "signature_from_label",
+        "bare_function_builtins",
+        "scalar_conversion_detail",
+        "marrow_schema::stdlib",
+        "std_param_label",
+        "std_return_label",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "signature help must consume marrow_check intrinsic callable facts instead of {forbidden}"
+        );
+    }
 }

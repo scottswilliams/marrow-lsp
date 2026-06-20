@@ -256,6 +256,9 @@ fn from_project_io_error(error: ProjectIoError) -> LaunchError {
         ProjectIoError::Io { path, error } => {
             LaunchError::Session(format!("{}: {error}", path.display()))
         }
+        ProjectIoError::DataDirCreate { path, error } => {
+            LaunchError::Session(format!("{}: {error}", path.display()))
+        }
         ProjectIoError::Config { message, .. } => LaunchError::Config(message),
         ProjectIoError::Catalog { message, .. } => LaunchError::Session(message),
         ProjectIoError::Check { report } => LaunchError::CheckErrors(check_errors(&report)),
@@ -507,5 +510,20 @@ pub fn main()
         assert_eq!(error.code(), "dap.launchProject.invalid");
         assert_eq!(error.status(), "invalid-project");
         assert_eq!(error.blocked_on(), None);
+    }
+
+    #[test]
+    fn data_dir_create_error_reports_the_store_directory() {
+        let error = from_project_io_error(ProjectIoError::DataDirCreate {
+            path: PathBuf::from("data"),
+            error: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        });
+
+        assert!(matches!(error, LaunchError::Session(_)), "{error}");
+        assert_eq!(error.code(), "dap.launchProject.invalid");
+        assert_eq!(
+            error.to_string(),
+            "could not open the debug session: data: denied"
+        );
     }
 }
