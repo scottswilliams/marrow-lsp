@@ -22,10 +22,15 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckedProgram, type_at};
+use marrow_json::surface::{
+    SURFACE_OPERATION_PROFILE_VERSION, SURFACE_ROUTE_PROFILE_VERSION, SurfaceAbiJson,
+    SurfaceOperationRequestJson, SurfaceRouteManifestJson,
+    execute_project_surface_operation_read_only,
+};
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation, Host,
-    ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError, RunOutput, RuntimeError,
-    SessionEntry, Value, run_entry_with_host,
+    ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError,
+    ProjectSurfaceReadSession, RunOutput, RuntimeError, SessionEntry, Value, run_entry_with_host,
 };
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
@@ -88,6 +93,15 @@ pub const RUN_MISSING_FACTS: &[&str] = &[
     "runtime generation facts",
 ];
 
+fn production_contract(description: &str) -> Json {
+    json!({
+        "status": "ready",
+        "stableProductionApi": true,
+        "description": description,
+        "missingFacts": [],
+    })
+}
+
 fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
     json!({
         "status": "presentation-only",
@@ -103,6 +117,22 @@ fn completion_contract() -> Json {
 
 fn resource_schema_contract() -> Json {
     presentation_contract("development helper", RESOURCE_SCHEMA_MISSING_FACTS)
+}
+
+fn surface_routes_contract() -> Json {
+    let mut contract = production_contract("surface read route manifest");
+    contract["basis"] = json!("Marrow surface route manifest DTO");
+    contract["dataAccess"] = json!("not-required");
+    contract["operations"] = json!("read-only");
+    contract
+}
+
+fn surface_read_contract() -> Json {
+    let mut contract = production_contract("surface read operation");
+    contract["basis"] = json!("Marrow surface operation read-only executor");
+    contract["dataAccess"] = json!("gated");
+    contract["operations"] = json!("read-only");
+    contract
 }
 
 fn saved_data_contract() -> Json {
@@ -358,6 +388,94 @@ pub fn resource_schema(file: &Path, name: &str) -> Json {
         .map(|(resource, stores)| schema_to_json(resource, stores.into_iter()))
         .collect();
     with_contract(json!({ "resources": resources }), contract)
+}
+
+/// `mw_surface_routes`: the Marrow-owned read route manifest for the checked
+/// project's stable surface operations. This reads source/catalog facts only; it
+/// does not open the project's data store and does not need the data-access gate.
+pub fn surface_routes(file: &Path) -> Json {
+    let contract = surface_routes_contract();
+    let workspace = match load_project(file, None) {
+        Ok((workspace, _)) => workspace,
+        Err(error) => return with_contract(empty_surface_route_manifest(error), contract),
+    };
+    let Some(program) = workspace.program() else {
+        return with_contract(empty_surface_route_manifest("no checked program"), contract);
+    };
+    let abi = SurfaceAbiJson::from_program(program);
+    let mut manifest = SurfaceRouteManifestJson::from_abi(&abi);
+    manifest.routes.retain(|route| route.request.is_read());
+    let result = serde_json::to_value(manifest).expect("surface route manifest DTO serializes");
+    with_contract(result, contract)
+}
+
+fn empty_surface_route_manifest(error: impl Into<String>) -> Json {
+    json!({
+        "profile_version": SURFACE_ROUTE_PROFILE_VERSION,
+        "operation_profile_version": SURFACE_OPERATION_PROFILE_VERSION,
+        "routes": [],
+        "error": error.into(),
+    })
+}
+
+/// `mw_surface_read`: execute one canonical `surface.operation.v1` read request
+/// through Marrow's read-only project surface executor. The MCP data-access gate
+/// is checked before project or store opening; operation bodies are admitted only
+/// by the Marrow JSON DTO and executor.
+pub fn surface_read(file: &Path, operation: Json, allow_data: bool) -> Result<Json, String> {
+    let contract = surface_read_contract();
+    if !allow_data {
+        return Ok(data_disabled(contract));
+    }
+    let request: SurfaceOperationRequestJson = serde_json::from_value(operation)
+        .map_err(|error| format!("invalid mw_surface_read operation: {error}"))?;
+    let workspace = match load_project(file, None) {
+        Ok((workspace, _)) => workspace,
+        Err(error) => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": error }),
+                contract,
+            ));
+        }
+    };
+    let project = match workspace.project() {
+        Some(project) => project,
+        None => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": "no project resolved for the file" }),
+                contract,
+            ));
+        }
+    };
+    let session = match ProjectSurfaceReadSession::open(&project.root) {
+        Ok(session) => session,
+        Err(error) => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": error.message() }),
+                contract,
+            ));
+        }
+    };
+    let store_stamp = match session.store_stamp() {
+        Ok(stamp) => json!({
+            "store_uid": stamp.store_uid,
+            "catalog_epoch": stamp.catalog_epoch,
+            "commit_id": stamp.commit_id,
+        }),
+        Err(error) => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": error.message() }),
+                contract,
+            ));
+        }
+    };
+    let result = match execute_project_surface_operation_read_only(&session, &request) {
+        Ok(response) => {
+            json!({ "available": true, "store_stamp": store_stamp, "response": response })
+        }
+        Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
+    };
+    Ok(with_contract(result, contract))
 }
 
 /// Project one resource schema to JSON: name, stores, and member tree. The member

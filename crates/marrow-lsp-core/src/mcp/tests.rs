@@ -25,6 +25,24 @@ fn assert_contract(result: &Json, status: &str, description: &str, missing_facts
     assert_eq!(actual, missing_facts, "missing facts for {result}");
 }
 
+fn assert_production_contract(result: &Json, description: &str) {
+    let contract = &result["contract"];
+    assert_eq!(contract["status"], "ready", "contract status for {result}");
+    assert_eq!(
+        contract["stableProductionApi"], true,
+        "stableProductionApi must be true for {result}"
+    );
+    assert_eq!(
+        contract["description"], description,
+        "contract description for {result}"
+    );
+    assert_eq!(
+        contract["missingFacts"],
+        json!([]),
+        "production contract must not list missing facts for {result}"
+    );
+}
+
 fn assert_store_snapshot(snapshot: &Json) {
     assert_eq!(
         snapshot["store_uid"], "store_00000000000000000000000000000001",
@@ -276,6 +294,90 @@ store ^settings: Settings
     (dir, src.join("settings.mw"))
 }
 
+fn native_surface_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src/app");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("books.mw"),
+        "\
+module app::books
+
+resource Book
+    required title: string
+    author: string
+
+store ^books(id: int): Book
+    index byAuthor(author, id)
+
+surface Books from ^books
+    fields title, author
+    update author
+    collection ^books.byAuthor as byAuthor
+
+pub fn seed()
+    var book: Book
+    book.title = \"Dune\"
+    book.author = \"Frank Herbert\"
+    transaction
+        ^books(1) = book
+",
+    )
+    .unwrap();
+
+    let session = ProjectSession::open(
+        root,
+        ProjectOpen::run().with_entry_override("app::books::seed".to_string()),
+    )
+    .expect("open seed session");
+    let host = Host::new();
+    let mut output = String::new();
+    session
+        .invoke(SessionEntry::new("app::books::seed", &host, &mut output))
+        .expect("seed native surface project");
+    assert_eq!(output, "");
+
+    (dir, src.join("books.mw"))
+}
+
+fn point_read_operation(file: &Path) -> Json {
+    let (workspace, _) = load_project(file, None).expect("surface project checks");
+    let program = workspace.program().expect("checked program");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(program);
+    let manifest = marrow_json::surface::SurfaceRouteManifestJson::from_abi(&abi);
+    let route = manifest
+        .routes
+        .iter()
+        .find(|route| route.alias == "get")
+        .expect("point read route");
+    let read = abi
+        .surfaces
+        .iter()
+        .flat_map(|surface| surface.read.iter())
+        .find(|read| read.operation_tag == route.operation_tag)
+        .expect("point read descriptor");
+
+    json!({
+        "profile_version": "surface.operation.v1",
+        "operation_tag": route.operation_tag,
+        "request": {
+            "kind": "point_read",
+            "request": {
+                "identity": {
+                    "store_catalog_id": read.store_catalog_id,
+                    "keys": [{ "kind": "int", "value": "1" }]
+                }
+            }
+        }
+    })
+}
+
 #[test]
 fn check_reports_a_return_type_error_for_a_project_overlay() {
     let (_dir, file) = project();
@@ -429,6 +531,150 @@ resource Book
             "typed protocol DTOs",
         ],
     );
+}
+
+#[test]
+fn surface_routes_returns_read_only_manifest_without_data_gate() {
+    let (_dir, file) = native_surface_project();
+
+    let result = surface_routes(&file);
+
+    assert_eq!(result["profile_version"], "surface.route.v1", "{result}");
+    assert_eq!(
+        result["operation_profile_version"], "surface.operation.v1",
+        "{result}"
+    );
+    let routes = result["routes"].as_array().expect("surface routes");
+    let aliases = routes
+        .iter()
+        .map(|route| route["alias"].as_str().expect("route alias"))
+        .collect::<Vec<_>>();
+    assert_eq!(aliases, vec!["get", "byAuthor"], "{result}");
+    assert!(
+        routes.iter().all(
+            |route| route["request"]["kind"].as_str().is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "point_read" | "page" | "singleton_read" | "unique_lookup"
+                )
+            })
+        ),
+        "mw_surface_routes must expose read routes only: {result}"
+    );
+    assert!(
+        routes.iter().all(|route| route["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("/surface/v1/read/"))),
+        "mw_surface_routes must not expose update/action paths: {result}"
+    );
+    assert_production_contract(&result, "surface read route manifest");
+}
+
+#[test]
+fn surface_read_refuses_before_project_loading_when_data_access_is_disabled() {
+    let request = json!({
+        "profile_version": "surface.operation.v1",
+        "operation_tag": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "request": { "kind": "singleton_read" }
+    });
+
+    let result = surface_read(Path::new("/nope/project/src/main.mw"), request, false)
+        .expect("valid operation request");
+
+    assert_eq!(result["available"], false, "{result}");
+    assert_eq!(result["dataAccess"], "disabled", "{result}");
+    assert!(
+        result.get("error").is_none(),
+        "disabled surface reads must not reach project loading: {result}"
+    );
+    assert_production_contract(&result, "surface read operation");
+}
+
+#[test]
+fn surface_read_executes_canonical_point_read_request() {
+    let (_dir, file) = native_surface_project();
+
+    let result =
+        surface_read(&file, point_read_operation(&file), true).expect("valid operation request");
+
+    assert_eq!(result["available"], true, "{result}");
+    assert_eq!(
+        result["response"]["profile_version"], "surface.operation.v1",
+        "{result}"
+    );
+    assert_eq!(result["response"]["result"]["kind"], "record", "{result}");
+    assert!(
+        result["store_stamp"]["store_uid"]
+            .as_str()
+            .is_some_and(|uid| uid.starts_with("store_")),
+        "surface reads must carry the Marrow store stamp: {result}"
+    );
+    assert!(
+        result["store_stamp"]["catalog_epoch"].is_u64(),
+        "surface reads must carry the Marrow catalog epoch: {result}"
+    );
+    assert!(
+        result["store_stamp"]["commit_id"].is_u64(),
+        "surface reads must carry the Marrow commit id: {result}"
+    );
+    let record = &result["response"]["result"]["record"];
+    assert_eq!(
+        record["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .find(|field| field["render_label"] == "title")
+            .and_then(|field| field["value"].as_object().map(|_| field["value"].clone())),
+        Some(json!({ "kind": "string", "value": "Dune" })),
+        "{result}"
+    );
+    assert_production_contract(&result, "surface read operation");
+}
+
+#[test]
+fn surface_read_returns_canonical_error_for_write_bodies() {
+    let (_dir, file) = native_surface_project();
+    let (workspace, _) = load_project(&file, None).expect("surface project checks");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(
+        workspace.program().expect("checked program"),
+    );
+    let update_tag = abi
+        .surfaces
+        .iter()
+        .find_map(|surface| surface.update.as_ref())
+        .map(|update| update.operation_tag.clone())
+        .expect("update operation tag");
+    let request = json!({
+        "profile_version": "surface.operation.v1",
+        "operation_tag": update_tag,
+        "request": {
+            "kind": "point_update",
+            "request": {
+                "identity": {
+                    "store_catalog_id": "cat_00000000000000000000000000000000",
+                    "keys": [{ "kind": "int", "value": "1" }]
+                },
+                "fields": []
+            }
+        }
+    });
+
+    let result = surface_read(&file, request, true).expect("write operation request decodes");
+
+    assert_eq!(result["available"], true, "{result}");
+    assert!(
+        result["store_stamp"]["store_uid"]
+            .as_str()
+            .is_some_and(|uid| uid.starts_with("store_")),
+        "canonical surface errors must carry the read-session store stamp: {result}"
+    );
+    assert_eq!(result["error"]["code"], "surface.abi_mismatch", "{result}");
+    assert_eq!(
+        result["error"]["message"],
+        "surface operation request requires a writable project surface session",
+        "{result}"
+    );
+    assert_production_contract(&result, "surface read operation");
 }
 
 #[test]

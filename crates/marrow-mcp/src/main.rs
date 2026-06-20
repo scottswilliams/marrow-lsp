@@ -205,6 +205,8 @@ fn summarize(name: &str, result: &Json) -> String {
             },
             "mw_complete" => count_summary(result, "items", "no completions", "completion"),
             "mw_resource_schema" => count_summary(result, "resources", "no resources", "resource"),
+            "mw_surface_routes" => count_summary(result, "routes", "no routes", "route"),
+            "mw_surface_read" => surface_read_summary(result),
             "mw_saved_roots" => {
                 if result.get("available").and_then(Json::as_bool) != Some(true) {
                     "data unavailable".to_string()
@@ -273,6 +275,19 @@ fn summarize(name: &str, result: &Json) -> String {
         }
     };
     prefix_contract(result, base)
+}
+
+fn surface_read_summary(result: &Json) -> String {
+    if result.get("available").and_then(Json::as_bool) != Some(true) {
+        return "data unavailable".to_string();
+    }
+    result
+        .get("response")
+        .and_then(|response| response.get("result"))
+        .and_then(|operation_result| operation_result.get("kind"))
+        .and_then(Json::as_str)
+        .map(clip)
+        .unwrap_or_else(|| "ok".to_string())
 }
 
 fn error_summary(result: &Json) -> Option<String> {
@@ -591,6 +606,32 @@ mod tests {
                 "data unavailable",
             ),
             (
+                "mw_surface_routes",
+                json!({ "routes": [{}, {}] }),
+                "2 routes",
+            ),
+            (
+                "mw_surface_read",
+                json!({
+                    "available": true,
+                    "response": {
+                        "result": { "kind": "record", "record": { "fields": [] } }
+                    }
+                }),
+                "record",
+            ),
+            (
+                "mw_surface_read",
+                json!({
+                    "available": true,
+                    "error": {
+                        "code": "surface.abi_mismatch",
+                        "message": "surface operation is not active"
+                    }
+                }),
+                "error: {\"code\":\"surface.abi_mismatch\",\"message\":\"surface operation is not active\"}",
+            ),
+            (
                 "mw_data_children",
                 json!({
                     "available": true,
@@ -746,6 +787,20 @@ mod tests {
                 "data value preview helper (presentation-only: catalog-bound saved-place identity +5): 42",
             ),
             (
+                "mw_surface_read",
+                json!({
+                    "available": true,
+                    "response": { "result": { "kind": "page", "page": { "rows": [], "next": null } } },
+                    "contract": json!({
+                        "status": "ready",
+                        "stableProductionApi": true,
+                        "description": "surface read operation",
+                        "missingFacts": [],
+                    }),
+                }),
+                "surface read operation (ready): page",
+            ),
+            (
                 "mw_run",
                 json!({
                     "value": 42,
@@ -787,7 +842,12 @@ mod tests {
             "dataAccess": "disabled",
             "message": "data access not enabled; relaunch ...",
         });
-        for tool in ["mw_saved_roots", "mw_data_children", "mw_data_integrity"] {
+        for tool in [
+            "mw_saved_roots",
+            "mw_data_children",
+            "mw_data_integrity",
+            "mw_surface_read",
+        ] {
             assert_eq!(summarize(tool, &result), "data access disabled");
         }
     }
