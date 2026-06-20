@@ -176,6 +176,18 @@ function makeClient() {
         throw new Error(`unexpected dataChildren path ${JSON.stringify(params)}`);
       }
       if (method === "marrow/dataRead") {
+        if (deepEqual(params.segments, bytesKeyPath)) {
+          assert.deepEqual(params, {
+            segments: bytesKeyPath,
+            preview_limit: 2048,
+          });
+          return {
+            available: true,
+            presence: "children_only",
+            value_truncated: false,
+            store_snapshot: baseSnapshot,
+          };
+        }
         if (
           deepEqual(params.segments, [
             ...bytesKeyPath,
@@ -317,18 +329,30 @@ try {
     { kind: "root", value: "root-id" },
     { kind: "layer", value: "history" },
   ];
+  const beforeLayerCalls = client.calls.length;
   const layerChildren = await provider.getChildren(keys[1]);
+  assert.deepEqual(
+    client.calls.slice(beforeLayerCalls).map((call) => call.method),
+    ["marrow/dataRead", "marrow/dataChildren"],
+    "layer expansion should probe presence before asking for children",
+  );
   assert.deepEqual(layerChildren[0].segments, [
     ...layerPath,
     { kind: "field", value: "entry" },
   ]);
   assert.equal(
     hasReadFor(client.calls, layerPath),
-    false,
-    "layer expansion should ask for children without probing the value endpoint",
+    true,
+    "layer expansion should read presence through the server",
   );
 
+  const beforeKeyCalls = client.calls.length;
   const fields = await provider.getChildren(keys[0]);
+  assert.deepEqual(
+    client.calls.slice(beforeKeyCalls).map((call) => call.method),
+    ["marrow/dataRead", "marrow/dataChildren"],
+    "segment expansion should probe presence before asking for children",
+  );
   assert.equal(fields.length, 1);
   assert.deepEqual(fields[0].segments, [
     { kind: "root", value: "root-id" },
@@ -344,7 +368,7 @@ try {
   assert.equal(
     client.calls.some((call) => call.method === "marrow/dataRead"),
     true,
-    "field expansion should read the leaf through the server",
+    "value expansion should read presence through the server",
   );
 
   const staleRootChildren = await provider.getChildren(roots[1]);

@@ -230,11 +230,9 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
   }
 
   private async getSegmentChildren(node: SavedSegmentNode): Promise<SavedResourceNode[]> {
-    if (readsValue(node)) {
-      const read = await this.readData(node.segments, node.snapshot);
-      if (read !== undefined) {
-        return read;
-      }
+    const read = await this.readData(node.segments, node.snapshot);
+    if (read !== undefined) {
+      return read;
     }
     return this.getDataChildren(node.segments, null, node.snapshot);
   }
@@ -328,9 +326,4 @@ function sameJsonObject(left: JsonObject, right: JsonObject): boolean {
   return leftKeys.every((key) =>
     Object.hasOwn(right, key) && sameJson(left[key], right[key]),
   );
-}
-
-function readsValue(node: SavedSegmentNode): boolean {
-  const last = node.segments[node.segments.length - 1];
-  return last?.kind === "field";
 }
