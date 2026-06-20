@@ -7,11 +7,10 @@
 
 use serde::Serialize;
 
-use marrow_check::CheckedProgram;
-use marrow_check::tooling::{self, IntegrityProblem};
+use marrow_check::tooling::IntegrityProblem;
 use marrow_json::DataSnapshotJson;
 
-use crate::store::{Availability, LiveStore};
+use crate::store::SavedDataSession;
 
 /// The most stored entries one scan reads before reporting the rest as
 /// `truncated`. The advisory is a fast, on-demand health check, not a full audit,
@@ -56,37 +55,27 @@ impl DataIntegrityResult {
     }
 }
 
-/// Run the schema-change-impact advisory for the LSP custom request, soft-degrading
-/// a missing reader or an unreadable store to an `available: false` envelope. The
-/// gating (live data on/off) is the transport's responsibility, mirroring the Data
-/// Explorer: the transport passes `None` when live data is off so the store is
-/// never opened.
-pub fn data_integrity(reader: Option<&LiveStore>, program: &CheckedProgram) -> DataIntegrityResult {
-    let Some(reader) = reader else {
+/// Run the schema-change-impact advisory for the LSP custom request,
+/// soft-degrading a missing session or unreadable store to an `available: false`
+/// envelope. The transport passes `None` when live data is off or the
+/// editor-visible source is stale, so the store is never opened in those cases.
+pub fn data_integrity(session: Option<&SavedDataSession>) -> DataIntegrityResult {
+    let Some(session) = session else {
         return DataIntegrityResult::unavailable();
     };
-    match scan_data_integrity(reader, program, INTEGRITY_SCAN_LIMIT) {
-        Availability::Available(stamped) => DataIntegrityResult {
+    match session
+        .surface_read()
+        .saved_data_integrity_sample(INTEGRITY_SCAN_LIMIT)
+    {
+        Ok(stamped) => DataIntegrityResult {
             available: true,
             findings: stamped.data.problems.into_iter().map(finding_for).collect(),
             scanned: stamped.data.items_checked,
             truncated: stamped.data.truncated,
             store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
         },
-        Availability::Unavailable => DataIntegrityResult::unavailable(),
+        Err(_) => DataIntegrityResult::unavailable(),
     }
-}
-
-/// Scan the project's saved data against the current schema and flag every stored
-/// record the schema can no longer account for.
-fn scan_data_integrity(
-    reader: &LiveStore,
-    program: &CheckedProgram,
-    limit: usize,
-) -> Availability<tooling::StampedData<tooling::IntegrityProblemSample>> {
-    let limit = limit.min(INTEGRITY_SCAN_LIMIT);
-    reader
-        .with_tree_result(|store| tooling::stamped_integrity_problem_details(program, store, limit))
 }
 
 fn finding_for(problem: IntegrityProblem) -> Finding {

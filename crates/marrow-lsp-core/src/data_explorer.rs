@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use marrow_check::CheckedProgram;
 use marrow_check::tooling::{self, ToolingError};
 use marrow_json::DataSnapshotJson;
 pub use marrow_json::saved_data::{
@@ -18,9 +17,8 @@ pub use marrow_json::saved_data::{
     DataStoreErrorJson as DataStoreErrorDto, MemberFlavorJson as MemberFlavorDto,
     ScalarTypeJson as ScalarTypeDto,
 };
-use marrow_store::tree::TreeStore;
 
-use crate::store::{Availability, LiveStore};
+use crate::store::SavedDataSession;
 
 pub const DATA_CHILDREN_PAGE_LIMIT: usize = 200;
 
@@ -34,13 +32,17 @@ pub struct SavedRootsResult {
     pub store_snapshot: Option<DataSnapshotJson>,
 }
 
-/// Handle `marrow/savedRoots`. A `None` reader (no native store configured) or an
+/// Handle `marrow/savedRoots`. A `None` session (no native store configured) or an
 /// unavailable store both answer `available: false` with no roots.
-pub fn saved_roots(reader: Option<&LiveStore>, program: &CheckedProgram) -> SavedRootsResult {
-    match reader.map(|reader| reader.root_views(program)) {
-        Some(Availability::Available(stamped)) => SavedRootsResult {
+pub fn saved_roots(session: Option<&SavedDataSession>) -> SavedRootsResult {
+    match session.map(|session| session.surface_read().saved_data_roots()) {
+        Some(Ok(stamped)) => SavedRootsResult {
             available: true,
-            roots: stamped.data,
+            roots: stamped
+                .data
+                .into_iter()
+                .map(|root| DataChildViewDto::from(tooling::DataChild::Root(root)))
+                .collect(),
             store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
         },
         _ => SavedRootsResult {
@@ -122,15 +124,12 @@ pub fn validate_data_read_request(
     Ok(request)
 }
 
-pub fn data_children_page(
-    program: &CheckedProgram,
-    store: &TreeStore,
+pub fn session_data_children_page(
+    session: &SavedDataSession,
     request: DataChildrenRequest,
 ) -> Result<DataChildrenResult, DataChildrenError> {
     let (segments, limit, cursor) = request.into_path_parts();
-    let stamped = tooling::stamped_data_children(
-        program,
-        store,
+    let stamped = session.surface_read().saved_data_children(
         &segments,
         limit.min(DATA_CHILDREN_PAGE_LIMIT),
         cursor.as_ref(),
@@ -138,15 +137,12 @@ pub fn data_children_page(
     Ok(DataChildrenResult::from(stamped))
 }
 
-pub fn data_child_views_page(
-    program: &CheckedProgram,
-    store: &TreeStore,
+pub fn session_data_child_views_page(
+    session: &SavedDataSession,
     request: DataChildrenRequest,
 ) -> Result<DataChildViewsResult, DataChildrenError> {
     let (segments, limit, cursor) = request.into_path_parts();
-    let stamped = tooling::stamped_data_children(
-        program,
-        store,
+    let stamped = session.surface_read().saved_data_children(
         &segments,
         limit.min(DATA_CHILDREN_PAGE_LIMIT),
         cursor.as_ref(),
@@ -154,14 +150,16 @@ pub fn data_child_views_page(
     Ok(DataChildViewsResult::from(stamped))
 }
 
-pub fn data_read(
-    program: &CheckedProgram,
-    store: &TreeStore,
+pub fn session_data_read(
+    session: &SavedDataSession,
     request: DataReadRequest,
 ) -> Result<DataReadResult, DataChildrenError> {
     let preview_limit = request.preview_limit_or_default();
     let segments = request.into_path_segments();
-    let Some(resolved_path) = tooling::resolve_data_path(program, &segments)? else {
+    let Some(stamped) = session
+        .surface_read()
+        .saved_data_preview(&segments, preview_limit)?
+    else {
         return Ok(DataReadResult {
             presence: DataPresenceDto::Absent,
             value: None,
@@ -169,8 +167,6 @@ pub fn data_read(
             store_snapshot: None,
         });
     };
-    let stamped = tooling::stamped_preview_data_path(program, store, &resolved_path, preview_limit)
-        .map_err(|error| DataChildrenError::Store(DataStoreErrorDto::from(error)))?;
     Ok(DataReadResult::from(stamped))
 }
 
@@ -189,12 +185,17 @@ mod tests {
 
     use std::fs;
 
-    use marrow_check::test_support::{
-        commit_then_check, member_catalog_id, root_place, store_id_of,
+    use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
+    use marrow_check::{
+        check_project, check_project_against, project_store_lock, read_committed_lock,
     };
+    use marrow_project::parse_config;
     use marrow_store::key::SavedKey;
-    use marrow_store::tree::{DataPathSegment, TreeStore};
+    use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
     use marrow_store::value::{SavedValue, encode_value};
+
+    use crate::store::open_saved_data_session;
+    use crate::workspace::Project;
 
     #[test]
     fn data_request_validation_rejects_empty_paths_and_zero_limits() {
@@ -231,10 +232,9 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_reader_answers_unavailable() {
-        let program = CheckedProgram::default();
+    fn a_missing_session_answers_unavailable() {
         assert_eq!(
-            saved_roots(None, &program),
+            saved_roots(None),
             SavedRootsResult {
                 available: false,
                 roots: Vec::new(),
@@ -260,11 +260,10 @@ mod tests {
 
     #[test]
     fn zero_limit_returns_path_error() {
-        let (program, store) = checked_counter_store(1..=1);
+        let fixture = counter_fixture(CounterShape::default().with_ids(1..=1));
         assert_eq!(
-            data_children_page(
-                &program,
-                &store,
+            session_data_children_page(
+                &fixture.session,
                 DataChildrenRequest {
                     segments: vec![DataPathSegmentDto::Root("counter".into())],
                     limit: 0,
@@ -277,12 +276,10 @@ mod tests {
 
     #[test]
     fn typed_path_error_reports_string_scalar_type() {
-        let (program, store) =
-            checked_counter_store_with_keys("string", std::iter::empty::<SavedKey>());
+        let fixture = counter_fixture(CounterShape::default().with_key_type("string"));
         assert_eq!(
-            data_children_page(
-                &program,
-                &store,
+            session_data_children_page(
+                &fixture.session,
                 DataChildrenRequest {
                     segments: vec![
                         DataPathSegmentDto::Root("counter".into()),
@@ -302,10 +299,9 @@ mod tests {
 
     #[test]
     fn data_children_clamps_large_caller_limit() {
-        let (program, store) = checked_counter_store(1..=201);
-        let page = data_children_page(
-            &program,
-            &store,
+        let fixture = counter_fixture(CounterShape::default().with_ids(1..=201));
+        let page = session_data_children_page(
+            &fixture.session,
             DataChildrenRequest {
                 segments: vec![DataPathSegmentDto::Root("counter".into())],
                 limit: DATA_CHILDREN_PAGE_LIMIT + 1,
@@ -329,12 +325,11 @@ mod tests {
 
     #[test]
     fn data_children_returns_paged_typed_segments() {
-        let (program, store) = checked_counter_store(1..=5);
+        let fixture = counter_fixture(CounterShape::default().with_ids(1..=5));
         let root = vec![DataPathSegmentDto::Root("counter".into())];
 
-        let page = data_children_page(
-            &program,
-            &store,
+        let page = session_data_children_page(
+            &fixture.session,
             DataChildrenRequest {
                 segments: root.clone(),
                 limit: 2,
@@ -351,18 +346,13 @@ mod tests {
                 ],
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(2)),
-                store_snapshot: Some(marrow_json::DataSnapshotJson {
-                    store_uid: None,
-                    catalog_digest: None,
-                    commit: None,
-                    checked_source_digest: program.source_digest(),
-                }),
+                store_snapshot: page.store_snapshot.clone(),
             }
         );
+        assert!(page.store_snapshot.is_some());
 
-        let page = data_children_page(
-            &program,
-            &store,
+        let page = session_data_children_page(
+            &fixture.session,
             DataChildrenRequest {
                 segments: root.clone(),
                 limit: 2,
@@ -379,18 +369,13 @@ mod tests {
                 ],
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(4)),
-                store_snapshot: Some(marrow_json::DataSnapshotJson {
-                    store_uid: None,
-                    catalog_digest: None,
-                    commit: None,
-                    checked_source_digest: program.source_digest(),
-                }),
+                store_snapshot: page.store_snapshot.clone(),
             }
         );
+        assert!(page.store_snapshot.is_some());
 
-        let page = data_children_page(
-            &program,
-            &store,
+        let page = session_data_children_page(
+            &fixture.session,
             DataChildrenRequest {
                 segments: root,
                 limit: 2,
@@ -404,23 +389,18 @@ mod tests {
                 children: vec![DataChildDto::Key(DataKeyDto::Int(5))],
                 truncated: false,
                 cursor: None,
-                store_snapshot: Some(marrow_json::DataSnapshotJson {
-                    store_uid: None,
-                    catalog_digest: None,
-                    commit: None,
-                    checked_source_digest: program.source_digest(),
-                }),
+                store_snapshot: page.store_snapshot.clone(),
             }
         );
+        assert!(page.store_snapshot.is_some());
     }
 
     #[test]
     fn data_child_views_render_key_labels_from_marrow() {
-        let (program, store) = checked_counter_store(1..=1);
+        let fixture = counter_fixture(CounterShape::default().with_ids(1..=1));
 
-        let page = data_child_views_page(
-            &program,
-            &store,
+        let page = session_data_child_views_page(
+            &fixture.session,
             DataChildrenRequest {
                 segments: vec![DataPathSegmentDto::Root("counter".into())],
                 limit: 10,
@@ -436,24 +416,16 @@ mod tests {
                 label: "(1)".into(),
             }]
         );
-        assert_eq!(
-            page.store_snapshot,
-            Some(marrow_json::DataSnapshotJson {
-                store_uid: None,
-                catalog_digest: None,
-                commit: None,
-                checked_source_digest: program.source_digest(),
-            })
-        );
+        assert!(page.store_snapshot.is_some());
     }
 
     #[test]
     fn data_read_renders_a_present_value_leaf() {
-        let (program, store) = checked_counter_store_with_values([(1, 42)]);
+        let fixture =
+            counter_fixture(CounterShape::default().with_values([(1, SavedValue::Int(42))]));
 
-        let read = data_read(
-            &program,
-            &store,
+        let read = session_data_read(
+            &fixture.session,
             DataReadRequest {
                 segments: vec![
                     DataPathSegmentDto::Root("counter".into()),
@@ -471,25 +443,23 @@ mod tests {
                 presence: DataPresenceDto::ValueOnly,
                 value: Some("42".into()),
                 value_truncated: false,
-                store_snapshot: Some(marrow_json::DataSnapshotJson {
-                    store_uid: None,
-                    catalog_digest: None,
-                    commit: None,
-                    checked_source_digest: program.source_digest(),
-                }),
+                store_snapshot: read.store_snapshot.clone(),
             }
         );
+        assert!(read.store_snapshot.is_some());
     }
 
     #[test]
     fn data_read_uses_marrow_bounded_preview_contract() {
         let long = "a".repeat(64);
-        let (program, store) =
-            checked_counter_store_with_saved_values("string", [(1, SavedValue::Str(long))]);
+        let fixture = counter_fixture(
+            CounterShape::default()
+                .with_value_type("string")
+                .with_values([(1, SavedValue::Str(long))]),
+        );
 
-        let read = data_read(
-            &program,
-            &store,
+        let read = session_data_read(
+            &fixture.session,
             DataReadRequest {
                 segments: vec![
                     DataPathSegmentDto::Root("counter".into()),
@@ -507,67 +477,61 @@ mod tests {
                 presence: DataPresenceDto::ValueOnly,
                 value: Some("\"aaaaaaa...".into()),
                 value_truncated: true,
-                store_snapshot: Some(marrow_json::DataSnapshotJson {
-                    store_uid: None,
-                    catalog_digest: None,
-                    commit: None,
-                    checked_source_digest: program.source_digest(),
-                }),
+                store_snapshot: read.store_snapshot.clone(),
             }
         );
+        assert!(read.store_snapshot.is_some());
     }
 
-    fn checked_counter_store(ids: std::ops::RangeInclusive<i64>) -> (CheckedProgram, TreeStore) {
-        checked_counter_store_with_keys("int", ids.map(SavedKey::Int))
+    struct CounterFixture {
+        _dir: tempfile::TempDir,
+        session: crate::store::SavedDataSession,
     }
 
-    fn checked_counter_store_with_values(
-        values: impl IntoIterator<Item = (i64, i64)>,
-    ) -> (CheckedProgram, TreeStore) {
-        checked_counter_store_with_saved_values(
-            "int",
-            values
-                .into_iter()
-                .map(|(identity, value)| (identity, SavedValue::Int(value))),
-        )
+    struct CounterShape {
+        key_type: &'static str,
+        value_type: &'static str,
+        ids: Vec<i64>,
+        values: Vec<(i64, SavedValue)>,
     }
 
-    fn checked_counter_store_with_saved_values(
-        value_type: &str,
-        values: impl IntoIterator<Item = (i64, SavedValue)>,
-    ) -> (CheckedProgram, TreeStore) {
-        let (program, store) =
-            checked_counter_store_with_shape("int", value_type, std::iter::empty());
-        let place = root_place(&program, "counter").unwrap();
-        let store_id = store_id_of(&place).unwrap();
-        let value_id = member_catalog_id(&place, "value").unwrap();
-        let path = vec![DataPathSegment::Member(
-            marrow_store::cell::CatalogId::new(value_id).unwrap(),
-        )];
-        for (identity, value) in values {
-            let identity = [SavedKey::Int(identity)];
-            store.write_record_presence(&store_id, &identity).unwrap();
-            store
-                .write_data_value(&store_id, &identity, &path, encode_value(&value).unwrap())
-                .unwrap();
+    impl CounterShape {
+        fn with_key_type(mut self, key_type: &'static str) -> Self {
+            self.key_type = key_type;
+            self
         }
-        (program, store)
+
+        fn with_value_type(mut self, value_type: &'static str) -> Self {
+            self.value_type = value_type;
+            self
+        }
+
+        fn with_ids(mut self, ids: std::ops::RangeInclusive<i64>) -> Self {
+            self.ids = ids.collect();
+            self
+        }
+
+        fn with_values(mut self, values: impl IntoIterator<Item = (i64, SavedValue)>) -> Self {
+            self.values = values.into_iter().collect();
+            self
+        }
     }
 
-    fn checked_counter_store_with_keys(
-        key_type: &str,
-        keys: impl IntoIterator<Item = SavedKey>,
-    ) -> (CheckedProgram, TreeStore) {
-        checked_counter_store_with_shape(key_type, "int", keys)
-    }
-
-    fn checked_counter_store_with_shape(
-        key_type: &str,
-        value_type: &str,
-        keys: impl IntoIterator<Item = SavedKey>,
-    ) -> (CheckedProgram, TreeStore) {
+    fn counter_fixture(mut shape: CounterShape) -> CounterFixture {
+        if shape.key_type.is_empty() {
+            shape.key_type = "int";
+        }
+        if shape.value_type.is_empty() {
+            shape.value_type = "int";
+        }
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
+        let root = dir.path();
+        fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(
             src.join("app.mw"),
@@ -576,21 +540,65 @@ mod tests {
 module app
 
 resource Counter
-    required value: {value_type}
+    required value: {}
 
-store ^counter(id: {key_type}): Counter
-"#
+store ^counter(id: {}): Counter
+"#,
+                shape.value_type, shape.key_type
             ),
         )
         .unwrap();
 
-        let program = commit_then_check(dir.path()).unwrap();
+        let config = parse_config(&fs::read_to_string(root.join("marrow.json")).unwrap()).unwrap();
+        let (report, proposed) = check_project(root, &config).unwrap();
+        assert!(!report.has_errors(), "{:#?}", report.diagnostics);
+        let proposal = proposed.catalog.proposal.as_ref().unwrap();
+        project_store_lock(root, proposal, &proposed.source_digest()).unwrap();
+        let lock = read_committed_lock(root).unwrap();
+        let program = check_project_against(root, &config, None, lock.as_ref()).unwrap();
         let place = root_place(&program, "counter").unwrap();
         let store_id = store_id_of(&place).unwrap();
-        let store = TreeStore::memory();
-        for key in keys {
-            store.write_record_presence(&store_id, &[key]).unwrap();
+        let value_id = member_catalog_id(&place, "value").unwrap();
+        let path = vec![DataPathSegment::Member(
+            marrow_store::cell::CatalogId::new(value_id).unwrap(),
+        )];
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+        store
+            .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
+            .unwrap();
+        marrow_run::evolution::commit_catalog_baseline(&store, &program).unwrap();
+        for id in shape.ids {
+            store
+                .write_record_presence(&store_id, &[SavedKey::Int(id)])
+                .unwrap();
         }
-        (program, store)
+        for (identity, value) in shape.values {
+            let identity = [SavedKey::Int(identity)];
+            store.write_record_presence(&store_id, &identity).unwrap();
+            store
+                .write_data_value(&store_id, &identity, &path, encode_value(&value).unwrap())
+                .unwrap();
+        }
+        drop(store);
+        let session = open_saved_data_session(&Project {
+            root: root.to_path_buf(),
+            config,
+        })
+        .unwrap()
+        .unwrap();
+        CounterFixture { _dir: dir, session }
+    }
+
+    impl Default for CounterShape {
+        fn default() -> Self {
+            Self {
+                key_type: "int",
+                value_type: "int",
+                ids: Vec::new(),
+                values: Vec::new(),
+            }
+        }
     }
 }

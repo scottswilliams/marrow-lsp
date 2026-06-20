@@ -86,16 +86,12 @@ pub fn f()
         .unwrap();
     marrow_run::evolution::commit_catalog_baseline(&store, &proposed).unwrap();
     let accepted = store.read_catalog_snapshot().unwrap();
-    if let Some(snapshot) = &accepted {
-        std::fs::write(
-            root.join("marrow.catalog.json"),
-            snapshot.to_json_pretty().unwrap(),
-        )
-        .unwrap();
-    }
     let (report, program) =
         marrow_check::check_project_with_catalog(root, &config, accepted.as_ref()).unwrap();
     assert!(!report.has_errors(), "{:#?}", report.diagnostics);
+    if let Some(snapshot) = &accepted {
+        marrow_check::project_store_lock(root, snapshot, &program.source_digest()).unwrap();
+    }
     let place = root_place(&program, "counter").unwrap();
     let store_id = store_id_of(&place).unwrap();
     let value_id = CatalogId::new(member_catalog_id(&place, "value").unwrap()).unwrap();
@@ -1865,6 +1861,86 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
     assert_eq!(response["result"]["value"], "42");
     assert_eq!(response["result"]["value_truncated"], false);
     assert_store_snapshot(&response["result"]["store_snapshot"]);
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn custom_saved_resource_inspector_refuses_stale_open_source() {
+    let (_dir, file) = native_counter_fixture();
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+                "initializationOptions": { "marrow.liveData": true }
+            }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let text = std::fs::read_to_string(&file).unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": text }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/savedRoots" }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert_eq!(response["result"]["available"], true, "{response}");
+
+    let edited = "module counter\n\npub fn f()\n    return\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": edited }]
+            }
+        }),
+    );
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 3, "method": "marrow/savedRoots" }),
+    );
+    let response = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
+    assert_eq!(response["result"]["available"], false, "{response}");
+    assert_eq!(
+        response["result"]["roots"].as_array().map(Vec::len),
+        Some(0),
+        "{response}"
+    );
 
     let _ = server.0.kill();
 }

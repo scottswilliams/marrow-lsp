@@ -41,11 +41,13 @@ use marrow_store::tree::TreeStore;
 use serde_json::{Map, Value as Json, json};
 
 use crate::completion::completion;
-use crate::data_explorer::{DataChildrenRequest, DataReadRequest};
+use crate::data_explorer::{
+    DataChildrenRequest, DataReadRequest, session_data_children_page, session_data_read,
+};
 use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
-use crate::store::LiveStore;
+use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
 use crate::workspace::Workspace;
 
@@ -548,10 +550,11 @@ fn store_stamp_json(stamp: StoreStamp) -> Json {
     })
 }
 
-/// `mw_saved_roots`: the project's durable saved root views, read through a
-/// short-lived [`LiveStore`]. Gated: with `allow_data = false` the function
-/// returns a refusal envelope and never opens the store. A project with no native
-/// store, or a store that cannot be read right now, answers `available: false`.
+/// `mw_saved_roots`: the project's durable saved root views, read through
+/// Marrow's linked surface-read session. Gated: with `allow_data = false` the
+/// function returns a refusal envelope and never opens the store. A project with
+/// no native store, or a store that cannot be read right now, answers
+/// `available: false`.
 pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
     let contract = saved_data_contract();
     if !allow_data {
@@ -566,11 +569,19 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
             );
         }
     };
-    let reader = workspace.project().and_then(LiveStore::for_project);
-    let Some(program) = workspace.program() else {
+    let session = match data_session(&workspace) {
+        Ok(session) => session,
+        Err(error) => {
+            return with_contract(
+                json!({ "available": false, "roots": [], "error": error }),
+                contract,
+            );
+        }
+    };
+    let Some(session) = session else {
         return with_contract(json!({ "available": false, "roots": [] }), contract);
     };
-    let result = serde_json::to_value(crate::data_explorer::saved_roots(reader.as_ref(), program))
+    let result = serde_json::to_value(crate::data_explorer::saved_roots(Some(&session)))
         .unwrap_or_else(|_| json!({ "available": false, "roots": [] }));
     with_contract(result, contract)
 }
@@ -578,7 +589,7 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
 /// `mw_data_children`: a bounded page of typed child segments under a saved-data
 /// path. Gated like [`saved_roots`]: disabled data access refuses before project
 /// loading, while enabled access checks the project and opens the native store
-/// read-only for one shared Marrow tooling read.
+/// read-only for one shared Marrow session read.
 pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool) -> Json {
     let contract = data_children_contract();
     if !allow_data {
@@ -599,27 +610,25 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
             return with_contract(value, contract);
         }
     };
-    let reader = workspace.project().and_then(LiveStore::for_project);
-    let program = match data_program(&workspace) {
-        Ok(program) => program,
+    let session = match data_session(&workspace) {
+        Ok(session) => session,
         Err(error) => {
             let mut value = unavailable.clone();
             value["error"] = json!(error);
             return with_contract(value, contract);
         }
     };
-    let Some(reader) = reader else {
+    let Some(session) = session else {
         return with_contract(unavailable, contract);
     };
-    match reader.data_children_page(&program, request) {
-        crate::store::Availability::Unavailable => with_contract(unavailable, contract),
-        crate::store::Availability::Available(Ok(result)) => {
+    match session_data_children_page(&session, request) {
+        Ok(result) => {
             let mut result =
                 serde_json::to_value(result).expect("data children DTO must serialize");
             result["available"] = json!(true);
             with_contract(result, contract)
         }
-        crate::store::Availability::Available(Err(error)) => with_contract(
+        Err(error) => with_contract(
             json!({
                 "available": true,
                 "children": [],
@@ -636,7 +645,7 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
 /// `mw_data_read`: a bounded rendered preview for one typed saved-data path.
 /// Gated like [`data_children`]: disabled data access refuses before project
 /// loading, while enabled access checks the project and opens the native store
-/// read-only for one shared Marrow tooling read.
+/// read-only for one shared Marrow session read.
 pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Json {
     let contract = data_read_contract();
     if !allow_data {
@@ -657,26 +666,24 @@ pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Jso
             return with_contract(value, contract);
         }
     };
-    let reader = workspace.project().and_then(LiveStore::for_project);
-    let program = match data_program(&workspace) {
-        Ok(program) => program,
+    let session = match data_session(&workspace) {
+        Ok(session) => session,
         Err(error) => {
             let mut value = unavailable.clone();
             value["error"] = json!(error);
             return with_contract(value, contract);
         }
     };
-    let Some(reader) = reader else {
+    let Some(session) = session else {
         return with_contract(unavailable, contract);
     };
-    match reader.data_read(&program, request) {
-        crate::store::Availability::Unavailable => with_contract(unavailable, contract),
-        crate::store::Availability::Available(Ok(result)) => {
+    match session_data_read(&session, request) {
+        Ok(result) => {
             let mut result = serde_json::to_value(result).expect("data read DTO must serialize");
             result["available"] = json!(true);
             with_contract(result, contract)
         }
-        crate::store::Availability::Available(Err(error)) => with_contract(
+        Err(error) => with_contract(
             json!({
                 "available": true,
                 "presence": "absent",
@@ -690,21 +697,18 @@ pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Jso
     }
 }
 
-fn data_program(workspace: &Workspace) -> Result<CheckedProgram, String> {
+fn data_session(workspace: &Workspace) -> Result<Option<SavedDataSession>, String> {
     let project = workspace
         .project()
         .ok_or_else(|| "no project resolved for the file".to_string())?;
-    let accepted = marrow_check::read_accepted_catalog_artifact(&project.root)
-        .map_err(|error| error.message())?;
-    marrow_check::check_project_against(&project.root, &project.config, accepted.as_ref())
-        .map_err(|error| error.message())
+    open_saved_data_session(project)
 }
 
 /// `mw_data_integrity`: the schema-change-impact advisory — a capped, on-demand
 /// scan of the project's real stored data that flags every record the *current*
 /// schema can no longer account for (an orphan path, or a value that no longer
 /// decodes as its declared type). Reuses the same classification as
-/// `marrow data integrity`, through a short-lived [`LiveStore`]. Gated like
+/// `marrow data integrity`, through a linked Marrow read session. Gated like
 /// [`saved_roots`]: with `allow_data = false` it returns a refusal envelope and
 /// never opens the store. A project with no native store, or a store that cannot
 /// be read right now, answers `available: false`.
@@ -730,15 +734,16 @@ pub fn data_integrity(file: &Path, allow_data: bool) -> Json {
             return with_contract(value, contract);
         }
     };
-    let reader = workspace.project().and_then(LiveStore::for_project);
-    let Some(program) = workspace.program() else {
-        return with_contract(unavailable, contract);
+    let session = match data_session(&workspace) {
+        Ok(session) => session,
+        Err(error) => {
+            let mut value = unavailable.clone();
+            value["error"] = json!(error);
+            return with_contract(value, contract);
+        }
     };
-    let result = serde_json::to_value(crate::data_integrity::data_integrity(
-        reader.as_ref(),
-        program,
-    ))
-    .unwrap_or(unavailable);
+    let result = serde_json::to_value(crate::data_integrity::data_integrity(session.as_ref()))
+        .unwrap_or(unavailable);
     with_contract(result, contract)
 }
 

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use lsp_types::Url;
 use marrow_check::{
     AnalysisIdentity, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
-    read_accepted_catalog_artifact,
+    read_accepted_catalog_artifact, read_committed_lock,
 };
 use marrow_project::{
     DiscoverError, ProjectConfig, discover_modules, discover_test_modules, parse_config,
@@ -55,8 +55,8 @@ pub enum WorkspaceError {
     NoProject,
     /// A `marrow.json` was found but could not be parsed.
     Config(marrow_project::ConfigError),
-    /// The accepted catalog artifact could not be read.
-    AcceptedCatalog(ProjectIoError),
+    /// The source analysis context could not be read.
+    AnalysisContext(ProjectIoError),
     /// The project's source roots could not be walked.
     Discover(marrow_project::DiscoverError),
 }
@@ -66,7 +66,7 @@ impl std::fmt::Display for WorkspaceError {
         match self {
             Self::NoProject => write!(f, "no marrow.json found for the file"),
             Self::Config(error) => write!(f, "{error}"),
-            Self::AcceptedCatalog(error) => write!(f, "accepted catalog: {}", error.message()),
+            Self::AnalysisContext(error) => write!(f, "analysis context: {}", error.message()),
             Self::Discover(error) => write!(f, "{error}"),
         }
     }
@@ -228,13 +228,18 @@ impl Workspace {
         let latest_open_analysis_paths = open_analysis_paths(project, documents);
         let sources = overlay(&project.root, documents);
         let accepted = read_accepted_catalog_artifact(&project.root)
-            .map_err(WorkspaceError::AcceptedCatalog)?;
+            .map_err(WorkspaceError::AnalysisContext)?;
+        let lock = if accepted.is_none() {
+            read_committed_lock(&project.root).map_err(WorkspaceError::AnalysisContext)?
+        } else {
+            None
+        };
         let snapshot = analyze_project(
             &project.root,
             &project.config,
             &sources,
             accepted.as_ref(),
-            None,
+            lock.as_ref(),
         )
         .map_err(WorkspaceError::Discover)?;
         let binding_index_key = BindingIndexKey::new(project, &snapshot);

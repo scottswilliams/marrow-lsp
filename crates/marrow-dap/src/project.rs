@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use marrow_check::{AnalysisIdentity, AnalysisSnapshot, CheckReport, ProjectIoError};
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation,
-    ProjectOpen, ProjectSession, ProjectSessionError, RuntimeError,
+    ProjectOpen, ProjectSession, ProjectSessionError, ProjectSurfaceReadSession, RuntimeError,
+    SourceAnalysisAdmission,
 };
 use marrow_syntax::Diagnose;
 
@@ -20,14 +21,14 @@ const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
 const STATUS_INVALID_PARAMS: &str = "invalid-params";
 const STATUS_INVALID_PROJECT: &str = "invalid-project";
 const STATUS_INVALID_STATE: &str = "invalid-state";
-const CATALOG_REPAIR_FACTS: &str = "read-only debug catalog admission facts";
+const READ_ADMISSION_FACTS: &str = "read-only debug store admission facts";
 
 /// A loaded project ready to debug through Marrow's protocol invocation.
 pub struct Launch {
     pub session: ProjectSession,
     pub analysis_identity: AnalysisIdentity,
     pub analysis_snapshot: AnalysisSnapshot,
-    pub ephemeral_entry_identity: bool,
+    pub source_analysis_admission: Option<SourceAnalysisAdmission>,
     pub invocation: EntryInvocation,
 }
 
@@ -41,9 +42,9 @@ pub enum LaunchError {
     Entry(String),
     EntryArgs(String),
     EntryChanged,
-    AnalysisChanged,
+    AnalysisChanged(String),
     NoEntry,
-    CatalogRepairBlocked,
+    ReadAdmissionBlocked,
     CheckErrors(Vec<String>),
 }
 
@@ -61,17 +62,14 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "launch target changed between launch and configurationDone; launch again"
             ),
-            Self::AnalysisChanged => write!(
-                f,
-                "debug expression analysis changed while preparing launch; launch again"
-            ),
+            Self::AnalysisChanged(message) => write!(f, "{message}; launch again"),
             Self::NoEntry => write!(
                 f,
                 "no entry to run: pass `entry` or configure `defaultEntry` in {CONFIG_FILE}"
             ),
-            Self::CatalogRepairBlocked => write!(
+            Self::ReadAdmissionBlocked => write!(
                 f,
-                "blocked-on-marrow: DAP launch will not repair accepted catalog artifacts from the store; use Marrow's production catalog flow or wait for read-only debug catalog admission facts"
+                "blocked-on-marrow: DAP launch cannot admit the committed store or lock identity for read-only debug; use Marrow's production data flow or wait for read-only debug store admission facts"
             ),
             Self::CheckErrors(errors) => {
                 write!(f, "the project has errors: {}", errors.join("; "))
@@ -89,30 +87,30 @@ impl LaunchError {
             Self::Entry(_) | Self::NoEntry => "dap.launchEntry.invalid",
             Self::EntryArgs(_) => "dap.launchArgs.invalid",
             Self::EntryChanged => "dap.launch.changed",
-            Self::AnalysisChanged => "dap.launchAnalysis.changed",
-            Self::CatalogRepairBlocked => "dap.launchCatalogRepair.blocked",
+            Self::AnalysisChanged(_) => "dap.launchAnalysis.changed",
+            Self::ReadAdmissionBlocked => "dap.launchReadAdmission.blocked",
         }
     }
 
     pub fn status(&self) -> &'static str {
         match self {
-            Self::CatalogRepairBlocked => STATUS_BLOCKED_ON_MARROW,
+            Self::ReadAdmissionBlocked => STATUS_BLOCKED_ON_MARROW,
             Self::Entry(_) | Self::EntryArgs(_) => STATUS_INVALID_PARAMS,
-            Self::EntryChanged | Self::AnalysisChanged => STATUS_INVALID_STATE,
+            Self::EntryChanged | Self::AnalysisChanged(_) => STATUS_INVALID_STATE,
             _ => STATUS_INVALID_PROJECT,
         }
     }
 
     pub fn blocked_on(&self) -> Option<&'static str> {
         match self {
-            Self::CatalogRepairBlocked => Some(CATALOG_REPAIR_FACTS),
+            Self::ReadAdmissionBlocked => Some(READ_ADMISSION_FACTS),
             Self::NoProject(_)
             | Self::Config(_)
             | Self::Session(_)
             | Self::Entry(_)
             | Self::EntryArgs(_)
             | Self::EntryChanged
-            | Self::AnalysisChanged
+            | Self::AnalysisChanged(_)
             | Self::NoEntry
             | Self::CheckErrors(_) => None,
         }
@@ -127,8 +125,11 @@ pub fn prepare(
     entry: Option<&str>,
     args: &[EntryArgument],
 ) -> Result<Launch, LaunchError> {
-    let (session, descriptor) = prepare_descriptor(project_dir, entry)?;
-    let analysis_snapshot = prepare_analysis_snapshot(project_dir, &session)?;
+    let (session, descriptor) = prepare_descriptor(project_dir, entry, None)?;
+    let analysis_snapshot = session.source_analysis_snapshot().clone();
+    let source_analysis_admission = session
+        .source_analysis_admission()
+        .map_err(from_session_error)?;
     let invocation = EntryInvocation {
         identity: descriptor.identity,
         arguments: args.to_vec(),
@@ -139,7 +140,7 @@ pub fn prepare(
     Ok(Launch {
         analysis_identity: session.source_analysis_identity().clone(),
         analysis_snapshot,
-        ephemeral_entry_identity: uses_ephemeral_entry_identity(project_dir, &session),
+        source_analysis_admission,
         session,
         invocation,
     })
@@ -149,34 +150,29 @@ pub fn prepare_admitted(
     project_dir: &Path,
     entry: Option<&str>,
     analysis_identity: &AnalysisIdentity,
-    ephemeral_entry_identity: bool,
+    source_analysis_admission: Option<&SourceAnalysisAdmission>,
     invocation: EntryInvocation,
 ) -> Result<Launch, LaunchError> {
-    let (session, descriptor) = prepare_descriptor(project_dir, entry)?;
+    let (session, descriptor) = prepare_descriptor(project_dir, entry, source_analysis_admission)?;
     if session.source_analysis_identity() != analysis_identity {
-        return Err(LaunchError::EntryChanged);
+        return Err(LaunchError::AnalysisChanged(
+            "source analysis changed between launch and configurationDone".to_string(),
+        ));
     }
-    let analysis_snapshot = prepare_analysis_snapshot(project_dir, &session)?;
+    let analysis_snapshot = session.source_analysis_snapshot().clone();
+    let current_admission = session
+        .source_analysis_admission()
+        .map_err(from_session_error)?;
     if descriptor.identity.canonical_name != invocation.identity.canonical_name {
         return Err(LaunchError::EntryChanged);
     }
-    let current_ephemeral =
-        ephemeral_entry_identity && uses_ephemeral_entry_identity(project_dir, &session);
-    let invocation = if current_ephemeral {
-        EntryInvocation {
-            identity: descriptor.identity,
-            arguments: invocation.arguments,
-        }
-    } else {
-        invocation
-    };
     CheckedEntryCall::from_protocol_invocation(session.runtime_program(), &invocation)
         .map_err(|error| LaunchError::EntryArgs(runtime_error_message(error)))?;
 
     Ok(Launch {
         analysis_identity: session.source_analysis_identity().clone(),
         analysis_snapshot,
-        ephemeral_entry_identity: current_ephemeral,
+        source_analysis_admission: current_admission,
         session,
         invocation,
     })
@@ -185,6 +181,7 @@ pub fn prepare_admitted(
 fn prepare_descriptor(
     project_dir: &Path,
     entry: Option<&str>,
+    source_analysis_admission: Option<&SourceAnalysisAdmission>,
 ) -> Result<(ProjectSession, EntryDescriptor), LaunchError> {
     let config_path = project_dir.join(CONFIG_FILE);
     if !config_path.is_file() {
@@ -195,6 +192,9 @@ fn prepare_descriptor(
     if let Some(entry) = entry {
         open = open.with_entry_override(entry);
     }
+    if let Some(admission) = source_analysis_admission {
+        open = open.with_source_analysis_admission(admission.clone());
+    }
     let session = ProjectSession::open(project_dir, open).map_err(from_session_error)?;
     let entry = session
         .run_entry()
@@ -203,29 +203,6 @@ fn prepare_descriptor(
     let descriptor = EntryDescriptor::resolve(session.runtime_program(), &entry)
         .map_err(|error| LaunchError::Entry(entry_descriptor_error_message(error).to_string()))?;
     Ok((session, descriptor))
-}
-
-fn prepare_analysis_snapshot(
-    project_dir: &Path,
-    session: &ProjectSession,
-) -> Result<AnalysisSnapshot, LaunchError> {
-    let accepted =
-        marrow_check::read_accepted_catalog_artifact(project_dir).map_err(from_project_io_error)?;
-    let snapshot = marrow_check::check_source_project_analysis_against(
-        project_dir,
-        session.config(),
-        accepted.as_ref(),
-    )
-    .map_err(from_project_io_error)?;
-    if snapshot.content_identity() != session.source_analysis_identity() {
-        return Err(LaunchError::AnalysisChanged);
-    }
-    Ok(snapshot)
-}
-
-fn uses_ephemeral_entry_identity(project_dir: &Path, session: &ProjectSession) -> bool {
-    !project_dir.join(marrow_project::CATALOG_FILE_NAME).exists()
-        && matches!(session.store_stamp(), Ok(None))
 }
 
 fn guard_session_open_is_read_only(project_dir: &Path) -> Result<(), LaunchError> {
@@ -239,16 +216,9 @@ fn guard_session_open_is_read_only(project_dir: &Path) -> Result<(), LaunchError
         return Ok(());
     }
 
-    match marrow_check::read_accepted_catalog_artifact(project_dir) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) | Err(ProjectIoError::Catalog { .. }) => Err(LaunchError::CatalogRepairBlocked),
-        Err(ProjectIoError::Io { error, .. })
-            if error.kind() == std::io::ErrorKind::InvalidData =>
-        {
-            Err(LaunchError::CatalogRepairBlocked)
-        }
-        Err(error) => Err(from_project_io_error(error)),
-    }
+    ProjectSurfaceReadSession::open(project_dir)
+        .map(|_| ())
+        .map_err(from_read_only_session_error)
 }
 
 fn from_project_io_error(error: ProjectIoError) -> LaunchError {
@@ -269,9 +239,27 @@ fn from_project_io_error(error: ProjectIoError) -> LaunchError {
     }
 }
 
+fn from_read_only_session_error(error: ProjectSessionError) -> LaunchError {
+    match error {
+        ProjectSessionError::Catalog { .. }
+        | ProjectSessionError::CheckLoad { .. }
+        | ProjectSessionError::DurableStoreRequired
+        | ProjectSessionError::UnstampedStore
+        | ProjectSessionError::Store(_)
+        | ProjectSessionError::SchemaDrift { .. } => LaunchError::ReadAdmissionBlocked,
+        ProjectSessionError::Io { error, .. }
+            if error.kind() == std::io::ErrorKind::InvalidData =>
+        {
+            LaunchError::ReadAdmissionBlocked
+        }
+        error => from_session_error(error),
+    }
+}
+
 fn from_session_error(error: ProjectSessionError) -> LaunchError {
     match error {
         ProjectSessionError::Config { message, .. } => LaunchError::Config(message),
+        ProjectSessionError::Catalog { .. } => LaunchError::ReadAdmissionBlocked,
         ProjectSessionError::Check { report } => LaunchError::CheckErrors(check_errors(&report)),
         ProjectSessionError::NoEntry => LaunchError::NoEntry,
         ProjectSessionError::Io { path, error } => {
@@ -280,6 +268,7 @@ fn from_session_error(error: ProjectSessionError) -> LaunchError {
         ProjectSessionError::CheckLoad { path, message, .. } => {
             LaunchError::Session(format!("{}: {message}", path.display()))
         }
+        ProjectSessionError::SchemaDrift { message } => LaunchError::AnalysisChanged(message),
         error => LaunchError::Session(error.message()),
     }
 }
@@ -309,6 +298,7 @@ fn check_errors(report: &CheckReport) -> Vec<String> {
 mod tests {
     use super::*;
     use marrow_run::{Host, ProjectSessionNotice, SessionEntry};
+    use marrow_store::tree::TreeStore;
 
     fn write_project(source: &str, config: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -319,7 +309,7 @@ mod tests {
         dir
     }
 
-    fn remove_catalog_after_native_seed(dir: &Path) {
+    fn seed_native_store(dir: &Path) {
         let session = ProjectSession::open(dir, ProjectOpen::run()).expect("seed session");
         let host = Host::new();
         let mut output = String::new();
@@ -328,24 +318,18 @@ mod tests {
             .expect("seed run");
 
         let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
-        assert!(catalog.exists(), "seed run should write accepted catalog");
+        assert!(catalog.exists(), "seed run should write committed lock");
         assert!(
             dir.join("data").join("marrow.redb").exists(),
             "seed run should create the native store"
         );
-        std::fs::remove_file(catalog).expect("remove accepted catalog");
     }
 
-    fn corrupt_catalog_utf8_after_native_seed(dir: &Path) {
-        let session = ProjectSession::open(dir, ProjectOpen::run()).expect("seed session");
-        let host = Host::new();
-        let mut output = String::new();
-        session
-            .invoke(SessionEntry::new("m::main", &host, &mut output))
-            .expect("seed run");
-
+    fn corrupt_catalog_utf8_with_empty_native_store(dir: &Path) {
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        drop(TreeStore::open(&data_dir.join("marrow.redb")).unwrap());
         let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
-        assert!(catalog.exists(), "seed run should write accepted catalog");
         std::fs::write(catalog, [0xff]).expect("write invalid UTF-8 catalog");
     }
 
@@ -386,8 +370,8 @@ pub fn main(): int
             "isolated session should record that a committing run would freeze accepted identity"
         );
         assert!(
-            !dir.path().join("marrow.catalog.json").exists(),
-            "a presentation-only debug prepare must not write the accepted catalog"
+            !dir.path().join(marrow_project::CATALOG_FILE_NAME).exists(),
+            "a presentation-only debug prepare must not write the committed lock"
         );
         assert!(
             !dir.path().join("data").join("marrow.redb").exists(),
@@ -396,7 +380,7 @@ pub fn main(): int
     }
 
     #[test]
-    fn prepare_blocks_native_store_catalog_repair_without_writing() {
+    fn prepare_accepts_valid_existing_native_store() {
         let dir = write_project(
             "\
 module m
@@ -411,23 +395,14 @@ pub fn main()
 ",
             "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
         );
-        remove_catalog_after_native_seed(dir.path());
+        seed_native_store(dir.path());
 
-        let error = expect_error(prepare(dir.path(), None, &[]));
-        assert_eq!(error.code(), "dap.launchCatalogRepair.blocked");
-        assert_eq!(error.status(), "blocked-on-marrow");
-        assert_eq!(
-            error.blocked_on(),
-            Some("read-only debug catalog admission facts")
-        );
-        assert!(
-            !dir.path().join(marrow_project::CATALOG_FILE_NAME).exists(),
-            "DAP prepare must not repair the accepted catalog artifact"
-        );
+        let launch = prepare(dir.path(), None, &[]).expect("valid native store is admitted");
+        assert_eq!(launch.invocation.identity.canonical_name, "m::main");
     }
 
     #[test]
-    fn prepare_blocks_invalid_utf8_catalog_repair_without_writing() {
+    fn prepare_blocks_invalid_utf8_read_admission_without_writing() {
         let dir = write_project(
             "\
 module m
@@ -442,19 +417,19 @@ pub fn main()
 ",
             "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"m::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
         );
-        corrupt_catalog_utf8_after_native_seed(dir.path());
+        corrupt_catalog_utf8_with_empty_native_store(dir.path());
 
         let error = expect_error(prepare(dir.path(), None, &[]));
-        assert_eq!(error.code(), "dap.launchCatalogRepair.blocked");
+        assert_eq!(error.code(), "dap.launchReadAdmission.blocked", "{error:?}");
         assert_eq!(error.status(), "blocked-on-marrow");
         assert_eq!(
             error.blocked_on(),
-            Some("read-only debug catalog admission facts")
+            Some("read-only debug store admission facts")
         );
         assert_eq!(
             std::fs::read(dir.path().join(marrow_project::CATALOG_FILE_NAME)).unwrap(),
             [0xff],
-            "DAP prepare must not repair the invalid catalog artifact"
+            "DAP prepare must not mutate the invalid committed lock"
         );
     }
 

@@ -10,7 +10,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+use marrow_project::CATALOG_FILE_NAME;
 use marrow_run::{Host, ProjectOpen, ProjectSession, SessionEntry};
+use marrow_store::tree::TreeStore;
 use serde_json::{Value as Json, json};
 
 const SHELF_SOURCE: &str = "module shelf\n\
@@ -316,7 +318,7 @@ fn write_native_identity_fixture(dir: &Path) {
     .unwrap();
 }
 
-fn remove_catalog_after_native_seed(dir: &Path) {
+fn seed_native_store(dir: &Path) {
     let session = ProjectSession::open(dir, ProjectOpen::run()).expect("seed session");
     let host = Host::new();
     let mut output = String::new();
@@ -325,24 +327,18 @@ fn remove_catalog_after_native_seed(dir: &Path) {
         .expect("seed run");
 
     let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
-    assert!(catalog.exists(), "seed run should write accepted catalog");
+    assert!(catalog.exists(), "seed run should write committed lock");
     assert!(
         dir.join("data").join("marrow.redb").exists(),
         "seed run should create the native store"
     );
-    std::fs::remove_file(catalog).expect("remove accepted catalog");
 }
 
-fn corrupt_catalog_utf8_after_native_seed(dir: &Path) {
-    let session = ProjectSession::open(dir, ProjectOpen::run()).expect("seed session");
-    let host = Host::new();
-    let mut output = String::new();
-    session
-        .invoke(SessionEntry::new("shelf::main", &host, &mut output))
-        .expect("seed run");
-
+fn corrupt_catalog_utf8_with_empty_native_store(dir: &Path) {
+    let data_dir = dir.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    drop(TreeStore::open(&data_dir.join("marrow.redb")).unwrap());
     let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
-    assert!(catalog.exists(), "seed run should write accepted catalog");
     std::fs::write(catalog, [0xff]).expect("write invalid UTF-8 catalog");
 }
 
@@ -1612,8 +1608,8 @@ fn launch_accepts_configured_default_entry_with_isolated_writes() {
     client.event("terminated");
 
     assert!(
-        !dir.path().join("marrow.catalog.json").exists(),
-        "isolated DAP launch must not write the accepted catalog"
+        !dir.path().join(CATALOG_FILE_NAME).exists(),
+        "isolated DAP launch must not write the committed lock"
     );
     assert!(
         !dir.path().join("data").join("marrow.redb").exists(),
@@ -1622,10 +1618,10 @@ fn launch_accepts_configured_default_entry_with_isolated_writes() {
 }
 
 #[test]
-fn launch_blocks_native_store_catalog_repair_without_writing() {
+fn launch_accepts_valid_existing_native_store() {
     let dir = tempfile::tempdir().unwrap();
     write_native_identity_fixture(dir.path());
-    remove_catalog_after_native_seed(dir.path());
+    seed_native_store(dir.path());
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
@@ -1637,23 +1633,20 @@ fn launch_blocks_native_store_catalog_repair_without_writing() {
             "project": dir.path().display().to_string(),
         }),
     );
-    let blocked = client.response_for(launch);
-    assert_blocked_response(
-        &blocked,
-        "dap.launchCatalogRepair.blocked",
-        "read-only debug catalog admission facts",
-    );
-    assert!(
-        !dir.path().join(marrow_project::CATALOG_FILE_NAME).exists(),
-        "DAP launch must not repair the accepted catalog artifact"
-    );
+    let response = client.response_for(launch);
+    assert_launch_success(&response);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    client.event("output");
+    client.event("terminated");
 }
 
 #[test]
-fn launch_blocks_invalid_utf8_catalog_repair_without_writing() {
+fn launch_blocks_invalid_utf8_read_admission_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     write_native_identity_fixture(dir.path());
-    corrupt_catalog_utf8_after_native_seed(dir.path());
+    corrupt_catalog_utf8_with_empty_native_store(dir.path());
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
@@ -1668,13 +1661,13 @@ fn launch_blocks_invalid_utf8_catalog_repair_without_writing() {
     let blocked = client.response_for(launch);
     assert_blocked_response(
         &blocked,
-        "dap.launchCatalogRepair.blocked",
-        "read-only debug catalog admission facts",
+        "dap.launchReadAdmission.blocked",
+        "read-only debug store admission facts",
     );
     assert_eq!(
         std::fs::read(dir.path().join(marrow_project::CATALOG_FILE_NAME)).unwrap(),
         [0xff],
-        "DAP launch must not repair the invalid catalog artifact"
+        "DAP launch must not mutate the invalid committed lock"
     );
 }
 
@@ -3074,6 +3067,45 @@ fn durable_watch_is_blocked_through_marrow_data_access_fact() {
         "dap.durableData.blocked",
         "typed durable watch/path facts",
     );
+}
+
+#[test]
+fn native_durable_launch_evaluates_local_watch_against_the_admitted_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_durable_helper_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 11 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 11);
+
+    let local_watch = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "watch" }),
+    );
+    let local_watch = client.response_for(local_watch);
+    assert_evaluate_runtime_debug_value(&local_watch, "Dune", 0);
 }
 
 #[test]

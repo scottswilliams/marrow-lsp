@@ -8,14 +8,15 @@ use std::time::Duration;
 use marrow_lsp_core::data_explorer::{
     DataChildViewsResponse, DataChildrenError, DataChildrenRequest, DataKeyDto, DataPresenceDto,
     DataReadRequest, DataReadResponse, DataRequestValidationError, SavedRootsResult, saved_roots,
-    validate_data_children_request, validate_data_read_request,
+    session_data_child_views_page, session_data_read, validate_data_children_request,
+    validate_data_read_request,
 };
 use marrow_lsp_core::data_integrity::{DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
 use marrow_lsp_core::positions::Position as CorePosition;
-use marrow_lsp_core::store::LiveStore;
+use marrow_lsp_core::store::{SavedDataSession, open_saved_data_session};
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
 use marrow_lsp_core::{
     completion, formatting, hover, navigation, semantic_tokens, signature_help, symbols,
@@ -59,34 +60,29 @@ impl Backend {
         }
     }
 
-    /// The store reader for the resolved project, or `None` when live data is off,
-    /// no project is resolved yet, or the project pins no native store. The reader
-    /// is short-lived: it holds only the store path and opens the file per read.
-    fn reader(&self, workspace: &Workspace) -> Option<LiveStore> {
+    /// The Marrow read session for saved-data inspection, only when the cached
+    /// analysis still matches the editor-visible source.
+    fn data_session(&self, state: &State) -> Option<SavedDataSession> {
         if !self.live_data.load(Ordering::Relaxed) {
             return None;
         }
-        LiveStore::for_project(workspace.project()?)
+        state.workspace.fresh_program(&state.documents)?;
+        open_saved_data_session(state.workspace.project()?)
+            .ok()
+            .flatten()
     }
 
     /// `marrow/savedRoots`: the project's saved root views. Requires a fresh
     /// checked program and never recomputes the project.
     pub async fn saved_roots(&self) -> jsonrpc::Result<SavedRootsResult> {
         let state = self.state.lock().await;
-        let reader = self.reader(&state.workspace);
-        let Some(program) = state.workspace.fresh_program(&state.documents) else {
-            return Ok(SavedRootsResult {
-                available: false,
-                roots: Vec::new(),
-                store_snapshot: None,
-            });
-        };
-        Ok(saved_roots(reader.as_ref(), program))
+        let session = self.data_session(&state);
+        Ok(saved_roots(session.as_ref()))
     }
 
     /// `marrow/dataChildren`: a bounded page of saved-data children for the
-    /// committed-store inspector. Requires a fresh checked program and a
-    /// live-data reader; unavailable stores degrade to a typed empty response.
+    /// committed-store inspector. Requires a fresh editor-visible analysis and a
+    /// Marrow saved-data session; unavailable stores degrade to a typed empty response.
     pub async fn data_children(
         &self,
         request: DataChildrenRequest,
@@ -94,16 +90,11 @@ impl Backend {
         let request = validate_data_children_request(request)
             .map_err(|error| invalid_data_request("marrow/dataChildren", error))?;
         let state = self.state.lock().await;
-        let reader = self.reader(&state.workspace);
-        let Some(program) = state.workspace.fresh_program(&state.documents) else {
+        let Some(session) = self.data_session(&state) else {
             return Ok(unavailable_data_children());
         };
-        let Some(reader) = reader else {
-            return Ok(unavailable_data_children());
-        };
-        Ok(match reader.data_child_views_page(program, request) {
-            marrow_lsp_core::store::Availability::Unavailable => unavailable_data_children(),
-            marrow_lsp_core::store::Availability::Available(Ok(result)) => DataChildViewsResponse {
+        Ok(match session_data_child_views_page(&session, request) {
+            Ok(result) => DataChildViewsResponse {
                 available: true,
                 children: result.children,
                 truncated: result.truncated,
@@ -111,9 +102,7 @@ impl Backend {
                 store_snapshot: result.store_snapshot,
                 error: None,
             },
-            marrow_lsp_core::store::Availability::Available(Err(error)) => {
-                data_children_error(error)
-            }
+            Err(error) => data_children_error(error),
         })
     }
 
@@ -123,16 +112,11 @@ impl Backend {
         let request = validate_data_read_request(request)
             .map_err(|error| invalid_data_request("marrow/dataRead", error))?;
         let state = self.state.lock().await;
-        let reader = self.reader(&state.workspace);
-        let Some(program) = state.workspace.fresh_program(&state.documents) else {
+        let Some(session) = self.data_session(&state) else {
             return Ok(unavailable_data_read());
         };
-        let Some(reader) = reader else {
-            return Ok(unavailable_data_read());
-        };
-        Ok(match reader.data_read(program, request) {
-            marrow_lsp_core::store::Availability::Unavailable => unavailable_data_read(),
-            marrow_lsp_core::store::Availability::Available(Ok(result)) => DataReadResponse {
+        Ok(match session_data_read(&session, request) {
+            Ok(result) => DataReadResponse {
                 available: true,
                 presence: result.presence,
                 value: result.value,
@@ -140,30 +124,21 @@ impl Backend {
                 store_snapshot: result.store_snapshot,
                 error: None,
             },
-            marrow_lsp_core::store::Availability::Available(Err(error)) => data_read_error(error),
+            Err(error) => data_read_error(error),
         })
     }
 
     /// `marrow/dataIntegrity`: the schema-change-impact advisory. A capped,
     /// on-demand scan of the project's saved data that flags every record the
     /// current schema can no longer account for. Reads through the same
-    /// `marrow.liveData`-gated reader as the saved-resource inspector, so it never
-    /// opens the store when live data is off, and it is invoked only on explicit request. A
-    /// missing fresh checked program, a `None` reader (live data off, no project,
-    /// or no native store), or an unreadable store answers `available: false`.
+    /// `marrow.liveData`-gated saved-data session as the inspector, so it never
+    /// opens the store when live data is off, and it is invoked only on explicit
+    /// request. A stale editor snapshot, no project, no native store, or an
+    /// unreadable store answers `available: false`.
     pub async fn data_integrity(&self) -> jsonrpc::Result<DataIntegrityResult> {
         let state = self.state.lock().await;
-        let reader = self.reader(&state.workspace);
-        let Some(program) = state.workspace.fresh_program(&state.documents) else {
-            return Ok(DataIntegrityResult {
-                available: false,
-                findings: Vec::new(),
-                scanned: 0,
-                truncated: false,
-                store_snapshot: None,
-            });
-        };
-        Ok(data_integrity(reader.as_ref(), program))
+        let session = self.data_session(&state);
+        Ok(data_integrity(session.as_ref()))
     }
 
     /// Note that an edit happened and schedule a debounced recompute for `file`.

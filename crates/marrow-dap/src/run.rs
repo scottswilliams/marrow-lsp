@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 use marrow_check::AnalysisIdentity;
 use marrow_run::{
     DebugValue, EntryInvocation, Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry,
-    SystemNondeterminism,
+    SourceAnalysisAdmission, SystemNondeterminism,
 };
 
 use crate::debugger::{ArmedBreakpoints, Control, Debugger, RunEvent};
@@ -42,20 +42,19 @@ struct RunRequest {
     project_dir: std::path::PathBuf,
     entry: Option<String>,
     analysis_identity: AnalysisIdentity,
-    ephemeral_entry_identity: bool,
+    source_analysis_admission: Option<SourceAnalysisAdmission>,
     invocation: EntryInvocation,
     stop_on_entry: bool,
     breakpoints: ArmedBreakpoints,
     terminate: Arc<AtomicBool>,
 }
 
-/// Start the run on a dedicated thread. Project preparation and invocation happen
-/// there, so session internals never cross the protocol/run boundary.
+/// Start the run on a dedicated thread.
 pub fn spawn(
     project_dir: std::path::PathBuf,
     entry: Option<String>,
     analysis_identity: AnalysisIdentity,
-    ephemeral_entry_identity: bool,
+    source_analysis_admission: Option<SourceAnalysisAdmission>,
     invocation: EntryInvocation,
     stop_on_entry: bool,
     breakpoints: ArmedBreakpoints,
@@ -67,7 +66,7 @@ pub fn spawn(
         project_dir,
         entry,
         analysis_identity,
-        ephemeral_entry_identity,
+        source_analysis_admission,
         invocation,
         stop_on_entry,
         breakpoints,
@@ -100,7 +99,7 @@ fn run_on_thread(
         project_dir,
         entry,
         analysis_identity,
-        ephemeral_entry_identity,
+        source_analysis_admission,
         invocation,
         stop_on_entry,
         breakpoints,
@@ -110,7 +109,7 @@ fn run_on_thread(
         &project_dir,
         entry.as_deref(),
         &analysis_identity,
-        ephemeral_entry_identity,
+        source_analysis_admission.as_ref(),
         invocation,
     ) {
         Ok(launch) => launch,

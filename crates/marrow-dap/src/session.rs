@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use marrow_check::{
     AnalysisSnapshot, CheckedDebugExpression, DebugExpressionDataAccess, MarrowType, ScalarType,
 };
-use marrow_run::{DebugValue, EntryArgument, EntryInvocation};
+use marrow_run::{DebugValue, EntryArgument, EntryInvocation, SourceAnalysisAdmission};
 use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
 
@@ -264,7 +264,7 @@ struct PendingLaunch {
     project_dir: PathBuf,
     entry: Option<String>,
     analysis_identity: marrow_check::AnalysisIdentity,
-    ephemeral_entry_identity: bool,
+    source_analysis_admission: Option<SourceAnalysisAdmission>,
     invocation: EntryInvocation,
     stop_on_entry: bool,
 }
@@ -634,8 +634,9 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        // Prepare now so a bad project fails launch. The run thread reopens the
-        // project and requires the admitted source/config and entry identity to match.
+        // Prepare now so a bad project fails launch. The run thread reopens
+        // through Marrow's source-analysis admission so debug-expression facts
+        // stay aligned with runtime frames.
         match crate::project::prepare(&project_dir, entry, &args) {
             Ok(launch) => {
                 self.stop_points = Some(StopPointIndex::from_runtime(
@@ -646,7 +647,7 @@ impl<W: Write> Session<W> {
                     project_dir,
                     entry: entry.map(str::to_string),
                     analysis_identity: launch.analysis_identity,
-                    ephemeral_entry_identity: launch.ephemeral_entry_identity,
+                    source_analysis_admission: launch.source_analysis_admission,
                     invocation: launch.invocation,
                     stop_on_entry,
                 });
@@ -906,7 +907,7 @@ impl<W: Write> Session<W> {
             pending.project_dir,
             pending.entry,
             pending.analysis_identity,
-            pending.ephemeral_entry_identity,
+            pending.source_analysis_admission,
             pending.invocation,
             pending.stop_on_entry,
             breakpoints,

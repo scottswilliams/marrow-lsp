@@ -1,6 +1,8 @@
 use super::*;
 
-use marrow_check::test_support::{commit_then_check, member_catalog_id, root_place, store_id_of};
+use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
+use marrow_check::{check_project, check_project_against, project_store_lock, read_committed_lock};
+use marrow_project::{CATALOG_FILE_NAME, parse_config};
 use marrow_store::key::SavedKey;
 use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
 use marrow_store::value::{SavedValue, encode_value};
@@ -83,30 +85,6 @@ fn assert_store_snapshot(snapshot: &Json) {
                         .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             }),
         "snapshot commit should carry canonical profile digest hex: {snapshot}"
-    );
-    assert!(
-        snapshot["checked_source_digest"]
-            .as_str()
-            .is_some_and(|digest| digest.starts_with("sha256:")),
-        "snapshot should carry the checked program source digest: {snapshot}"
-    );
-}
-
-fn assert_checked_snapshot(snapshot: &Json) {
-    assert_eq!(
-        snapshot["store_uid"],
-        Json::Null,
-        "snapshot should not fabricate a store UID: {snapshot}"
-    );
-    assert_eq!(
-        snapshot["catalog_digest"],
-        Json::Null,
-        "snapshot should not fabricate a catalog digest: {snapshot}"
-    );
-    assert_eq!(
-        snapshot["commit"],
-        Json::Null,
-        "snapshot should not fabricate commit metadata: {snapshot}"
     );
     assert!(
         snapshot["checked_source_digest"]
@@ -199,6 +177,16 @@ fn position_in_file(file: &Path, needle: &str) -> Position {
     crate::positions::LineIndex::new(source).position(offset)
 }
 
+fn commit_project_lock(root: &Path) -> CheckedProgram {
+    let config = parse_config(&std::fs::read_to_string(root.join("marrow.json")).unwrap()).unwrap();
+    let (report, proposed) = check_project(root, &config).unwrap();
+    assert!(!report.has_errors(), "{:#?}", report.diagnostics);
+    let proposal = proposed.catalog.proposal.as_ref().unwrap();
+    project_store_lock(root, proposal, &proposed.source_digest()).unwrap();
+    let lock = read_committed_lock(root).unwrap();
+    check_project_against(root, &config, None, lock.as_ref()).unwrap()
+}
+
 fn native_counter_project(ids: impl IntoIterator<Item = i64>) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -228,7 +216,7 @@ pub fn show()
     )
     .unwrap();
 
-    let program = commit_then_check(root).unwrap();
+    let program = commit_project_lock(root);
     let file = src.join("counter.mw");
     let place = root_place(&program, "counter").unwrap();
     let store_id = store_id_of(&place).unwrap();
@@ -249,10 +237,64 @@ pub fn show()
     (dir, file)
 }
 
+fn native_counter_project_with_unstamped_records(
+    ids: impl IntoIterator<Item = i64>,
+) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src/app");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("counter.mw"),
+        "\
+module app::counter
+
+resource Counter
+    required value: int
+
+store ^counter(id: int): Counter
+",
+    )
+    .unwrap();
+
+    let committed = commit_project_lock(root);
+
+    let file = src.join("counter.mw");
+    let place = root_place(&committed, "counter").unwrap();
+    let store_id = store_id_of(&place).unwrap();
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    store
+        .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
+        .unwrap();
+    for id in ids {
+        store
+            .write_record_presence(&store_id, &[SavedKey::Int(id)])
+            .unwrap();
+    }
+    drop(store);
+
+    (dir, file)
+}
+
 fn native_counter_project_with_value(value: i64) -> (tempfile::TempDir, PathBuf) {
     let (dir, file) = native_counter_project([1]);
     let root = dir.path();
-    let program = commit_then_check(root).unwrap();
+    let program = {
+        let (workspace, _) = load_project(&file, None).unwrap();
+        open_saved_data_session(workspace.project().unwrap())
+            .unwrap()
+            .unwrap()
+            .surface_read()
+            .program()
+            .clone()
+    };
     let place = root_place(&program, "counter").unwrap();
     let store_id = store_id_of(&place).unwrap();
     let value_id = member_catalog_id(&place, "value").unwrap();
@@ -295,10 +337,15 @@ store ^settings: Settings
     )
     .unwrap();
 
-    commit_then_check(root).unwrap();
+    let program = commit_project_lock(root);
     let data_dir = root.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    drop(TreeStore::open(&data_dir.join("marrow.redb")).unwrap());
+    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    store
+        .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
+        .unwrap();
+    marrow_run::evolution::commit_catalog_baseline(&store, &program).unwrap();
+    drop(store);
 
     (dir, src.join("settings.mw"))
 }
@@ -368,7 +415,7 @@ fn native_surface_project() -> (tempfile::TempDir, PathBuf) {
 fn catalog_only_surface_project() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let file = write_surface_project(dir.path());
-    commit_then_check(dir.path()).expect("commit surface catalog");
+    commit_project_lock(dir.path());
     (dir, file)
 }
 
@@ -1103,8 +1150,8 @@ fn run_uses_fresh_memory_for_shelf_fixture_without_establishing_catalog_identity
         "fresh-memory run should execute the fixture over an in-memory store, got {result}"
     );
     assert!(
-        !dir.path().join("marrow.catalog.json").exists(),
-        "mw_run must not establish the fixture's accepted catalog"
+        !dir.path().join(CATALOG_FILE_NAME).exists(),
+        "mw_run must not establish the fixture's committed lock"
     );
 }
 
@@ -1144,8 +1191,8 @@ fn run_does_not_touch_the_real_store() {
             .expect("read commit metadata")
             .expect("seed helper stamps the real store")
     };
-    let catalog_file = dir.path().join("marrow.catalog.json");
-    let catalog_before = std::fs::read(&catalog_file).expect("seed helper writes catalog");
+    let lock_file = dir.path().join(CATALOG_FILE_NAME);
+    let lock_before = std::fs::read(&lock_file).expect("seed helper writes committed lock");
 
     let result = run(&file, Some("app::counter::show"), &[], RunMode::Run);
     assert_eq!(result["diagnostics"], json!([]), "{result}");
@@ -1166,9 +1213,9 @@ fn run_does_not_touch_the_real_store() {
         "fresh-memory run must not advance the real store commit"
     );
     assert_eq!(
-        catalog_before,
-        std::fs::read(&catalog_file).expect("fresh-memory run preserves catalog"),
-        "fresh-memory run must not rewrite the accepted catalog artifact"
+        lock_before,
+        std::fs::read(&lock_file).expect("fresh-memory run preserves committed lock"),
+        "fresh-memory run must not rewrite the committed lock"
     );
 }
 
@@ -1350,6 +1397,41 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
 }
 
 #[test]
+fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
+    let (_dir, file) = native_counter_project_with_unstamped_records(1..=1);
+
+    let roots = saved_roots(&file, true);
+    assert_eq!(roots["available"], false, "{roots}");
+    assert!(
+        roots["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("no catalog activation stamp")),
+        "{roots}"
+    );
+
+    let children = data_children(
+        &file,
+        crate::data_explorer::DataChildrenRequest {
+            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
+                "counter".into(),
+            )],
+            limit: 10,
+            cursor: None,
+        },
+        true,
+    );
+
+    assert_eq!(children["available"], false, "{children}");
+    assert_eq!(children["children"], json!([]), "{children}");
+    assert!(
+        children["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("no catalog activation stamp")),
+        "{children}"
+    );
+}
+
+#[test]
 fn data_integrity_returns_snapshot_metadata_when_enabled() {
     let (_dir, file) = native_counter_project(1..=1);
 
@@ -1524,7 +1606,7 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
     assert_eq!(result["children"], json!([]), "{result}");
     assert_eq!(result["truncated"], false, "{result}");
     assert_eq!(result["cursor"], Json::Null, "{result}");
-    assert_checked_snapshot(&result["store_snapshot"]);
+    assert_store_snapshot(&result["store_snapshot"]);
     assert_contract(
         &result,
         "presentation-only",
