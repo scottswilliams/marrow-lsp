@@ -207,14 +207,23 @@ fn saved_receiver_start(tokens: &[Token], end: usize) -> Option<usize> {
         TokenKind::Identifier => saved_receiver_identifier_start(tokens, end),
         TokenKind::RightParen => {
             let open = matching_open_paren(tokens, end)?;
-            let callee = open.checked_sub(1)?;
-            if tokens[callee].kind != TokenKind::Identifier {
-                return None;
+            if let Some(callee) = open.checked_sub(1)
+                && tokens[callee].kind == TokenKind::Identifier
+            {
+                return saved_receiver_identifier_start(tokens, callee);
             }
-            saved_receiver_identifier_start(tokens, callee)
+            saved_receiver_group_start(tokens, open, end)
         }
         _ => None,
     }
+}
+
+fn saved_receiver_group_start(tokens: &[Token], open: usize, close: usize) -> Option<usize> {
+    let inner_end = close.checked_sub(1)?;
+    if inner_end <= open {
+        return None;
+    }
+    (saved_receiver_start(tokens, inner_end)? == open + 1).then_some(open)
 }
 
 fn saved_receiver_identifier_start(tokens: &[Token], ident: usize) -> Option<usize> {
@@ -295,6 +304,9 @@ fn saved_path_attempt_ending_at(tokens: &[Token], mut i: usize) -> bool {
                     {
                         return saved_path_callee_prefix_before(tokens, callee);
                     }
+                    if saved_receiver_group_start(tokens, open, i).is_some() {
+                        return true;
+                    }
                     let Some(prev) = open.checked_sub(1) else {
                         return false;
                     };
@@ -307,7 +319,21 @@ fn saved_path_attempt_ending_at(tokens: &[Token], mut i: usize) -> bool {
                     i = prev;
                 }
             },
-            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::RightBracket => {
+            TokenKind::RightBracket => match matching_open_bracket(tokens, i) {
+                Some(open) => {
+                    let Some(prev) = open.checked_sub(1) else {
+                        return false;
+                    };
+                    return saved_path_attempt_ending_at(tokens, prev);
+                }
+                None => {
+                    let Some(prev) = i.checked_sub(1) else {
+                        return false;
+                    };
+                    i = prev;
+                }
+            },
+            TokenKind::LeftParen | TokenKind::LeftBracket => {
                 let Some(prev) = i.checked_sub(1) else {
                     return false;
                 };
@@ -346,6 +372,24 @@ fn matching_open_paren(tokens: &[Token], close_index: usize) -> Option<usize> {
         match tokens[i].kind {
             TokenKind::RightParen => depth += 1,
             TokenKind::LeftParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i = i.checked_sub(1)?;
+    }
+}
+
+fn matching_open_bracket(tokens: &[Token], close_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = close_index;
+    loop {
+        match tokens[i].kind {
+            TokenKind::RightBracket => depth += 1,
+            TokenKind::LeftBracket => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);

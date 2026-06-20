@@ -268,6 +268,40 @@ fn after_saved_layer_dot_recovers_parenthesized_receiver_arguments() {
 }
 
 #[test]
+fn after_grouped_saved_receiver_dot_lists_declared_members() {
+    let (program, file) = project();
+
+    for source in [
+        "module shelf::app\n\npub fn f(id: int)\n    const x = (^books(id)).|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ((^books(id))).|\n",
+    ] {
+        let labels = complete(&program, &file, source);
+        assert_eq!(
+            labels,
+            ["title", "shelf", "tags", "notes"],
+            "grouped saved receiver should recover declared members for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn after_grouped_saved_layer_dot_lists_declared_nested_members() {
+    let (program, file) = project();
+
+    for source in [
+        "module shelf::app\n\npub fn f(id: int, n: string)\n    const x = (^books(id).notes(n)).|\n",
+        "module shelf::app\n\npub fn f(id: int, n: string)\n    const x = (^books(id)).notes(n).|\n",
+    ] {
+        let labels = complete(&program, &file, source);
+        assert_eq!(
+            labels,
+            ["text"],
+            "grouped saved layer receiver should recover declared members for {source:?}"
+        );
+    }
+}
+
+#[test]
 fn after_unkeyed_root_dot_lists_no_schema_members_before_identity_keys() {
     let (program, file) = project();
     let labels = complete(
@@ -369,6 +403,7 @@ fn malformed_saved_path_looking_dots_return_no_bare_completions() {
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).\"title\".|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).123.|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..foo.|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)[0].|\n",
     ] {
         let labels = complete(&program, &file, source);
         assert!(
