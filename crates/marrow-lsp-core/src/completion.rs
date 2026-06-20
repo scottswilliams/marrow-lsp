@@ -250,6 +250,7 @@ fn recovered_receiver_span(tokens: &[Token], start: usize, end: usize) -> Source
 fn unrecovered_saved_path(tokens: &[Token], dot_index: usize) -> SavedPathRecovery {
     if malformed_saved_member_receiver_before_dot(tokens, dot_index)
         || saved_path_attempt_before_dot(tokens, dot_index)
+        || open_saved_postfix_before_dot(tokens, dot_index)
     {
         SavedPathRecovery::Invalid
     } else {
@@ -333,7 +334,7 @@ fn saved_path_attempt_ending_at(tokens: &[Token], mut i: usize) -> bool {
                     i = prev;
                 }
             },
-            TokenKind::LeftParen | TokenKind::LeftBracket => {
+            TokenKind::Dot | TokenKind::QuestionDot => {
                 let Some(prev) = i.checked_sub(1) else {
                     return false;
                 };
@@ -342,6 +343,56 @@ fn saved_path_attempt_ending_at(tokens: &[Token], mut i: usize) -> bool {
             _ => return false,
         }
     }
+}
+
+fn open_saved_postfix_before_dot(tokens: &[Token], dot_index: usize) -> bool {
+    let Some(mut i) = dot_index.checked_sub(1) else {
+        return false;
+    };
+    let dot_line = tokens[dot_index].span.line;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    loop {
+        if tokens[i].span.line < dot_line {
+            return false;
+        }
+        match tokens[i].kind {
+            TokenKind::RightParen => paren_depth += 1,
+            TokenKind::LeftParen if paren_depth > 0 => paren_depth -= 1,
+            TokenKind::LeftParen if bracket_depth == 0 => {
+                if open_call_has_completed_saved_receiver(tokens, i) {
+                    return true;
+                }
+            }
+            TokenKind::RightBracket => bracket_depth += 1,
+            TokenKind::LeftBracket if bracket_depth > 0 => bracket_depth -= 1,
+            TokenKind::LeftBracket if paren_depth == 0 => {
+                if open_bracket_has_saved_receiver(tokens, i) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        let Some(prev) = i.checked_sub(1) else {
+            return false;
+        };
+        i = prev;
+    }
+}
+
+fn open_call_has_completed_saved_receiver(tokens: &[Token], open: usize) -> bool {
+    let Some(receiver) = open.checked_sub(1) else {
+        return false;
+    };
+    matches!(
+        tokens[receiver].kind,
+        TokenKind::RightParen | TokenKind::RightBracket
+    ) && saved_path_attempt_ending_at(tokens, receiver)
+}
+
+fn open_bracket_has_saved_receiver(tokens: &[Token], open: usize) -> bool {
+    open.checked_sub(1)
+        .is_some_and(|receiver| saved_path_attempt_ending_at(tokens, receiver))
 }
 
 fn saved_path_callee_prefix_before(tokens: &[Token], callee: usize) -> bool {

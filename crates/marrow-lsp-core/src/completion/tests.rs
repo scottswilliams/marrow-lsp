@@ -395,15 +395,19 @@ fn malformed_saved_path_looking_dots_return_no_bare_completions() {
 
     for source in [
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)).|\n",
-        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books((id).|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)...|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..=|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id). .|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).?.|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).return.|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).\"title\".|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).123.|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..foo.|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)[0].|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)[0.|\n",
+        "module shelf::app\n\npub fn f(id: int, foo: int)\n    const x = ^books(id)(foo.|\n",
+        "module shelf::app\n\npub fn f(id: int, foo: int)\n    const x = ^books(id).notes(foo)(foo.|\n",
     ] {
         let labels = complete(&program, &file, source);
         assert!(
@@ -421,6 +425,12 @@ fn ordinary_non_saved_dot_keeps_bare_completion() {
         "module shelf::app\n\npub fn f(foo: int)\n    const x = foo.|\n",
         "module shelf::app\n\npub fn f(foo: int)\n    const x = foo.return|\n",
         "module shelf::app\n\npub fn f(foo: int, id: int)\n    const x = wrap(^books(id)).|\n",
+        "module shelf::app\n\npub fn f(foo: int, id: int)\n    const x = wrap(^books(id), foo.|\n",
+        "module shelf::app\n\npub fn f(foo: int)\n    const x = ^books(foo.|\n",
+        "module shelf::app\n\npub fn f(foo: int)\n    const x = ^books((foo).|\n",
+        "module shelf::app\n\npub fn f(id: int, foo: string)\n    const x = ^books(id).notes(foo.|\n",
+        "module shelf::app\n\npub fn f(id: int, foo: string)\n    const x = ^books(id).notes((foo).|\n",
+        "module shelf::app\n\npub fn f(id: int, foo: int)\n    const broken = ^books(id)(\n    const x = foo.|\n",
     ] {
         let labels = complete(&program, &file, source);
         assert!(
