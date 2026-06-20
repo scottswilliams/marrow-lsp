@@ -44,7 +44,7 @@ use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
 use crate::store::LiveStore;
-use crate::types::render_type;
+use crate::types::{render_schema_leaf_type, render_type};
 use crate::workspace::Workspace;
 
 /// A clamp on the saved bytes a `run`/test captures into its result. Output is a
@@ -597,18 +597,20 @@ fn key_def_to_json(key: &KeyDef) -> Json {
 /// keyParams, members }` with its nested members projected recursively.
 fn node_to_json(node: &Node) -> Json {
     match &node.kind {
-        NodeKind::Slot { ty, required } if node.key_params.is_empty() => json!({
+        NodeKind::Slot { ty, required, .. } if node.key_params.is_empty() => json!({
             "name": node.name,
             "kind": "field",
-            "type": type_name(ty),
+            "type": render_schema_leaf_type(node, ty),
             "required": required,
+            "errorCode": node.is_error_code(),
             "docs": node.docs,
         }),
         NodeKind::Slot { ty, .. } => json!({
             "name": node.name,
             "kind": "leaf",
-            "type": type_name(ty),
+            "type": render_schema_leaf_type(node, ty),
             "keyParams": node.key_params.iter().map(key_def_to_json).collect::<Vec<_>>(),
+            "errorCode": node.is_error_code(),
             "docs": node.docs,
         }),
         NodeKind::Group => json!({

@@ -935,3 +935,22 @@ fn signature_help_has_no_local_intrinsic_callable_model() {
         );
     }
 }
+
+#[test]
+fn signature_help_has_no_local_active_call_model() {
+    let source = include_str!("../signature_help.rs");
+    for forbidden in ["mod active_call", "active_call::active_call"] {
+        assert!(
+            !source.contains(forbidden),
+            "signature help must consume marrow_check active-call facts instead of {forbidden}"
+        );
+    }
+
+    let local_model =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/signature_help/active_call.rs");
+    assert!(
+        !local_model.exists(),
+        "signature help must not keep a local active-call parser at {}",
+        local_model.display()
+    );
+}

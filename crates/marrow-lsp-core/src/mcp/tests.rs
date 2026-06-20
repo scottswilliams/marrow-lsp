@@ -136,6 +136,7 @@ module shelf::books
 
 resource Book
     required title: string
+    code: ErrorCode
     tags(pos: int): string
 
 store ^books(id: int): Book
@@ -188,6 +189,14 @@ pub fn explode()
     .unwrap();
     let file = src.join("books.mw");
     (dir, file)
+}
+
+fn position_in_file(file: &Path, needle: &str) -> Position {
+    let source = std::fs::read_to_string(file).unwrap();
+    let offset = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("fixture source should contain {needle:?}"));
+    crate::positions::LineIndex::new(source).position(offset)
 }
 
 fn native_counter_project(ids: impl IntoIterator<Item = i64>) -> (tempfile::TempDir, PathBuf) {
@@ -507,9 +516,8 @@ fn check_snippet_reports_a_syntax_error() {
 #[test]
 fn type_at_reports_the_type_of_a_parameter_use() {
     let (_dir, file) = project();
-    // `    return n * 2` is line 10 (zero-based); `    return ` is 11 chars, so
-    // the `n` parameter use sits at character 11.
-    let result = type_at_position(&file, 10, 11);
+    let position = position_in_file(&file, "n * 2");
+    let result = type_at_position(&file, position.line, position.character);
     assert_eq!(
         result["type"], "int",
         "the `n` parameter use is an int: {result}"
@@ -519,10 +527,8 @@ fn type_at_reports_the_type_of_a_parameter_use() {
 #[test]
 fn complete_in_a_function_body_lists_locals_and_keywords() {
     let (_dir, file) = project();
-    // A bare position inside `double`'s body (line 10, after `    return `) lists
-    // in-scope names and keywords — proving the schema-backed program loaded and
-    // the classifier ran against the file's own text.
-    let result = complete(&file, 10, 11);
+    let position = position_in_file(&file, "n * 2");
+    let result = complete(&file, position.line, position.character);
     let items = result["items"].as_array().unwrap();
     assert!(
         !items.is_empty(),
@@ -561,13 +567,20 @@ fn resource_schema_shapes_the_book_resource() {
     assert_eq!(store["resource"], "Book");
     assert_eq!(store["identityKeys"][0]["name"], "id");
     assert_eq!(store["identityKeys"][0]["type"], "int");
-    // `title` is a required string field; `tags` is a keyed leaf; `byTitle` an index.
+    // `title` is a required string field; `code` keeps its ErrorCode spelling;
+    // `tags` is a keyed leaf; `byTitle` an index.
     let members = book["members"].as_array().unwrap();
     assert!(
         members
             .iter()
             .any(|m| m["name"] == "title" && m["kind"] == "field" && m["type"] == "string")
     );
+    assert!(members.iter().any(|m| {
+        m["name"] == "code"
+            && m["kind"] == "field"
+            && m["type"] == "ErrorCode"
+            && m["errorCode"] == true
+    }));
     assert!(
         members
             .iter()

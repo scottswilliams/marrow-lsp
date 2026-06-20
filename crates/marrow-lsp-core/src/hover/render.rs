@@ -6,7 +6,7 @@ use marrow_check::{
 use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema, stdlib};
 use marrow_syntax::{FunctionDecl, IndexDecl, KeyParam, ResourceMember};
 
-use crate::types::render_type;
+use crate::types::{render_schema_leaf_type, render_type};
 
 use super::facts::HoverFact;
 
@@ -377,9 +377,12 @@ fn resource_member_lines(member: &marrow_schema::Node, prefix: &str, lines: &mut
         format!("{prefix}.{name}")
     };
     match &member.kind {
-        NodeKind::Slot { ty, required } => {
+        NodeKind::Slot { ty, required, .. } => {
             let required = if *required { "required " } else { "" };
-            lines.push(format!("{required}{path}: {ty}"));
+            lines.push(format!(
+                "{required}{path}: {}",
+                render_schema_leaf_type(member, ty)
+            ));
         }
         NodeKind::Group => {
             lines.push(path.clone());

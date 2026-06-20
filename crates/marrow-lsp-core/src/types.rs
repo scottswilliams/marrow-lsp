@@ -1,12 +1,12 @@
-//! The `.mw` spelling of a checker type, shared by every feature that shows a
-//! type to a human.
+//! The `.mw` spelling of Marrow types, shared by every feature that shows a type
+//! to a human.
 //!
-//! Hover, completion detail, and the MCP `mw_type_at` answer all render the same
-//! checker [`MarrowType`] as the source text a developer would write. They must
-//! agree — a hover and an agent query for the same expression spell the type
-//! identically — so the one renderer lives here rather than copied per feature.
+//! Hover, completion detail, resource summaries, and MCP answers must agree when
+//! they spell the same fact, so the renderers live here rather than copied per
+//! feature.
 
 use marrow_check::MarrowType;
+use marrow_schema::{Node, Type};
 
 /// The canonical `.mw` spelling of a checker type. Mirrors `marrow_schema::Type`'s
 /// `Display` for the storable types and names the checker-only forms (`Error`, a
@@ -24,6 +24,14 @@ pub(crate) fn render_type(ty: &MarrowType) -> String {
         MarrowType::LocalTree { value, .. } => format!("tree[{}]", render_type(value)),
         MarrowType::Invalid => "unknown".to_string(),
         MarrowType::Unknown => "unknown".to_string(),
+    }
+}
+
+pub(crate) fn render_schema_leaf_type(node: &Node, ty: &Type) -> String {
+    if node.is_error_code() {
+        "ErrorCode".to_string()
+    } else {
+        ty.to_string()
     }
 }
 

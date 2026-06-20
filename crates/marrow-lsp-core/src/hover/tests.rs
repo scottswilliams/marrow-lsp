@@ -1358,6 +1358,7 @@ module a
 resource Book
     ;; Display title.
     required title: string
+    code: ErrorCode
     pages: int
     tags(pos: int): string
 
@@ -1388,6 +1389,10 @@ store ^books(id: int): Book
     assert!(
         value.contains("required title: string"),
         "field summary should include member type: {value}"
+    );
+    assert!(
+        value.contains("code: ErrorCode"),
+        "field summary should preserve ErrorCode spelling: {value}"
     );
     assert!(
         !value.contains("title: string required"),
