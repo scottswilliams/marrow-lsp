@@ -46,14 +46,11 @@ const STATUS_INVALID_PARAMS: &str = "invalid-params";
 const STATUS_INVALID_STATE: &str = "invalid-state";
 const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
-const STOP_POINT_FACTS: &str = "canonical stop-point facts";
-const BREAKPOINT_EXPRESSION_FACTS: &str = "canonical stop-point and breakpoint expression facts";
 const DURABLE_WATCH_PATH_FACTS: &str = "typed durable watch/path facts";
 const RAW_DATA_INSPECTION_BLOCKED: &str =
     "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
-const BREAKPOINT_VERIFICATION_BLOCKED: &str =
-    "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
-const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP conditional breakpoint inputs need launch-time Marrow stop-point/debug-expression facts";
+const BREAKPOINT_CONFIGURATION_NOT_READY: &str =
+    "breakpoint verification requires launch configuration";
 const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expression";
 const BREAKPOINT_HIT_CONDITION_INVALID: &str = "hitCondition must be a positive integer string";
 const BREAKPOINT_LOG_MESSAGE_INVALID: &str =
@@ -87,11 +84,7 @@ const ERROR_LAUNCH_STOP_ON_ENTRY_INVALID_TYPE: DapError =
 const ERROR_LAUNCH_ALREADY_CONFIGURED: DapError =
     DapError::new("dap.launch.alreadyConfigured", STATUS_INVALID_STATE);
 const ERROR_BREAKPOINT_UNVERIFIED: DapError =
-    DapError::blocked("dap.breakpoint.unverified", STOP_POINT_FACTS);
-const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
-    "dap.breakpoint.expressionBlocked",
-    BREAKPOINT_EXPRESSION_FACTS,
-);
+    DapError::new("dap.breakpoint.unverified", STATUS_INVALID_STATE);
 const ERROR_BREAKPOINT_CONDITION_INVALID: DapError =
     DapError::new("dap.breakpoint.conditionInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_HIT_CONDITION_INVALID: DapError =
@@ -178,28 +171,6 @@ impl DapError {
     }
 }
 
-#[derive(Clone, Copy)]
-enum BreakpointBlock {
-    StopPoint,
-    Expression,
-}
-
-impl BreakpointBlock {
-    fn message(self) -> &'static str {
-        match self {
-            Self::StopPoint => BREAKPOINT_VERIFICATION_BLOCKED,
-            Self::Expression => BREAKPOINT_EXPRESSION_BLOCKED,
-        }
-    }
-
-    fn contract(self) -> DapError {
-        match self {
-            Self::StopPoint => ERROR_BREAKPOINT_UNVERIFIED,
-            Self::Expression => ERROR_BREAKPOINT_EXPRESSION_BLOCKED,
-        }
-    }
-}
-
 #[derive(Clone)]
 enum BreakpointRequest {
     Valid(BreakpointSpec),
@@ -213,12 +184,6 @@ struct BreakpointSpec {
     condition: Option<String>,
     hit_target: Option<u64>,
     log_message: Option<String>,
-}
-
-impl BreakpointSpec {
-    fn needs_expression_facts(&self) -> bool {
-        self.condition.is_some()
-    }
 }
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
@@ -733,36 +698,28 @@ impl<W: Write> Session<W> {
             Some(stop_points) => {
                 self.resolved_launched_breakpoint(source, line, request, stop_points)
             }
-            None => {
-                let block = match request {
-                    BreakpointRequest::Valid(spec) if spec.needs_expression_facts() => {
-                        BreakpointBlock::Expression
-                    }
-                    BreakpointRequest::Valid(_) => BreakpointBlock::StopPoint,
-                    BreakpointRequest::InvalidCondition => {
-                        return unverified_breakpoint(
-                            line,
-                            BREAKPOINT_CONDITION_INVALID,
-                            ERROR_BREAKPOINT_CONDITION_INVALID,
-                        );
-                    }
-                    BreakpointRequest::InvalidHitCondition => {
-                        return unverified_breakpoint(
-                            line,
-                            BREAKPOINT_HIT_CONDITION_INVALID,
-                            ERROR_BREAKPOINT_HIT_CONDITION_INVALID,
-                        );
-                    }
-                    BreakpointRequest::InvalidLogMessage => {
-                        return unverified_breakpoint(
-                            line,
-                            BREAKPOINT_LOG_MESSAGE_INVALID,
-                            ERROR_BREAKPOINT_LOG_MESSAGE_INVALID,
-                        );
-                    }
-                };
-                unverified_breakpoint(line, block.message(), block.contract())
-            }
+            None => match request {
+                BreakpointRequest::Valid(_) => unverified_breakpoint(
+                    line,
+                    BREAKPOINT_CONFIGURATION_NOT_READY,
+                    ERROR_BREAKPOINT_UNVERIFIED,
+                ),
+                BreakpointRequest::InvalidCondition => unverified_breakpoint(
+                    line,
+                    BREAKPOINT_CONDITION_INVALID,
+                    ERROR_BREAKPOINT_CONDITION_INVALID,
+                ),
+                BreakpointRequest::InvalidHitCondition => unverified_breakpoint(
+                    line,
+                    BREAKPOINT_HIT_CONDITION_INVALID,
+                    ERROR_BREAKPOINT_HIT_CONDITION_INVALID,
+                ),
+                BreakpointRequest::InvalidLogMessage => unverified_breakpoint(
+                    line,
+                    BREAKPOINT_LOG_MESSAGE_INVALID,
+                    ERROR_BREAKPOINT_LOG_MESSAGE_INVALID,
+                ),
+            },
         }
     }
 
@@ -821,8 +778,8 @@ impl<W: Write> Session<W> {
     ) -> Result<CheckedDebugExpression, DapInputError> {
         let Some(analysis) = &self.analysis else {
             return Err(DapInputError::new(
-                BREAKPOINT_EXPRESSION_BLOCKED,
-                ERROR_BREAKPOINT_EXPRESSION_BLOCKED,
+                BREAKPOINT_CONFIGURATION_NOT_READY,
+                ERROR_BREAKPOINT_UNVERIFIED,
             ));
         };
         let expression = analysis
@@ -1978,6 +1935,45 @@ mod tests {
     }
 
     #[test]
+    fn conditional_breakpoint_without_analysis_reports_invalid_state() {
+        let dir = write_durable_debug_project();
+        let launch = crate::project::prepare(dir.path(), None, &[]).expect("launch");
+        let file = dir.path().join("src").join("shelf.mw");
+        let mut session = Session::new(Vec::new());
+        session.stop_points = Some(StopPointIndex::from_runtime(
+            launch.session.runtime_program(),
+        ));
+        let request = json!({ "seq": 1, "command": "setBreakpoints" });
+
+        session.on_set_breakpoints(
+            &request,
+            &json!({
+                "source": { "path": file.display().to_string() },
+                "breakpoints": [{ "line": 11, "condition": "title == \"Dune\"" }]
+            }),
+        );
+
+        let output = String::from_utf8(session.out).unwrap();
+        let (_, body) = output.split_once("\r\n\r\n").unwrap();
+        let response: Json = serde_json::from_str(body).unwrap();
+        let breakpoint = &response["body"]["breakpoints"][0];
+        assert_eq!(breakpoint["verified"], false, "{response}");
+        assert_eq!(breakpoint["line"], 11, "{response}");
+        assert_eq!(
+            breakpoint["marrowContract"]["code"], "dap.breakpoint.unverified",
+            "{response}"
+        );
+        assert_eq!(
+            breakpoint["marrowContract"]["status"], "invalid-state",
+            "{response}"
+        );
+        assert!(
+            breakpoint["marrowContract"].get("blockedOn").is_none(),
+            "{response}"
+        );
+    }
+
+    #[test]
     fn queued_terminate_cancels_staged_resume_before_wake() {
         let (mut session, seen) = session_with_running(Some(stopped_info()), None);
         let cont = json!({
@@ -2059,11 +2055,11 @@ mod tests {
             "{response}"
         );
         assert_eq!(
-            breakpoint["marrowContract"]["status"], "blocked-on-marrow",
+            breakpoint["marrowContract"]["status"], "invalid-state",
             "{response}"
         );
-        assert_eq!(
-            breakpoint["marrowContract"]["blockedOn"], "canonical stop-point facts",
+        assert!(
+            breakpoint["marrowContract"].get("blockedOn").is_none(),
             "{response}"
         );
     }

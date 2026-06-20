@@ -693,7 +693,7 @@ fn terminate_without_a_running_session_reports_not_running() {
 }
 
 #[test]
-fn prelaunch_breakpoint_inputs_return_distinct_blocked_contracts() {
+fn prelaunch_breakpoint_inputs_return_invalid_state_contracts() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
     let mut client = Client::spawn();
@@ -720,41 +720,44 @@ fn prelaunch_breakpoint_inputs_return_distinct_blocked_contracts() {
 
     assert_eq!(breakpoints[0]["verified"], false, "{response}");
     assert_eq!(breakpoints[0]["line"], 6, "{response}");
-    assert_breakpoint_marrow_contract(
+    assert_breakpoint_contract(
         &breakpoints[0],
         "dap.breakpoint.unverified",
-        "canonical stop-point facts",
+        "invalid-state",
+        None,
     );
 
     let condition = &breakpoints[1];
     assert_eq!(condition["verified"], false, "{response}");
     assert_eq!(condition["line"], 7, "{response}");
-    assert_breakpoint_marrow_contract(
+    assert_breakpoint_contract(
         condition,
-        "dap.breakpoint.expressionBlocked",
-        "canonical stop-point and breakpoint expression facts",
+        "dap.breakpoint.unverified",
+        "invalid-state",
+        None,
     );
     assert!(
         condition.get("condition").is_none()
             && condition.get("hitCondition").is_none()
             && condition.get("logMessage").is_none(),
-        "blocked breakpoint response must not echo or retain expression inputs: {condition}"
+        "pre-launch breakpoint response must not echo or retain expression inputs: {condition}"
     );
 
     for (index, line) in [(2, 8), (3, 9)] {
         let breakpoint = &breakpoints[index];
         assert_eq!(breakpoint["verified"], false, "{response}");
         assert_eq!(breakpoint["line"], line, "{response}");
-        assert_breakpoint_marrow_contract(
+        assert_breakpoint_contract(
             breakpoint,
             "dap.breakpoint.unverified",
-            "canonical stop-point facts",
+            "invalid-state",
+            None,
         );
         assert!(
             breakpoint.get("condition").is_none()
                 && breakpoint.get("hitCondition").is_none()
                 && breakpoint.get("logMessage").is_none(),
-            "blocked breakpoint response must not echo or retain expression inputs: {breakpoint}"
+            "pre-launch breakpoint response must not echo or retain expression inputs: {breakpoint}"
         );
     }
 }
@@ -791,10 +794,11 @@ fn malformed_breakpoints_return_ordered_invalid_contracts() {
     assert_eq!(breakpoints.len(), 9, "{response}");
 
     assert_eq!(breakpoints[0]["line"], 6, "{response}");
-    assert_breakpoint_marrow_contract(
+    assert_breakpoint_contract(
         &breakpoints[0],
         "dap.breakpoint.unverified",
-        "canonical stop-point facts",
+        "invalid-state",
+        None,
     );
 
     for breakpoint in &breakpoints[1..=7] {
@@ -802,10 +806,11 @@ fn malformed_breakpoints_return_ordered_invalid_contracts() {
     }
 
     assert_eq!(breakpoints[8]["line"], 7, "{response}");
-    assert_breakpoint_marrow_contract(
+    assert_breakpoint_contract(
         &breakpoints[8],
-        "dap.breakpoint.expressionBlocked",
-        "canonical stop-point and breakpoint expression facts",
+        "dap.breakpoint.unverified",
+        "invalid-state",
+        None,
     );
 }
 
@@ -920,10 +925,11 @@ fn zero_source_reference_with_path_uses_the_path_source() {
     let response = client.response_for(set);
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["body"]["breakpoints"][0]["line"], 6, "{response}");
-    assert_breakpoint_marrow_contract(
+    assert_breakpoint_contract(
         &response["body"]["breakpoints"][0],
         "dap.breakpoint.unverified",
-        "canonical stop-point facts",
+        "invalid-state",
+        None,
     );
 }
 
@@ -2001,10 +2007,11 @@ fn prelaunch_breakpoint_remains_unarmed_after_launch_prepares_stop_points() {
         }),
     );
     let response = client.response_for(set);
-    assert_breakpoint_marrow_contract(
+    assert_breakpoint_contract(
         &response["body"]["breakpoints"][0],
         "dap.breakpoint.unverified",
-        "canonical stop-point facts",
+        "invalid-state",
+        None,
     );
 
     let launch = client.request(
