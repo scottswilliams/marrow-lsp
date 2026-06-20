@@ -98,6 +98,7 @@ fn supported_use_site(site: &UseSite) -> Option<&UseSite> {
             | UseSiteKind::ResourceMember
             | UseSiteKind::StoreIndex
             | UseSiteKind::Enum
+            | UseSiteKind::EnumMember
     )
     .then_some(site)
 }
@@ -109,6 +110,7 @@ fn supported_declaration(declaration: &CatalogDeclaration) -> Option<&CatalogDec
             | CatalogEntryKind::ResourceMember
             | CatalogEntryKind::StoreIndex
             | CatalogEntryKind::Enum
+            | CatalogEntryKind::EnumMember
     )
     .then_some(declaration)
 }

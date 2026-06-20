@@ -1459,6 +1459,111 @@ fn f(): b::Status
 }
 
 #[test]
+fn catalog_definition_from_enum_member_literal_jumps_to_member_name() {
+    let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+    let app_source = "\
+module app
+use a::b
+
+fn f(): b::Status
+    return b::Status::active
+";
+    let (snapshot, paths, indices) =
+        analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+    let status_file = &paths[0];
+    let app_file = &paths[1];
+
+    let member = offset_of(app_source, "b::Status::active") + "b::Status::".len();
+    let location = super::catalog_uses::definition(&snapshot, &indices, app_file, member + 1)
+        .expect("enum member literal resolves through catalog facts");
+    let line_index = indices.0.get(status_file).unwrap();
+
+    assert_eq!(
+        range_text(status_source, line_index, location.range),
+        "active"
+    );
+}
+
+#[test]
+fn catalog_references_from_enum_member_literal_stay_on_that_member() {
+    let status_source = "\
+module a::b
+pub enum Status
+    active
+    archived
+";
+    let app_source = "\
+module app
+use a::b
+
+fn f(): b::Status
+    const current: b::Status = b::Status::active
+    return b::Status::archived
+
+fn g(): b::Status
+    return b::Status::active
+";
+    let (snapshot, paths, indices) =
+        analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
+    let status_file = &paths[0];
+    let app_file = &paths[1];
+
+    let member = offset_of(app_source, "const current: b::Status = b::Status::active")
+        + "const current: b::Status = b::Status::".len();
+    let refs = super::catalog_uses::references(&snapshot, &indices, app_file, member + 1, true)
+        .expect("enum member references resolve through catalog facts");
+    let location_text = |location: &lsp_types::Location| {
+        let path = location.uri.to_file_path().unwrap();
+        let (source, line_index) = if path == *status_file {
+            (status_source, indices.0.get(status_file).unwrap())
+        } else {
+            (app_source, indices.0.get(app_file).unwrap())
+        };
+        range_text(source, line_index, location.range)
+    };
+    let texts: Vec<&str> = refs.iter().map(location_text).collect();
+
+    assert_eq!(
+        texts,
+        vec!["active", "active", "active"],
+        "enum member references should include the declaration and matching member uses only"
+    );
+
+    let without_decl =
+        super::catalog_uses::references(&snapshot, &indices, app_file, member + 1, false).unwrap();
+    assert_eq!(
+        without_decl.len(),
+        refs.len() - 1,
+        "excluding the declaration drops only the enum member declaration"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| *text != "Status" && *text != "archived"),
+        "enum member references should not include enum heads or sibling members: {texts:?}"
+    );
+
+    let declaration = offset_of(status_source, "    active") + "    ".len();
+    let from_declaration =
+        super::catalog_uses::references(&snapshot, &indices, status_file, declaration + 1, true)
+            .expect("enum member declaration resolves through catalog facts");
+    assert_eq!(
+        from_declaration, refs,
+        "references from the enum member declaration should return the same locations"
+    );
+    let declaration_texts: Vec<&str> = from_declaration.iter().map(location_text).collect();
+    assert_eq!(
+        declaration_texts, texts,
+        "references from the enum member declaration should follow the same catalog id"
+    );
+}
+
+#[test]
 fn references_from_enum_literal_prefix_stay_on_binding_index() {
     let status_source = "\
 module a::b
