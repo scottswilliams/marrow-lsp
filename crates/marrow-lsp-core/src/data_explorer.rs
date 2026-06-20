@@ -24,20 +24,20 @@ use crate::store::{Availability, LiveStore};
 
 pub const DATA_CHILDREN_PAGE_LIMIT: usize = 200;
 
-/// `marrow/savedRoots` reply: the saved root names, plus whether the store could
+/// `marrow/savedRoots` reply: the saved root views, plus whether the store could
 /// be read. When `available` is false the roots are empty and the tree view shows
 /// an unavailable state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SavedRootsResult {
     pub available: bool,
-    pub roots: Vec<String>,
+    pub roots: Vec<DataChildViewDto>,
     pub store_snapshot: Option<DataSnapshotJson>,
 }
 
 /// Handle `marrow/savedRoots`. A `None` reader (no native store configured) or an
 /// unavailable store both answer `available: false` with no roots.
 pub fn saved_roots(reader: Option<&LiveStore>, program: &CheckedProgram) -> SavedRootsResult {
-    match reader.map(|reader| reader.roots(program)) {
+    match reader.map(|reader| reader.root_views(program)) {
         Some(Availability::Available(stamped)) => SavedRootsResult {
             available: true,
             roots: stamped.data,

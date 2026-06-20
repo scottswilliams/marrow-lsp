@@ -1324,7 +1324,16 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
     let result = saved_roots(&file, true);
 
     assert_eq!(result["available"], true, "{result}");
-    assert_eq!(result["roots"], json!(["counter"]), "{result}");
+    assert_eq!(
+        result["roots"],
+        json!([
+            {
+                "segment": { "kind": "root", "value": "counter" },
+                "label": "counter"
+            }
+        ]),
+        "{result}"
+    );
     assert_store_snapshot(&result["store_snapshot"]);
     assert_contract(
         &result,

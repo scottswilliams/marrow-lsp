@@ -546,7 +546,7 @@ fn store_stamp_json(stamp: StoreStamp) -> Json {
     })
 }
 
-/// `mw_saved_roots`: the project's durable saved root names, read through a
+/// `mw_saved_roots`: the project's durable saved root views, read through a
 /// short-lived [`LiveStore`]. Gated: with `allow_data = false` the function
 /// returns a refusal envelope and never opens the store. A project with no native
 /// store, or a store that cannot be read right now, answers `available: false`.

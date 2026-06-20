@@ -1564,7 +1564,15 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
     let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
     assert!(response.get("error").is_none(), "no error: {response:?}");
     assert_eq!(response["result"]["available"], true);
-    assert_eq!(response["result"]["roots"], json!(["counter"]));
+    assert_eq!(
+        response["result"]["roots"],
+        json!([
+            {
+                "segment": { "kind": "root", "value": "counter" },
+                "label": "counter"
+            }
+        ])
+    );
     assert_store_snapshot(&response["result"]["store_snapshot"]);
 
     send(

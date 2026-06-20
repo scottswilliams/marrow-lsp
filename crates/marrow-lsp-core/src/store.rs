@@ -9,8 +9,8 @@ use marrow_store::StoreError;
 use marrow_store::tree::TreeStore;
 
 use crate::data_explorer::{
-    DataChildViewsResult, DataChildrenError, DataChildrenRequest, DataChildrenResult,
-    DataReadRequest, DataReadResult,
+    DataChildViewDto, DataChildViewsResult, DataChildrenError, DataChildrenRequest,
+    DataChildrenResult, DataReadRequest, DataReadResult,
 };
 use crate::workspace::Project;
 
@@ -39,11 +39,23 @@ impl LiveStore {
         }
     }
 
-    pub fn roots(
+    pub fn root_views(
         &self,
         program: &CheckedProgram,
-    ) -> Availability<tooling::StampedData<Vec<String>>> {
-        self.with_tree_result(|store| tooling::stamped_data_roots_in_store(program, store))
+    ) -> Availability<tooling::StampedData<Vec<DataChildViewDto>>> {
+        self.with_tree_result(|store| {
+            tooling::stamped_data_roots_in_store(program, store).map(|stamped| {
+                let data = stamped
+                    .data
+                    .into_iter()
+                    .map(|root| DataChildViewDto::from(tooling::DataChild::Root(root)))
+                    .collect();
+                tooling::StampedData {
+                    data,
+                    stamp: stamped.stamp,
+                }
+            })
+        })
     }
 
     pub fn data_children_page(

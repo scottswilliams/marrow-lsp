@@ -69,7 +69,7 @@ impl Backend {
         LiveStore::for_project(workspace.project()?)
     }
 
-    /// `marrow/savedRoots`: the project's saved root names. Requires a fresh
+    /// `marrow/savedRoots`: the project's saved root views. Requires a fresh
     /// checked program and never recomputes the project.
     pub async fn saved_roots(&self) -> jsonrpc::Result<SavedRootsResult> {
         let state = self.state.lock().await;

@@ -62,8 +62,8 @@ function installVscodeStub() {
 
 function makeClient() {
   const calls = [];
-  const rootPath = [{ kind: "root", value: "Root" }];
-  const staleRootPath = [{ kind: "root", value: "StaleRoot" }];
+  const rootPath = [{ kind: "root", value: "root-id" }];
+  const staleRootPath = [{ kind: "root", value: "stale-root-id" }];
   const bytesKeyPath = [
     ...rootPath,
     { kind: "key", value: { kind: "bytes", value: [10] } },
@@ -77,7 +77,14 @@ function makeClient() {
       calls.push({ method, params });
       if (method === "marrow/savedRoots") {
         assert.equal(params, undefined);
-        return { available: true, roots: ["Root", "StaleRoot"], store_snapshot: baseSnapshot };
+        return {
+          available: true,
+          roots: [
+            { segment: rootPath[0], label: "Root" },
+            { segment: staleRootPath[0], label: "StaleRoot" },
+          ],
+          store_snapshot: baseSnapshot,
+        };
       }
       if (method === "marrow/dataChildren") {
         if (deepEqual(params.segments, rootPath) && params.cursor === null) {
@@ -254,13 +261,23 @@ try {
   const roots = await provider.getChildren();
   assert.equal(roots.length, 2);
 
-  assert.deepEqual(roots[0], { kind: "root", label: "Root", snapshot: baseSnapshot });
-  assert.deepEqual(roots[1], { kind: "root", label: "StaleRoot", snapshot: baseSnapshot });
+  assert.deepEqual(roots[0], {
+    kind: "root",
+    label: "Root",
+    segment: { kind: "root", value: "root-id" },
+    snapshot: baseSnapshot,
+  });
+  assert.deepEqual(roots[1], {
+    kind: "root",
+    label: "StaleRoot",
+    segment: { kind: "root", value: "stale-root-id" },
+    snapshot: baseSnapshot,
+  });
   const keys = await provider.getChildren(roots[0]);
   assert.equal(keys.length, 4);
   assert.equal(keys[0].label, "server-rendered-bytes-key");
   assert.deepEqual(keys[0].segments, [
-    { kind: "root", value: "Root" },
+    { kind: "root", value: "root-id" },
     { kind: "key", value: { kind: "bytes", value: [10] } },
   ]);
   assert.deepEqual(keys[0].snapshot, baseSnapshot);
@@ -269,7 +286,7 @@ try {
   assert.deepEqual(keys[3], {
     kind: "more",
     label: "more children",
-    segments: [{ kind: "root", value: "Root" }],
+    segments: [{ kind: "root", value: "root-id" }],
     cursor: { kind: "int", value: 200 },
     snapshot: baseSnapshot,
   });
@@ -284,7 +301,7 @@ try {
   assert.deepEqual(client.calls.at(-1), {
     method: "marrow/dataChildren",
     params: {
-      segments: [{ kind: "root", value: "Root" }],
+      segments: [{ kind: "root", value: "root-id" }],
       limit: 200,
       cursor: { kind: "int", value: 200 },
     },
@@ -297,7 +314,7 @@ try {
   assert.equal(terminalItem.collapsibleState, 0, "cursor-less truncation should not expand");
 
   const layerPath = [
-    { kind: "root", value: "Root" },
+    { kind: "root", value: "root-id" },
     { kind: "layer", value: "history" },
   ];
   const layerChildren = await provider.getChildren(keys[1]);
@@ -314,7 +331,7 @@ try {
   const fields = await provider.getChildren(keys[0]);
   assert.equal(fields.length, 1);
   assert.deepEqual(fields[0].segments, [
-    { kind: "root", value: "Root" },
+    { kind: "root", value: "root-id" },
     { kind: "key", value: { kind: "bytes", value: [10] } },
     { kind: "field", value: "value" },
   ]);

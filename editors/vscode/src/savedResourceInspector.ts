@@ -3,7 +3,7 @@ import { LanguageClient } from "vscode-languageclient/node";
 
 interface SavedRootsResult {
   available: boolean;
-  roots: string[];
+  roots: SavedRootView[];
   store_snapshot: StoreSnapshot | null;
 }
 
@@ -11,8 +11,10 @@ type StoreSnapshot = JsonObject;
 type JsonObject = { readonly [key: string]: JsonValue };
 type JsonValue = string | number | boolean | null | JsonObject | readonly JsonValue[];
 
+type DataRootSegment = { readonly kind: "root"; readonly value: string };
+
 type DataPathSegment =
-  | { readonly kind: "root"; readonly value: string }
+  | DataRootSegment
   | { readonly kind: "field"; readonly value: string }
   | { readonly kind: "layer"; readonly value: string }
   | { readonly kind: "key"; readonly value: DataKey };
@@ -28,6 +30,11 @@ type DataKey =
 
 interface DataChildView {
   readonly segment: DataPathSegment;
+  readonly label: string;
+}
+
+interface SavedRootView {
+  readonly segment: DataRootSegment;
   readonly label: string;
 }
 
@@ -70,6 +77,7 @@ type SavedResourceNode =
 interface SavedRootNode {
   readonly kind: "root";
   readonly label: string;
+  readonly segment: DataRootSegment;
   readonly snapshot: StoreSnapshot | null;
 }
 
@@ -138,7 +146,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
   async getChildren(node?: SavedResourceNode): Promise<SavedResourceNode[]> {
     if (node !== undefined) {
       if (node.kind === "root") {
-        return this.getDataChildren([{ kind: "root", value: node.label }], null, node.snapshot);
+        return this.getDataChildren([node.segment], null, node.snapshot);
       }
       if (node.kind === "segment") {
         return this.getSegmentChildren(node);
@@ -164,7 +172,8 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     return result.roots.map(
       (root): SavedRootNode => ({
         kind: "root",
-        label: root,
+        label: root.label,
+        segment: root.segment,
         snapshot: result.store_snapshot,
       }),
     );
