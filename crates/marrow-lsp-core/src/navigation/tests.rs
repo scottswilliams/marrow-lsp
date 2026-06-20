@@ -638,7 +638,7 @@ evolve
 }
 
 #[test]
-fn module_path_prefix_definition_from_imported_call_is_blocked_without_canonical_fact() {
+fn module_path_alias_prefix_definition_from_imported_call_jumps_to_use_leaf() {
     let books_source = "\
 module shelf::books
 
@@ -659,12 +659,18 @@ pub fn run(): string
     ]);
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
+    let app_index = indices.0.get(app_file).unwrap();
 
     let prefix = offset_of(app_source, "return books::titleOf") + "return ".len();
-    assert_eq!(
-        definition(&snapshot, &index, &indices, app_file, prefix + 1),
-        None
-    );
+    let location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+        .expect("imported alias prefix resolves through the binding index");
+
+    assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+    assert_eq!(range_text(app_source, app_index, location.range), "books");
+    let import_leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
+    let (line, character) = line_col(app_source, import_leaf);
+    assert_eq!(location.range.start.line, line);
+    assert_eq!(location.range.start.character, character);
 }
 
 #[test]
@@ -809,7 +815,7 @@ pub fn make_local()
 }
 
 #[test]
-fn module_path_definition_from_use_leaf_is_blocked_without_canonical_fact() {
+fn module_path_alias_definition_from_use_leaf_can_resolve_to_itself() {
     let books_source = "\
 module shelf::books
 
@@ -830,12 +836,73 @@ pub fn run(): string
     ]);
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
+    let app_index = indices.0.get(app_file).unwrap();
 
     let imported_leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
-    assert_eq!(
-        definition(&snapshot, &index, &indices, app_file, imported_leaf + 1),
-        None,
-        "module/use path segments stay unavailable until Marrow exposes canonical module-path facts"
+    let location = definition(&snapshot, &index, &indices, app_file, imported_leaf + 1)
+        .expect("use leaf aliases can resolve to their own binding fact");
+
+    assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+    assert_eq!(range_text(app_source, app_index, location.range), "books");
+    let (line, character) = line_col(app_source, imported_leaf);
+    assert_eq!(location.range.start.line, line);
+    assert_eq!(location.range.start.character, character);
+}
+
+#[test]
+fn module_path_references_from_imported_module_alias_include_definition_and_prefix_uses() {
+    let books_source = "\
+module shelf::books
+
+resource Book
+    required title: string
+
+pub fn titleOf(): string
+    return \"Dune\"
+";
+    let app_source = "\
+module shelf::app
+
+use shelf::books
+
+fn run(items: sequence[books::Book]): string
+    return books::titleOf()
+";
+    let (snapshot, paths, indices) = analyze_files(&[
+        ("shelf/books.mw", books_source),
+        ("shelf/app.mw", app_source),
+    ]);
+    let app_file = &paths[1];
+    let index = build_binding_index(&snapshot);
+    let app_index = indices.0.get(app_file).unwrap();
+
+    let call_alias = offset_of(app_source, "return books::titleOf") + "return ".len();
+    let with = references(&snapshot, &index, &indices, app_file, call_alias + 1, true)
+        .expect("module alias references resolve through the binding index");
+    let without = references(&snapshot, &index, &indices, app_file, call_alias + 1, false)
+        .expect("module alias references resolve through the binding index");
+    let with_texts: Vec<&str> = with
+        .iter()
+        .map(|location| range_text(app_source, app_index, location.range))
+        .collect();
+    let without_texts: Vec<&str> = without
+        .iter()
+        .map(|location| range_text(app_source, app_index, location.range))
+        .collect();
+
+    assert_eq!(with_texts, vec!["books", "books", "books"]);
+    assert_eq!(without_texts, vec!["books", "books"]);
+
+    let import_leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
+    let declaration_range = range_for(app_source, import_leaf, import_leaf + "books".len());
+    assert!(
+        with.iter()
+            .any(|location| location.range == declaration_range)
+    );
+    assert!(
+        without
+            .iter()
+            .all(|location| location.range != declaration_range)
     );
 }
 
@@ -869,7 +936,7 @@ pub fn run(): instant
 }
 
 #[test]
-fn module_path_prefix_definition_for_aliased_std_path_returns_none() {
+fn module_path_alias_prefix_definition_for_aliased_std_path_jumps_to_use_leaf() {
     let clock_source = "\
 module std::clock
 
@@ -887,14 +954,18 @@ pub fn run(): instant
         analyze_files(&[("std/clock.mw", clock_source), ("shelf/app.mw", app_source)]);
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
+    let app_index = indices.0.get(app_file).unwrap();
 
     let std_clock = offset_of(app_source, "clock::now");
-    let location = definition(&snapshot, &index, &indices, app_file, std_clock + 1);
+    let location = definition(&snapshot, &index, &indices, app_file, std_clock + 1)
+        .expect("imported std alias prefix resolves through the binding index");
 
-    assert_eq!(
-        location, None,
-        "aliased std module prefixes must not fabricate a project location"
-    );
+    assert_eq!(location.uri, Url::from_file_path(app_file).unwrap());
+    assert_eq!(range_text(app_source, app_index, location.range), "clock");
+    let import_leaf = offset_of(app_source, "use std::clock") + "use std::".len();
+    let (line, character) = line_col(app_source, import_leaf);
+    assert_eq!(location.range.start.line, line);
+    assert_eq!(location.range.start.character, character);
 }
 
 #[test]
@@ -1059,12 +1130,20 @@ pub fn run(): int
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
     let book_index = indices.0.get(book_file).unwrap();
+    let app_index = indices.0.get(app_file).unwrap();
 
     let prefix = offset_of(app_source, "return book::lookup") + "return ".len();
+    let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+        .expect("imported module alias wins over same-named local resource at the prefix");
+    assert_eq!(prefix_location.uri, Url::from_file_path(app_file).unwrap());
     assert_eq!(
-        definition(&snapshot, &index, &indices, app_file, prefix + 1),
-        None
+        range_text(app_source, app_index, prefix_location.range),
+        "book"
     );
+    let import_leaf = offset_of(app_source, "use shelf::book") + "use shelf::".len();
+    let (line, character) = line_col(app_source, import_leaf);
+    assert_eq!(prefix_location.range.start.line, line);
+    assert_eq!(prefix_location.range.start.character, character);
 
     let leaf = offset_of(app_source, "return book::lookup") + "return book::".len();
     let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
@@ -1077,7 +1156,7 @@ pub fn run(): int
 }
 
 #[test]
-fn module_path_definition_keeps_imported_function_without_identity_binding_fact() {
+fn module_path_alias_prefix_and_function_leaf_use_binding_index_facts() {
     let book_source = "\
 module shelf::book
 
@@ -1098,12 +1177,20 @@ pub fn run(): int
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
     let book_index = indices.0.get(book_file).unwrap();
+    let app_index = indices.0.get(app_file).unwrap();
 
     let prefix = offset_of(app_source, "return book::lookup") + "return ".len();
+    let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+        .expect("imported module alias prefix resolves through the binding index");
+    assert_eq!(prefix_location.uri, Url::from_file_path(app_file).unwrap());
     assert_eq!(
-        definition(&snapshot, &index, &indices, app_file, prefix + 1),
-        None
+        range_text(app_source, app_index, prefix_location.range),
+        "book"
     );
+    let import_leaf = offset_of(app_source, "use shelf::book") + "use shelf::".len();
+    let (line, character) = line_col(app_source, import_leaf);
+    assert_eq!(prefix_location.range.start.line, line);
+    assert_eq!(prefix_location.range.start.character, character);
 
     let leaf = offset_of(app_source, "book::lookup") + "book::".len();
     let leaf_location = definition(&snapshot, &index, &indices, app_file, leaf + 1)
@@ -1145,13 +1232,21 @@ pub fn run(): int
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
     let book_index = indices.0.get(book_file).unwrap();
+    let app_index = indices.0.get(app_file).unwrap();
 
     let prefix =
         offset_of(app_source, "return wrap(value: book::lookup") + "return wrap(value: ".len();
+    let prefix_location = definition(&snapshot, &index, &indices, app_file, prefix + 1)
+        .expect("named argument call prefix resolves through the binding index");
+    assert_eq!(prefix_location.uri, Url::from_file_path(app_file).unwrap());
     assert_eq!(
-        definition(&snapshot, &index, &indices, app_file, prefix + 1),
-        None
+        range_text(app_source, app_index, prefix_location.range),
+        "book"
     );
+    let import_leaf = offset_of(app_source, "use shelf::book") + "use shelf::".len();
+    let (line, character) = line_col(app_source, import_leaf);
+    assert_eq!(prefix_location.range.start.line, line);
+    assert_eq!(prefix_location.range.start.character, character);
 
     let leaf = offset_of(app_source, "return wrap(value: book::lookup")
         + "return wrap(value: book::".len();
@@ -1221,7 +1316,7 @@ pub fn run(): string
 }
 
 #[test]
-fn module_path_prefix_definition_blocks_keyword_like_segments_without_canonical_fact() {
+fn module_path_prefix_definition_blocks_keyword_like_segments_without_binding_fact() {
     let bytes_source = "\
 module shelf::bytes
 

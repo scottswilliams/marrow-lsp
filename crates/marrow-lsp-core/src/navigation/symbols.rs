@@ -6,7 +6,7 @@ use marrow_check::{BindingIndex, RenameSafety, SymbolRef};
 use super::{
     catalog_uses,
     indices::FileIndex,
-    module_paths::{self, ModulePathDefinition},
+    saved_roots,
     source_names::{is_valid_rename, name_in_span, name_in_span_at, symbol_name},
 };
 
@@ -48,15 +48,10 @@ pub fn definition(
     file: &Path,
     offset: usize,
 ) -> Option<Location> {
-    match module_paths::definition(snapshot, index, indices, file, offset) {
-        Some(ModulePathDefinition::Location(location)) => return Some(location),
-        Some(ModulePathDefinition::NoDefinition) => return None,
-        None => {}
-    }
     if let Some(location) = catalog_uses::definition(snapshot, indices, file, offset) {
         return Some(location);
     }
-    if module_paths::saved_root_syntax_at(snapshot, file, offset) {
+    if saved_roots::root_syntax_at(snapshot, file, offset) {
         return None;
     }
     let symbol = index.definition(file, offset)?;
