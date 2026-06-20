@@ -327,6 +327,20 @@ fn assert_runtime_debug_value(value: &Json) {
     );
 }
 
+fn assert_evaluate_runtime_debug_value(response: &Json, result: &str, variables_reference: i64) {
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["body"]["result"], result, "{response}");
+    assert_eq!(
+        response["body"]["variablesReference"], variables_reference,
+        "{response}"
+    );
+    assert_runtime_debug_value(&response["body"]);
+    assert!(
+        response["body"].get("marrowError").is_none(),
+        "successful evaluate responses should not carry an error contract: {response}"
+    );
+}
+
 fn assert_response_marrow_error(
     response: &Json,
     code: &str,
@@ -911,10 +925,10 @@ fn valid_evaluate_envelopes_keep_blocked_contracts() {
         json!({ "expression": "title", "context": "clipboard" }),
     );
     let unknown_context = client.response_for(unknown_context);
-    assert_blocked_response(
+    assert_evaluate_envelope_error(
         &unknown_context,
-        "dap.evaluate.blocked",
-        "canonical expression/evaluate facts",
+        "dap.evaluate.contextInvalid",
+        "invalid-params",
     );
 
     let whitespace = client.request(
@@ -922,10 +936,10 @@ fn valid_evaluate_envelopes_keep_blocked_contracts() {
         json!({ "expression": "   ", "context": "watch" }),
     );
     let whitespace = client.response_for(whitespace);
-    assert_blocked_response(
+    assert_evaluate_envelope_error(
         &whitespace,
-        "dap.evaluate.blocked",
-        "canonical expression/evaluate facts",
+        "dap.evaluate.expressionInvalid",
+        "invalid-params",
     );
 
     let hover = client.request(
@@ -1678,20 +1692,23 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
     assert_eq!(title["value"], "Dune", "{locals}");
     assert_runtime_debug_value(title);
 
-    // Locals remain available through the Locals scope, but watch/REPL
-    // expression evaluation waits for canonical Marrow evaluate facts.
-    for expression in ["title", "_x1", "1 + 1"] {
-        let blocked = client.request(
-            "evaluate",
-            json!({ "expression": expression, "context": "watch" }),
-        );
-        let blocked = client.response_for(blocked);
-        assert_blocked_response(
-            &blocked,
-            "dap.evaluate.blocked",
-            "canonical expression/evaluate facts",
-        );
-    }
+    let title = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "watch" }),
+    );
+    let title = client.response_for(title);
+    assert_evaluate_runtime_debug_value(&title, "Dune", 0);
+
+    let addition = client.request("evaluate", json!({ "expression": "1 + 1" }));
+    let addition = client.response_for(addition);
+    assert_evaluate_runtime_debug_value(&addition, "2", 0);
+
+    let invalid = client.request(
+        "evaluate",
+        json!({ "expression": "_x1", "context": "repl" }),
+    );
+    let invalid = client.response_for(invalid);
+    assert_evaluate_envelope_error(&invalid, "dap.evaluate.expressionInvalid", "invalid-params");
 
     let durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
     let durable_variables = client.response_for(durable_variables);
@@ -1710,18 +1727,6 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
         &watch,
         "dap.durableData.blocked",
         "typed durable watch/path facts",
-    );
-
-    // A non-^ expression is refused at the session boundary.
-    let bad = client.request(
-        "evaluate",
-        json!({ "expression": "1 + 1", "context": "watch" }),
-    );
-    let bad = client.response_for(bad);
-    assert_blocked_response(
-        &bad,
-        "dap.evaluate.blocked",
-        "canonical expression/evaluate facts",
     );
 
     // continue to termination: expect the print output and a terminated event.
@@ -2050,12 +2055,89 @@ fn expression_breakpoint_does_not_stop_without_stop_on_entry() {
         }),
     );
     let response = client.response_for(set);
-    assert_eq!(response["body"]["breakpoints"][0]["verified"], false);
-    assert_breakpoint_marrow_contract(
-        &response["body"]["breakpoints"][0],
-        "dap.breakpoint.expressionBlocked",
-        "canonical stop-point and breakpoint expression facts",
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    client.event("terminated");
+}
+
+#[test]
+fn false_conditional_breakpoint_verifies_but_does_not_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
     );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6, "condition": "title == \"Other\"" }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn invalid_conditional_breakpoints_are_not_armed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [
+                { "line": 6, "condition": "1" },
+                { "line": 6, "condition": "missing_name" },
+            ],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 2, "{response}");
+    for breakpoint in breakpoints {
+        assert_eq!(breakpoint["verified"], false, "{response}");
+        assert_eq!(breakpoint["line"], 6, "{response}");
+        assert_breakpoint_contract(
+            breakpoint,
+            "dap.breakpoint.conditionInvalid",
+            "invalid-params",
+            None,
+        );
+    }
 
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
@@ -2428,11 +2510,7 @@ fn durable_data_inspection_is_blocked_by_default() {
         json!({ "expression": "title", "context": "watch" }),
     );
     let local_watch = client.response_for(local_watch);
-    assert_blocked_response(
-        &local_watch,
-        "dap.evaluate.blocked",
-        "canonical expression/evaluate facts",
-    );
+    assert_evaluate_runtime_debug_value(&local_watch, "Dune", 0);
 
     let durable_watch = client.request(
         "evaluate",
@@ -2473,11 +2551,11 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_initialize_capability()
         response["body"]["supportsEvaluateForHovers"], true,
         "hover evaluation must not be advertised until Marrow exposes canonical evaluate facts: {response}"
     );
-    for capability in [
-        "supportsConditionalBreakpoints",
-        "supportsHitConditionalBreakpoints",
-        "supportsLogPoints",
-    ] {
+    assert_eq!(
+        response["body"]["supportsConditionalBreakpoints"], true,
+        "conditional breakpoints are now backed by checked Marrow debug expressions: {response}"
+    );
+    for capability in ["supportsHitConditionalBreakpoints", "supportsLogPoints"] {
         assert_ne!(
             response["body"][capability], true,
             "{capability} must not be advertised until Marrow exposes canonical breakpoint facts: {response}"

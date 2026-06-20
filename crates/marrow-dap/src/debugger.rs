@@ -21,11 +21,13 @@
 //! rolling back any open transaction. The frame borrow is thus confined to one
 //! thread by construction; the channels carry only `Send` owned data.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
-use marrow_run::{DebugValue, Frame, RuntimeError, StepHook};
+use marrow_check::CheckedDebugExpression;
+use marrow_run::{DebugValue, Frame, RuntimeError, StepHook, Value};
+use marrow_syntax::Diagnose;
 
 use crate::step::{self, Resume, StopReason};
 use crate::variables::{self, ChildPage, VariablesFilter};
@@ -68,17 +70,47 @@ pub struct StopInfo {
 
 #[derive(Debug, Clone, Default)]
 pub struct ArmedBreakpoints {
-    lines_by_file: HashMap<PathBuf, HashSet<u32>>,
+    breakpoints_by_file: HashMap<PathBuf, Vec<ArmedBreakpoint>>,
 }
 
 impl ArmedBreakpoints {
-    pub fn insert(&mut self, file: PathBuf, line: u32) {
-        self.lines_by_file.entry(file).or_default().insert(line);
+    pub fn insert(&mut self, file: PathBuf, line: u32, condition: Option<CheckedDebugExpression>) {
+        let breakpoints = self.breakpoints_by_file.entry(file).or_default();
+        let breakpoint = ArmedBreakpoint { line, condition };
+        if !breakpoints.contains(&breakpoint) {
+            breakpoints.push(breakpoint);
+        }
     }
 
-    fn contains(&self, file: Option<&Path>, line: u32) -> bool {
-        file.and_then(|file| self.lines_by_file.get(file))
-            .is_some_and(|lines| lines.contains(&line))
+    fn should_stop(&self, frame: &Frame<'_, '_>, line: u32) -> bool {
+        frame
+            .file()
+            .and_then(|file| self.breakpoints_by_file.get(file))
+            .is_some_and(|breakpoints| {
+                breakpoints
+                    .iter()
+                    .any(|breakpoint| breakpoint.matches(frame, line))
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArmedBreakpoint {
+    line: u32,
+    condition: Option<CheckedDebugExpression>,
+}
+
+impl ArmedBreakpoint {
+    fn matches(&self, frame: &Frame<'_, '_>, line: u32) -> bool {
+        if self.line != line {
+            return false;
+        }
+        let Some(condition) = &self.condition else {
+            return true;
+        };
+        frame
+            .evaluate_debug_expression(condition)
+            .is_ok_and(|value| value == DebugValue::from_value(Value::Bool(true)))
     }
 }
 
@@ -91,12 +123,33 @@ pub enum Query {
         page: ChildPage,
         filter: VariablesFilter,
     },
+    /// Evaluate a checked debug expression at the current stop.
+    Evaluate {
+        expression: Box<CheckedDebugExpression>,
+    },
 }
 
 /// The answer to a [`Query`], owned and `Send`.
 #[derive(Debug)]
 pub enum QueryResult {
     Locals(LocalsSnapshot),
+    Evaluate(Result<DebugValue, RuntimeErrorDetail>),
+}
+
+/// The stable runtime-error detail carried back to the protocol thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+impl From<RuntimeError> for RuntimeErrorDetail {
+    fn from(error: RuntimeError) -> Self {
+        Self {
+            code: error.code().to_string(),
+            message: error.message().to_string(),
+        }
+    }
 }
 
 /// A control message from the protocol thread to the parked run-thread.
@@ -166,15 +219,11 @@ impl Debugger {
     /// Capture the locals at the current frame as owned, `Send` data.
     fn snapshot_locals(
         frame: &Frame<'_, '_>,
-        span: marrow_syntax::SourceSpan,
         page: ChildPage,
         filter: VariablesFilter,
     ) -> LocalsSnapshot {
-        let snapshot = frame.debug_snapshot(
-            span,
-            page.to_debug_value_page(),
-            filter.to_debug_value_filter(),
-        );
+        let snapshot =
+            frame.debug_snapshot(page.to_debug_value_page(), filter.to_debug_value_filter());
         let entries = variables::local_children(snapshot.locals)
             .into_iter()
             .map(|child| LocalVar {
@@ -195,13 +244,18 @@ impl Debugger {
     fn answer(
         &self,
         frame: &Frame<'_, '_>,
-        span: marrow_syntax::SourceSpan,
+        _span: marrow_syntax::SourceSpan,
         query: Query,
     ) -> QueryResult {
         match query {
             Query::Locals { page, filter } => {
-                QueryResult::Locals(Self::snapshot_locals(frame, span, page, filter))
+                QueryResult::Locals(Self::snapshot_locals(frame, page, filter))
             }
+            Query::Evaluate { expression } => QueryResult::Evaluate(
+                frame
+                    .evaluate_debug_expression(expression.as_ref())
+                    .map_err(RuntimeErrorDetail::from),
+            ),
         }
     }
 
@@ -247,7 +301,7 @@ impl StepHook for Debugger {
             Some(StopReason::Entry)
         } else if let Some(reason) = step::decide(self.mode, depth) {
             Some(reason)
-        } else if self.breakpoints.contains(frame.file(), span.line) {
+        } else if self.breakpoints.should_stop(&frame, span.line) {
             Some(StopReason::Breakpoint)
         } else {
             None

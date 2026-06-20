@@ -6,13 +6,15 @@
 //! as [`Query`] messages and answered from owned data. The session never borrows
 //! the runtime frame — that lives only on the run-thread.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
-use marrow_run::{EntryArgument, EntryInvocation};
+use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType};
+use marrow_run::{DebugValue, EntryArgument, EntryInvocation};
+use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
 
 use crate::debugger::{ArmedBreakpoints, Control, Query, QueryResult, RunEvent, StopInfo};
@@ -40,15 +42,14 @@ const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
 const STOP_POINT_FACTS: &str = "canonical stop-point facts";
 const BREAKPOINT_EXPRESSION_FACTS: &str = "canonical stop-point and breakpoint expression facts";
-const EXPRESSION_EVALUATE_FACTS: &str = "canonical expression/evaluate facts";
 const HOVER_EVALUATE_FACTS: &str = "canonical evaluate facts";
 const DURABLE_WATCH_PATH_FACTS: &str = "typed durable watch/path facts";
 const RAW_DATA_INSPECTION_BLOCKED: &str =
     "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
-const EXPRESSION_EVALUATE_BLOCKED: &str = "blocked-on-marrow: DAP watch/REPL evaluate needs canonical expression/evaluate facts from Marrow";
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
-const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP conditional/hit-condition/logpoint breakpoints need canonical stop-point and breakpoint expression facts from Marrow";
+const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP breakpoint expression inputs need launch-time Marrow stop-point/debug-expression facts; hit-condition and logpoint inputs are not supported";
+const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expression";
 const BREAKPOINT_SOURCE_INVALID: &str = "missing or invalid breakpoint source";
 const BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: &str =
     "DAP sourceReference breakpoint sources are not supported";
@@ -85,6 +86,8 @@ const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
     "dap.breakpoint.expressionBlocked",
     BREAKPOINT_EXPRESSION_FACTS,
 );
+const ERROR_BREAKPOINT_CONDITION_INVALID: DapError =
+    DapError::new("dap.breakpoint.conditionInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_SOURCE_INVALID: DapError =
     DapError::new("dap.breakpoint.sourceInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: DapError = DapError::new(
@@ -104,12 +107,12 @@ const ERROR_DURABLE_DATA_BLOCKED: DapError =
     DapError::blocked("dap.durableData.blocked", DURABLE_WATCH_PATH_FACTS);
 const ERROR_NOT_RUNNING: DapError = DapError::new("dap.notRunning", STATUS_INVALID_STATE);
 const ERROR_NOT_STOPPED: DapError = DapError::new("dap.notStopped", STATUS_INVALID_STATE);
-const ERROR_EVALUATE_BLOCKED: DapError =
-    DapError::blocked("dap.evaluate.blocked", EXPRESSION_EVALUATE_FACTS);
 const ERROR_EVALUATE_EXPRESSION_INVALID: DapError =
     DapError::new("dap.evaluate.expressionInvalid", STATUS_INVALID_PARAMS);
 const ERROR_EVALUATE_CONTEXT_INVALID: DapError =
     DapError::new("dap.evaluate.contextInvalid", STATUS_INVALID_PARAMS);
+const ERROR_EVALUATE_RUNTIME: DapError =
+    DapError::new("dap.evaluate.runtimeError", STATUS_RUNTIME_ERROR);
 const ERROR_HOVER_EVALUATE_BLOCKED: DapError =
     DapError::blocked("dap.hoverEvaluate.blocked", HOVER_EVALUATE_FACTS);
 const ERROR_VARIABLES_REFERENCE_INVALID: DapError =
@@ -189,10 +192,17 @@ impl BreakpointBlock {
     }
 }
 
+#[derive(Clone)]
+enum BreakpointRequest {
+    Plain,
+    Condition(String),
+    Blocked(BreakpointBlock),
+}
+
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
 #[derive(Clone)]
 enum Expandable {
-    Local(marrow_run::DebugValue),
+    Value(DebugValue),
 }
 
 /// The live run-thread plus the channels to drive it.
@@ -213,6 +223,7 @@ pub struct Session<W: Write> {
     running: Option<Running>,
     /// Pending launch captured between `launch` and `configurationDone`.
     pending: Option<PendingLaunch>,
+    analysis: Option<AnalysisSnapshot>,
     stop_points: Option<StopPointIndex>,
     breakpoints: HashMap<PathBuf, Vec<RequestedBreakpoint>>,
     supports_variable_paging: bool,
@@ -235,7 +246,10 @@ struct PendingLaunch {
 
 #[derive(Clone)]
 enum RequestedBreakpoint {
-    Valid { line: u32, block: BreakpointBlock },
+    Valid {
+        line: u32,
+        request: BreakpointRequest,
+    },
     InvalidLine,
 }
 
@@ -246,7 +260,13 @@ enum BreakpointSource {
 
 #[derive(Clone, Default)]
 struct StopPointIndex {
-    runtime_files_by_canonical_file: HashMap<PathBuf, HashMap<u32, HashSet<PathBuf>>>,
+    stops_by_canonical_file: HashMap<PathBuf, HashMap<u32, Vec<RuntimeStop>>>,
+}
+
+#[derive(Clone)]
+struct RuntimeStop {
+    file: PathBuf,
+    span: SourceSpan,
 }
 
 impl StopPointIndex {
@@ -259,25 +279,24 @@ impl StopPointIndex {
             let runtime_path = path.to_path_buf();
             let canonical_path = normalize_existing_path(runtime_path.clone());
             index
-                .runtime_files_by_canonical_file
+                .stops_by_canonical_file
                 .entry(canonical_path)
                 .or_default()
                 .entry(point.span.line)
                 .or_default()
-                .insert(runtime_path);
+                .push(RuntimeStop {
+                    file: runtime_path,
+                    span: point.span,
+                });
         }
         index
     }
 
-    fn verifies(&self, source: &Path, line: u32) -> bool {
-        self.runtime_files(source, line)
-            .is_some_and(|paths| !paths.is_empty())
-    }
-
-    fn runtime_files(&self, source: &Path, line: u32) -> Option<&HashSet<PathBuf>> {
-        self.runtime_files_by_canonical_file
+    fn stops(&self, source: &Path, line: u32) -> Option<&[RuntimeStop]> {
+        self.stops_by_canonical_file
             .get(source)
             .and_then(|lines| lines.get(&line))
+            .map(Vec::as_slice)
     }
 }
 
@@ -303,7 +322,14 @@ struct VariablesInput {
 
 struct EvaluateInput<'a> {
     expression: &'a str,
-    context: Option<&'a str>,
+    context: Option<EvaluateContext>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvaluateContext {
+    Watch,
+    Repl,
+    Hover,
 }
 
 impl<W: Write> Session<W> {
@@ -313,6 +339,7 @@ impl<W: Write> Session<W> {
             seq: 0,
             running: None,
             pending: None,
+            analysis: None,
             stop_points: None,
             breakpoints: HashMap::new(),
             supports_variable_paging: false,
@@ -515,6 +542,7 @@ impl<W: Write> Session<W> {
             json!({
                 "supportsConfigurationDoneRequest": true,
                 "supportsTerminateRequest": true,
+                "supportsConditionalBreakpoints": true,
                 "supportsEvaluateForHovers": false,
             }),
         );
@@ -532,6 +560,7 @@ impl<W: Write> Session<W> {
             return;
         }
         self.pending = None;
+        self.analysis = None;
         self.stop_points = None;
         self.breakpoints.clear();
         let project = match parse_project(arguments) {
@@ -570,6 +599,7 @@ impl<W: Write> Session<W> {
                 self.stop_points = Some(StopPointIndex::from_runtime(
                     launch.session.runtime_program(),
                 ));
+                self.analysis = Some(launch.analysis_snapshot);
                 self.pending = Some(PendingLaunch {
                     project_dir,
                     entry: entry.map(str::to_string),
@@ -632,8 +662,8 @@ impl<W: Write> Session<W> {
         requested
             .iter()
             .map(|breakpoint| match breakpoint {
-                RequestedBreakpoint::Valid { line, block } => {
-                    self.resolved_breakpoint(source, *line, *block)
+                RequestedBreakpoint::Valid { line, request } => {
+                    self.resolved_breakpoint(source, *line, request)
                 }
                 RequestedBreakpoint::InvalidLine => {
                     json!({
@@ -646,21 +676,76 @@ impl<W: Write> Session<W> {
             .collect()
     }
 
-    fn resolved_breakpoint(&self, source: &Path, line: u32, block: BreakpointBlock) -> Json {
-        if matches!(block, BreakpointBlock::Expression) {
-            return unverified_breakpoint(line, block.message(), block.contract());
-        }
+    fn resolved_breakpoint(&self, source: &Path, line: u32, request: &BreakpointRequest) -> Json {
         match &self.stop_points {
-            Some(stop_points) if stop_points.verifies(source, line) => {
-                json!({ "verified": true, "line": line })
+            Some(stop_points) => {
+                self.resolved_launched_breakpoint(source, line, request, stop_points)
             }
-            Some(_) => unverified_breakpoint(
+            None => {
+                let block = match request {
+                    BreakpointRequest::Blocked(block) => *block,
+                    BreakpointRequest::Condition(_) => BreakpointBlock::Expression,
+                    BreakpointRequest::Plain => BreakpointBlock::StopPoint,
+                };
+                unverified_breakpoint(line, block.message(), block.contract())
+            }
+        }
+    }
+
+    fn resolved_launched_breakpoint(
+        &self,
+        source: &Path,
+        line: u32,
+        request: &BreakpointRequest,
+        stop_points: &StopPointIndex,
+    ) -> Json {
+        let Some(stops) = stop_points.stops(source, line) else {
+            return unverified_breakpoint(
                 line,
                 BREAKPOINT_NO_STOP_POINT,
                 ERROR_BREAKPOINT_NO_STOP_POINT,
-            ),
-            None => unverified_breakpoint(line, block.message(), block.contract()),
+            );
+        };
+        match request {
+            BreakpointRequest::Plain => json!({ "verified": true, "line": line }),
+            BreakpointRequest::Blocked(block) => {
+                unverified_breakpoint(line, block.message(), block.contract())
+            }
+            BreakpointRequest::Condition(condition) => {
+                match self.checked_condition(&stops[0], condition) {
+                    Ok(_) => json!({ "verified": true, "line": line }),
+                    Err(error) => unverified_breakpoint(line, &error.message, error.contract),
+                }
+            }
         }
+    }
+
+    fn checked_condition(
+        &self,
+        stop: &RuntimeStop,
+        source: &str,
+    ) -> Result<CheckedDebugExpression, DapInputError> {
+        let Some(analysis) = &self.analysis else {
+            return Err(DapInputError::new(
+                BREAKPOINT_EXPRESSION_BLOCKED,
+                ERROR_BREAKPOINT_EXPRESSION_BLOCKED,
+            ));
+        };
+        let expression = analysis
+            .checked_debug_expression(&stop.file, stop.span, source)
+            .map_err(|diagnostics| {
+                DapInputError::new(
+                    diagnostic_message(BREAKPOINT_CONDITION_INVALID, &diagnostics),
+                    ERROR_BREAKPOINT_CONDITION_INVALID,
+                )
+            })?;
+        if !matches!(expression.ty(), MarrowType::Primitive(ScalarType::Bool)) {
+            return Err(DapInputError::new(
+                BREAKPOINT_CONDITION_INVALID,
+                ERROR_BREAKPOINT_CONDITION_INVALID,
+            ));
+        }
+        Ok(expression)
     }
 
     fn armed_breakpoints(&self) -> ArmedBreakpoints {
@@ -670,18 +755,26 @@ impl<W: Write> Session<W> {
         };
         for (source, requested) in &self.breakpoints {
             for breakpoint in requested {
-                let RequestedBreakpoint::Valid {
-                    line,
-                    block: BreakpointBlock::StopPoint,
-                } = breakpoint
-                else {
+                let RequestedBreakpoint::Valid { line, request } = breakpoint else {
                     continue;
                 };
-                let Some(runtime_files) = stop_points.runtime_files(source, *line) else {
+                let Some(stops) = stop_points.stops(source, *line) else {
                     continue;
                 };
-                for runtime_file in runtime_files {
-                    armed.insert(runtime_file.clone(), *line);
+                match request {
+                    BreakpointRequest::Plain => {
+                        for stop in stops {
+                            armed.insert(stop.file.clone(), *line, None);
+                        }
+                    }
+                    BreakpointRequest::Condition(condition) => {
+                        for stop in stops {
+                            if let Ok(condition) = self.checked_condition(stop, condition) {
+                                armed.insert(stop.file.clone(), *line, Some(condition));
+                            }
+                        }
+                    }
+                    BreakpointRequest::Blocked(_) => {}
                 }
             }
         }
@@ -844,7 +937,7 @@ impl<W: Write> Session<W> {
                     .and_then(crate::variables::child_counts);
                 let reference = local
                     .expand
-                    .map(|value| self.alloc_ref(Expandable::Local(value)))
+                    .map(|value| self.alloc_ref(Expandable::Value(value)))
                     .unwrap_or(0);
                 variable_json(
                     &local.name,
@@ -873,7 +966,7 @@ impl<W: Write> Session<W> {
             .expandables
             .get(&reference)
             .map(|expandable| match expandable {
-                Expandable::Local(value) => value.clone(),
+                Expandable::Value(value) => value.clone(),
             })
         else {
             return variables_body(Vec::new());
@@ -897,7 +990,7 @@ impl<W: Write> Session<W> {
                     .and_then(crate::variables::child_counts);
                 let reference = child
                     .expand
-                    .map(|value| self.alloc_ref(Expandable::Local(value)))
+                    .map(|value| self.alloc_ref(Expandable::Value(value)))
                     .unwrap_or(0);
                 variable_json(
                     &child.name,
@@ -978,8 +1071,8 @@ impl<W: Write> Session<W> {
         self.resume_run(Resume::Pause);
     }
 
-    /// `evaluate`: watch/REPL requests are blocked until Marrow exposes canonical
-    /// expression and durable path facts.
+    /// `evaluate`: watch/REPL requests evaluate checked Marrow debug expressions
+    /// at the current stopped frame. Durable paths and hover remain blocked.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
         let input = match parse_evaluate_input(arguments) {
             Ok(input) => input,
@@ -988,7 +1081,7 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        if input.context == Some("hover") {
+        if input.context == Some(EvaluateContext::Hover) {
             self.respond_error(
                 request,
                 HOVER_EVALUATE_BLOCKED,
@@ -996,16 +1089,97 @@ impl<W: Write> Session<W> {
             );
             return;
         }
-
-        if !input.expression.trim_start().starts_with('^') {
-            self.respond_error(request, EXPRESSION_EVALUATE_BLOCKED, ERROR_EVALUATE_BLOCKED);
+        if input.expression.trim_start().starts_with('^') {
+            self.respond_error(
+                request,
+                RAW_DATA_INSPECTION_BLOCKED,
+                ERROR_DURABLE_DATA_BLOCKED,
+            );
             return;
         }
-        self.respond_error(
-            request,
-            RAW_DATA_INSPECTION_BLOCKED,
-            ERROR_DURABLE_DATA_BLOCKED,
-        );
+
+        let Some((file, span)) = self.current_stop_file_span() else {
+            self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
+            return;
+        };
+        let expression = match self.checked_evaluate_expression(&file, span, input.expression) {
+            Ok(expression) => expression,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
+        };
+        match self.query(Query::Evaluate {
+            expression: Box::new(expression),
+        }) {
+            Some(QueryResult::Evaluate(Ok(value))) => {
+                let body = self.evaluate_body(value);
+                self.respond(request, true, body);
+            }
+            Some(QueryResult::Evaluate(Err(error))) => {
+                self.respond_error(
+                    request,
+                    format!("{}: {}", error.code, error.message),
+                    ERROR_EVALUATE_RUNTIME,
+                );
+            }
+            _ => self.respond_error(request, "not stopped", ERROR_NOT_STOPPED),
+        }
+    }
+
+    fn current_stop_file_span(&self) -> Option<(PathBuf, SourceSpan)> {
+        let stop = self.running.as_ref()?.stopped_at.as_ref()?;
+        Some((stop.file.clone()?, stop.span))
+    }
+
+    fn checked_evaluate_expression(
+        &self,
+        file: &Path,
+        span: SourceSpan,
+        source: &str,
+    ) -> Result<CheckedDebugExpression, DapInputError> {
+        let Some(analysis) = &self.analysis else {
+            return Err(DapInputError::new("not stopped", ERROR_NOT_STOPPED));
+        };
+        analysis
+            .checked_debug_expression(file, span, source)
+            .map_err(|diagnostics| {
+                DapInputError::new(
+                    diagnostic_message(EVALUATE_EXPRESSION_INVALID, &diagnostics),
+                    ERROR_EVALUATE_EXPRESSION_INVALID,
+                )
+            })
+    }
+
+    fn evaluate_body(&mut self, value: DebugValue) -> Json {
+        let result = value.preview();
+        let counts = crate::variables::child_counts(&value);
+        let children_truncated =
+            crate::variables::is_expandable(&value).then(|| value.children_truncated());
+        let reference = if crate::variables::is_expandable(&value) {
+            self.alloc_ref(Expandable::Value(value))
+        } else {
+            0
+        };
+        let mut body = json!({
+            "result": result,
+            "variablesReference": reference,
+            "presentationHint": debug_admin_presentation_hint(),
+        });
+        if let Some(counts) = counts {
+            if let Some(named) = counts.named {
+                body["namedVariables"] = json!(named);
+            }
+            if let Some(indexed) = counts.indexed {
+                body["indexedVariables"] = json!(indexed);
+            }
+        }
+        if let Some(children_truncated) = children_truncated {
+            body["marrowDebug"] = json!({
+                "childrenTruncated": children_truncated,
+            });
+        }
+        body
     }
 
     /// `disconnect` / `terminate`: unwind the run (rolling back any open
@@ -1193,6 +1367,19 @@ fn debug_admin_presentation_hint() -> Json {
     })
 }
 
+fn diagnostic_message(base: &str, diagnostics: &[marrow_check::CheckDiagnostic]) -> String {
+    let details = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if details.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}: {details}")
+    }
+}
+
 fn parse_variables_input(
     arguments: &Json,
     supports_variable_paging: bool,
@@ -1361,10 +1548,29 @@ fn parse_evaluate_input(arguments: &Json) -> Result<EvaluateInput<'_>, DapInputE
             ERROR_EVALUATE_EXPRESSION_INVALID,
         ));
     };
+    if expression.trim().is_empty() {
+        return Err(DapInputError::new(
+            EVALUATE_EXPRESSION_INVALID,
+            ERROR_EVALUATE_EXPRESSION_INVALID,
+        ));
+    }
     let context = match arguments.get("context") {
-        Some(context) => Some(context.as_str().ok_or_else(|| {
-            DapInputError::new(EVALUATE_CONTEXT_INVALID, ERROR_EVALUATE_CONTEXT_INVALID)
-        })?),
+        Some(context) => {
+            let context = context.as_str().ok_or_else(|| {
+                DapInputError::new(EVALUATE_CONTEXT_INVALID, ERROR_EVALUATE_CONTEXT_INVALID)
+            })?;
+            Some(match context {
+                "watch" => EvaluateContext::Watch,
+                "repl" => EvaluateContext::Repl,
+                "hover" => EvaluateContext::Hover,
+                _ => {
+                    return Err(DapInputError::new(
+                        EVALUATE_CONTEXT_INVALID,
+                        ERROR_EVALUATE_CONTEXT_INVALID,
+                    ));
+                }
+            })
+        }
         None => None,
     };
     Ok(EvaluateInput {
@@ -1384,21 +1590,27 @@ fn requested_breakpoint(point: &Json) -> RequestedBreakpoint {
     };
     RequestedBreakpoint::Valid {
         line,
-        block: breakpoint_block(point),
+        request: breakpoint_request(point),
     }
 }
 
-fn breakpoint_block(point: &Json) -> BreakpointBlock {
-    for field in ["condition", "hitCondition", "logMessage"] {
-        if point
+fn breakpoint_request(point: &Json) -> BreakpointRequest {
+    if ["hitCondition", "logMessage"].into_iter().any(|field| {
+        point
             .get(field)
             .and_then(Json::as_str)
             .is_some_and(|value| !value.trim().is_empty())
-        {
-            return BreakpointBlock::Expression;
-        }
+    }) {
+        return BreakpointRequest::Blocked(BreakpointBlock::Expression);
     }
-    BreakpointBlock::StopPoint
+    if let Some(condition) = point
+        .get("condition")
+        .and_then(Json::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        return BreakpointRequest::Condition(condition.to_string());
+    }
+    BreakpointRequest::Plain
 }
 
 fn parse_project(arguments: &Json) -> Result<&str, DapInputError> {

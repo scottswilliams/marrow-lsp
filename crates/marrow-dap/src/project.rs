@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use marrow_check::{AnalysisIdentity, CheckReport, ProjectIoError};
+use marrow_check::{AnalysisIdentity, AnalysisSnapshot, CheckReport, ProjectIoError};
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation,
     ProjectOpen, ProjectSession, ProjectSessionError, RuntimeError,
@@ -26,6 +26,7 @@ const CATALOG_REPAIR_FACTS: &str = "read-only debug catalog admission facts";
 pub struct Launch {
     pub session: ProjectSession,
     pub analysis_identity: AnalysisIdentity,
+    pub analysis_snapshot: AnalysisSnapshot,
     pub ephemeral_entry_identity: bool,
     pub invocation: EntryInvocation,
 }
@@ -40,6 +41,7 @@ pub enum LaunchError {
     Entry(String),
     EntryArgs(String),
     EntryChanged,
+    AnalysisChanged,
     NoEntry,
     CatalogRepairBlocked,
     CheckErrors(Vec<String>),
@@ -58,6 +60,10 @@ impl std::fmt::Display for LaunchError {
             Self::EntryChanged => write!(
                 f,
                 "launch target changed between launch and configurationDone; launch again"
+            ),
+            Self::AnalysisChanged => write!(
+                f,
+                "debug expression analysis changed while preparing launch; launch again"
             ),
             Self::NoEntry => write!(
                 f,
@@ -83,6 +89,7 @@ impl LaunchError {
             Self::Entry(_) | Self::NoEntry => "dap.launchEntry.invalid",
             Self::EntryArgs(_) => "dap.launchArgs.invalid",
             Self::EntryChanged => "dap.launch.changed",
+            Self::AnalysisChanged => "dap.launchAnalysis.changed",
             Self::CatalogRepairBlocked => "dap.launchCatalogRepair.blocked",
         }
     }
@@ -91,7 +98,7 @@ impl LaunchError {
         match self {
             Self::CatalogRepairBlocked => STATUS_BLOCKED_ON_MARROW,
             Self::Entry(_) | Self::EntryArgs(_) => STATUS_INVALID_PARAMS,
-            Self::EntryChanged => STATUS_INVALID_STATE,
+            Self::EntryChanged | Self::AnalysisChanged => STATUS_INVALID_STATE,
             _ => STATUS_INVALID_PROJECT,
         }
     }
@@ -105,6 +112,7 @@ impl LaunchError {
             | Self::Entry(_)
             | Self::EntryArgs(_)
             | Self::EntryChanged
+            | Self::AnalysisChanged
             | Self::NoEntry
             | Self::CheckErrors(_) => None,
         }
@@ -120,6 +128,7 @@ pub fn prepare(
     args: &[EntryArgument],
 ) -> Result<Launch, LaunchError> {
     let (session, descriptor) = prepare_descriptor(project_dir, entry)?;
+    let analysis_snapshot = prepare_analysis_snapshot(project_dir, &session)?;
     let invocation = EntryInvocation {
         identity: descriptor.identity,
         arguments: args.to_vec(),
@@ -129,6 +138,7 @@ pub fn prepare(
 
     Ok(Launch {
         analysis_identity: session.source_analysis_identity().clone(),
+        analysis_snapshot,
         ephemeral_entry_identity: uses_ephemeral_entry_identity(project_dir, &session),
         session,
         invocation,
@@ -146,6 +156,7 @@ pub fn prepare_admitted(
     if session.source_analysis_identity() != analysis_identity {
         return Err(LaunchError::EntryChanged);
     }
+    let analysis_snapshot = prepare_analysis_snapshot(project_dir, &session)?;
     if descriptor.identity.canonical_name != invocation.identity.canonical_name {
         return Err(LaunchError::EntryChanged);
     }
@@ -164,6 +175,7 @@ pub fn prepare_admitted(
 
     Ok(Launch {
         analysis_identity: session.source_analysis_identity().clone(),
+        analysis_snapshot,
         ephemeral_entry_identity: current_ephemeral,
         session,
         invocation,
@@ -191,6 +203,24 @@ fn prepare_descriptor(
     let descriptor = EntryDescriptor::resolve(session.runtime_program(), &entry)
         .map_err(|error| LaunchError::Entry(entry_descriptor_error_message(error).to_string()))?;
     Ok((session, descriptor))
+}
+
+fn prepare_analysis_snapshot(
+    project_dir: &Path,
+    session: &ProjectSession,
+) -> Result<AnalysisSnapshot, LaunchError> {
+    let accepted =
+        marrow_check::read_accepted_catalog_artifact(project_dir).map_err(from_project_io_error)?;
+    let snapshot = marrow_check::check_source_project_analysis_against(
+        project_dir,
+        session.config(),
+        accepted.as_ref(),
+    )
+    .map_err(from_project_io_error)?;
+    if snapshot.content_identity() != session.source_analysis_identity() {
+        return Err(LaunchError::AnalysisChanged);
+    }
+    Ok(snapshot)
 }
 
 fn uses_ephemeral_entry_identity(project_dir: &Path, session: &ProjectSession) -> bool {
