@@ -14,13 +14,10 @@ use std::path::Path;
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use marrow_check::{
     CheckedModule, CheckedProgram, StoreLeafKind, scope_at,
-    tooling::{
-        DeclaredDataChild, DeclaredDataChildKind, SourceDataPathSegment,
-        declared_source_data_children,
-    },
+    tooling::{DeclaredDataChild, DeclaredDataChildKind, declared_source_receiver_data_children},
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema, stdlib};
-use marrow_syntax::{LexedSource, ParsedSource, Token, TokenKind};
+use marrow_syntax::{LexedSource, ParsedSource, SourceSpan, Token, TokenKind};
 
 use crate::{language_facts, types::render_type};
 
@@ -74,7 +71,9 @@ pub fn completion(
 ) -> Vec<CompletionItem> {
     match classify(source, lexed, offset) {
         Context::Root => root_completions(program),
-        Context::SavedPath { segments } => saved_path_completions(program, &segments),
+        Context::SavedPath { receiver, span } => {
+            saved_path_completions(program, file, parsed, &receiver, span)
+        }
         Context::InvalidSavedPath => Vec::new(),
         Context::Namespace { qualifier } => namespace_completions(program, file, &qualifier),
         Context::Type => type_completions(program),
@@ -86,11 +85,9 @@ pub fn completion(
 enum Context {
     /// Just after a `^`: the durable saved roots.
     Root,
-    /// A saved-path dot position recovered as source-shaped path segments.
-    SavedPath {
-        segments: Vec<SourceDataPathSegment>,
-    },
-    /// A saved-path dot position whose key-list source shape is malformed.
+    /// A saved-path dot position recovered as the receiver source before the dot.
+    SavedPath { receiver: String, span: SourceSpan },
+    /// A saved-path dot position whose source receiver shape is malformed.
     InvalidSavedPath,
     /// After `qualifier::`: what the qualifier (an enum, a used module, or a
     /// `std` module path) exposes.
@@ -141,7 +138,9 @@ fn classify(source: &str, lexed: &LexedSource, offset: usize) -> Context {
         },
         TokenKind::Dot | TokenKind::QuestionDot => {
             match saved_path_before_dot(source, &tokens, anchor) {
-                SavedPathRecovery::Complete(segments) => Context::SavedPath { segments },
+                SavedPathRecovery::Complete { receiver, span } => {
+                    Context::SavedPath { receiver, span }
+                }
                 SavedPathRecovery::Invalid => Context::InvalidSavedPath,
                 SavedPathRecovery::NotSavedPath => Context::Bare,
             }
@@ -187,56 +186,55 @@ fn qualifier_before(source: &str, tokens: &[Token], colon_index: usize) -> Optio
     Some(segments)
 }
 
-/// Reconstruct the source-shaped saved path before the `.` at `dot_index`.
+/// Recover the immediate saved-data receiver before the `.` at `dot_index`.
 fn saved_path_before_dot(source: &str, tokens: &[Token], dot_index: usize) -> SavedPathRecovery {
-    let mut cursor = dot_index;
-    let mut pieces = Vec::new();
-    let mut invalid_key_list = false;
+    let Some(end) = dot_index.checked_sub(1) else {
+        return unrecovered_saved_path(tokens, dot_index);
+    };
+    if matches!(tokens[end].kind, TokenKind::DotDot | TokenKind::DotDotEqual) {
+        return unrecovered_saved_path(tokens, dot_index);
+    }
+    let Some(start) = saved_receiver_start(tokens, end) else {
+        return unrecovered_saved_path(tokens, dot_index);
+    };
+    let span = recovered_receiver_span(tokens, start, end);
+    let receiver = source[span.start_byte..span.end_byte].to_string();
+    SavedPathRecovery::Complete { receiver, span }
+}
 
-    loop {
-        let Some(mut segment) = cursor.checked_sub(1) else {
-            return unrecovered_saved_path(tokens, dot_index);
-        };
-        let key_slots = if tokens[segment].kind == TokenKind::RightParen {
-            let close_paren = segment;
-            let Some(open_paren) = matching_open_paren(tokens, close_paren) else {
-                return unrecovered_saved_path(tokens, dot_index);
-            };
-            let Some(name) = open_paren.checked_sub(1) else {
-                return unrecovered_saved_path(tokens, dot_index);
-            };
-            segment = name;
-            match count_top_level_arguments(tokens, open_paren, close_paren) {
-                Some(count) => count,
-                None => {
-                    invalid_key_list = true;
-                    0
-                }
+fn saved_receiver_start(tokens: &[Token], end: usize) -> Option<usize> {
+    match tokens[end].kind {
+        TokenKind::Identifier => saved_receiver_identifier_start(tokens, end),
+        TokenKind::RightParen => {
+            let open = matching_open_paren(tokens, end)?;
+            let callee = open.checked_sub(1)?;
+            if tokens[callee].kind != TokenKind::Identifier {
+                return None;
             }
-        } else {
-            0
-        };
-        if tokens[segment].kind != TokenKind::Identifier {
-            return unrecovered_saved_path(tokens, dot_index);
+            saved_receiver_identifier_start(tokens, callee)
         }
-        let Some(before) = segment.checked_sub(1) else {
-            return unrecovered_saved_path(tokens, dot_index);
-        };
-        let name = tokens[segment].text(source).to_string();
-        match tokens[before].kind {
-            TokenKind::Caret => {
-                if invalid_key_list {
-                    return SavedPathRecovery::Invalid;
-                }
-                pieces.push(SavedPathPiece::Root { name, key_slots });
-                return SavedPathRecovery::Complete(source_data_path_segments(pieces));
-            }
-            TokenKind::Dot | TokenKind::QuestionDot => {
-                pieces.push(SavedPathPiece::Member { name, key_slots });
-                cursor = before;
-            }
-            _ => return unrecovered_saved_path(tokens, dot_index),
+        _ => None,
+    }
+}
+
+fn saved_receiver_identifier_start(tokens: &[Token], ident: usize) -> Option<usize> {
+    let before = ident.checked_sub(1)?;
+    match tokens[before].kind {
+        TokenKind::Caret => Some(before),
+        TokenKind::Dot | TokenKind::QuestionDot => {
+            saved_receiver_start(tokens, before.checked_sub(1)?)
         }
+        _ => None,
+    }
+}
+
+fn recovered_receiver_span(tokens: &[Token], start: usize, end: usize) -> SourceSpan {
+    let start_span = tokens[start].span;
+    SourceSpan {
+        start_byte: start_span.start_byte,
+        end_byte: tokens[end].span.end_byte,
+        line: start_span.line,
+        column: start_span.column,
     }
 }
 
@@ -334,35 +332,9 @@ fn saved_path_callee_prefix_before(tokens: &[Token], callee: usize) -> bool {
 }
 
 enum SavedPathRecovery {
-    Complete(Vec<SourceDataPathSegment>),
+    Complete { receiver: String, span: SourceSpan },
     Invalid,
     NotSavedPath,
-}
-
-enum SavedPathPiece {
-    Root { name: String, key_slots: usize },
-    Member { name: String, key_slots: usize },
-}
-
-fn source_data_path_segments(pieces: Vec<SavedPathPiece>) -> Vec<SourceDataPathSegment> {
-    let mut segments = Vec::new();
-    for piece in pieces.into_iter().rev() {
-        match piece {
-            SavedPathPiece::Root { name, key_slots } => {
-                segments.push(SourceDataPathSegment::Root(name));
-                append_key_slots(&mut segments, key_slots);
-            }
-            SavedPathPiece::Member { name, key_slots } => {
-                segments.push(SourceDataPathSegment::Member(name));
-                append_key_slots(&mut segments, key_slots);
-            }
-        }
-    }
-    segments
-}
-
-fn append_key_slots(segments: &mut Vec<SourceDataPathSegment>, count: usize) {
-    segments.extend((0..count).map(|_| SourceDataPathSegment::KeySlot));
 }
 
 /// The index of the `(` matching the `)` at `close_index`, accounting for nested
@@ -383,49 +355,6 @@ fn matching_open_paren(tokens: &[Token], close_index: usize) -> Option<usize> {
         }
         i = i.checked_sub(1)?;
     }
-}
-
-fn count_top_level_arguments(
-    tokens: &[Token],
-    open_index: usize,
-    close_index: usize,
-) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut complete_slots = 0usize;
-    let mut slot_has_token = false;
-
-    for token in &tokens[open_index + 1..close_index] {
-        match token.kind {
-            TokenKind::LeftParen | TokenKind::LeftBracket => {
-                depth += 1;
-                slot_has_token = true;
-            }
-            TokenKind::RightParen | TokenKind::RightBracket => {
-                depth = depth.checked_sub(1)?;
-                slot_has_token = true;
-            }
-            TokenKind::Comma if depth == 0 => {
-                if !slot_has_token {
-                    return None;
-                }
-                complete_slots += 1;
-                slot_has_token = false;
-            }
-            _ => slot_has_token = true,
-        }
-    }
-
-    if depth != 0 {
-        return None;
-    }
-    if complete_slots == 0 && !slot_has_token {
-        return Some(0);
-    }
-    if !slot_has_token {
-        return Some(complete_slots);
-    }
-
-    Some(complete_slots + 1)
 }
 
 /// Whether the `:` at `colon_index` introduces a type annotation rather than a
@@ -459,10 +388,12 @@ fn root_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
 
 fn saved_path_completions(
     program: &CheckedProgram,
-    segments: &[SourceDataPathSegment],
+    file: &Path,
+    parsed: &ParsedSource,
+    receiver: &str,
+    span: SourceSpan,
 ) -> Vec<CompletionItem> {
-    declared_source_data_children(program, segments)
-        .unwrap_or_default()
+    declared_source_receiver_data_children(program, file, parsed, receiver, span)
         .iter()
         .map(declared_data_child_completion)
         .collect()

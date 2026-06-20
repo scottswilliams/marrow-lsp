@@ -257,12 +257,12 @@ fn after_saved_layer_dot_lists_declared_nested_members() {
 }
 
 #[test]
-fn after_saved_layer_dot_counts_only_top_level_key_arguments() {
+fn after_saved_layer_dot_recovers_parenthesized_receiver_arguments() {
     let (program, file) = project();
     let labels = complete(
         &program,
         &file,
-        "module shelf::app\n\npub fn f(id: int, n: string)\n    const x = ^books((id, id)).notes([n, n]).|\n",
+        "module shelf::app\n\npub fn f(id: int, n: string)\n    const x = ^books((id)).notes((n)).|\n",
     );
     assert_eq!(labels, ["text"]);
 }
@@ -282,7 +282,7 @@ fn after_unkeyed_root_dot_lists_no_schema_members_before_identity_keys() {
 }
 
 #[test]
-fn after_two_key_root_dot_lists_declared_members_when_all_key_slots_are_present() {
+fn after_two_key_root_dot_lists_declared_members_when_arguments_are_present() {
     let (program, file) = project();
     let labels = complete(
         &program,
@@ -294,10 +294,38 @@ fn after_two_key_root_dot_lists_declared_members_when_all_key_slots_are_present(
 }
 
 #[test]
-fn after_two_key_root_dot_returns_empty_when_key_slots_are_missing_or_malformed() {
+fn after_composite_identity_root_dot_lists_declared_members() {
+    let (program, file) = project();
+    let labels = complete(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f(pair: Id(^pairs))\n    const x = ^pairs(pair).|\n",
+    );
+
+    assert_eq!(labels, ["label"]);
+}
+
+#[test]
+fn wrong_identity_argument_returns_no_declared_members() {
+    let (program, file) = project();
+    let labels = complete(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f(pair: Id(^pairs))\n    const x = ^books(pair).|\n",
+    );
+
+    assert!(
+        labels.is_empty(),
+        "wrong identity argument must not produce declared members, got {labels:?}"
+    );
+}
+
+#[test]
+fn after_two_key_root_dot_returns_empty_when_arguments_are_missing_or_malformed() {
     let (program, file) = project();
 
     for source in [
+        "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(left).|\n",
         "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(left,).|\n",
         "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(,right).|\n",
         "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(left,,right).|\n",
@@ -305,7 +333,7 @@ fn after_two_key_root_dot_returns_empty_when_key_slots_are_missing_or_malformed(
         let labels = complete(&program, &file, source);
         assert!(
             labels.is_empty(),
-            "incomplete or malformed key list must fail closed, got {labels:?} for {source:?}"
+            "incomplete or malformed key arguments must fail closed, got {labels:?} for {source:?}"
         );
     }
 }
