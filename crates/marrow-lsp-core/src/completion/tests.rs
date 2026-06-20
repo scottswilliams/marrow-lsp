@@ -193,35 +193,66 @@ fn after_caret_lists_durable_roots() {
 }
 
 #[test]
-fn after_keyed_root_dot_lists_no_saved_path_members_without_canonical_fact() {
+fn after_keyed_root_dot_lists_declared_saved_path_members() {
     let (program, file) = project();
-    let labels = complete(
+    let items = complete_items(
         &program,
         &file,
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).|\n",
     );
-    assert!(
-        labels.is_empty(),
-        "saved-path member completion should be blocked without a canonical fact, got {labels:?}"
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["title", "shelf", "tags", "notes"]);
+
+    let title = item_named(&items, "title");
+    assert_eq!(title.kind, Some(CompletionItemKind::FIELD));
+    assert_eq!(title.detail.as_deref(), Some("required field: string"));
+
+    let shelf = item_named(&items, "shelf");
+    assert_eq!(shelf.kind, Some(CompletionItemKind::FIELD));
+    assert_eq!(shelf.detail.as_deref(), Some("required field: string"));
+
+    let tags = item_named(&items, "tags");
+    assert_eq!(
+        tags.kind,
+        Some(CompletionItemKind::FIELD),
+        "keyed scalar fields must stay field completions"
     );
+    assert_eq!(tags.detail.as_deref(), Some("field(pos: int): string"));
+
+    let notes = item_named(&items, "notes");
+    assert_eq!(notes.kind, Some(CompletionItemKind::STRUCT));
+    assert_eq!(notes.detail.as_deref(), Some("layer(noteId: string)"));
 }
 
 #[test]
-fn after_saved_layer_dot_lists_no_nested_members_without_canonical_fact() {
+fn after_saved_layer_dot_lists_declared_nested_members() {
     let (program, file) = project();
-    let labels = complete(
+    let items = complete_items(
         &program,
         &file,
         "module shelf::app\n\npub fn f(id: int, n: string)\n    const x = ^books(id).notes(n).|\n",
     );
-    assert!(
-        labels.is_empty(),
-        "saved-path layer completion should be blocked without a canonical fact, got {labels:?}"
-    );
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["text"]);
+
+    let text = item_named(&items, "text");
+    assert_eq!(text.kind, Some(CompletionItemKind::FIELD));
+    assert_eq!(text.detail.as_deref(), Some("field: string"));
 }
 
 #[test]
-fn after_unkeyed_root_dot_lists_no_indexes_without_canonical_fact() {
+fn after_saved_layer_dot_counts_only_top_level_key_arguments() {
+    let (program, file) = project();
+    let labels = complete(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn f(id: int, n: string)\n    const x = ^books((id, id)).notes([n, n]).|\n",
+    );
+    assert_eq!(labels, ["text"]);
+}
+
+#[test]
+fn after_unkeyed_root_dot_lists_no_schema_members_before_identity_keys() {
     let (program, file) = project();
     let labels = complete(
         &program,
@@ -230,7 +261,7 @@ fn after_unkeyed_root_dot_lists_no_indexes_without_canonical_fact() {
     );
     assert!(
         labels.is_empty(),
-        "saved-index completion should be blocked without a canonical fact, got {labels:?}"
+        "root prefix must not offer declared members before identity keys, got {labels:?}"
     );
 }
 
