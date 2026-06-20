@@ -75,6 +75,7 @@ pub fn completion(
     match classify(source, lexed, offset) {
         Context::Root => root_completions(program),
         Context::SavedPath { segments } => saved_path_completions(program, &segments),
+        Context::InvalidSavedPath => Vec::new(),
         Context::Namespace { qualifier } => namespace_completions(program, file, &qualifier),
         Context::Type => type_completions(program),
         Context::Bare => bare_completions(program, file, parsed, offset),
@@ -89,6 +90,8 @@ enum Context {
     SavedPath {
         segments: Vec<SourceDataPathSegment>,
     },
+    /// A saved-path dot position whose key-list source shape is malformed.
+    InvalidSavedPath,
     /// After `qualifier::`: what the qualifier (an enum, a used module, or a
     /// `std` module path) exposes.
     Namespace { qualifier: Vec<String> },
@@ -136,9 +139,20 @@ fn classify(source: &str, lexed: &LexedSource, offset: usize) -> Context {
             Some(qualifier) => Context::Namespace { qualifier },
             None => Context::Bare,
         },
-        TokenKind::Dot | TokenKind::QuestionDot => saved_path_before_dot(source, &tokens, anchor)
-            .map(|segments| Context::SavedPath { segments })
-            .unwrap_or(Context::Bare),
+        TokenKind::Dot | TokenKind::QuestionDot => {
+            match saved_path_before_dot(source, &tokens, anchor) {
+                SavedPathRecovery::Complete(segments) => Context::SavedPath { segments },
+                SavedPathRecovery::Invalid => Context::InvalidSavedPath,
+                SavedPathRecovery::NotSavedPath => Context::Bare,
+            }
+        }
+        TokenKind::DotDot => {
+            if saved_path_attempt_before_dot(&tokens, anchor) {
+                Context::InvalidSavedPath
+            } else {
+                Context::Bare
+            }
+        }
         // A `:` that introduces a type annotation (`name: <here>`, `): <here>`).
         TokenKind::Colon => {
             if introduces_type(&tokens, anchor) {
@@ -173,42 +187,120 @@ fn qualifier_before(source: &str, tokens: &[Token], colon_index: usize) -> Optio
 }
 
 /// Reconstruct the source-shaped saved path before the `.` at `dot_index`.
-fn saved_path_before_dot(
-    source: &str,
-    tokens: &[Token],
-    dot_index: usize,
-) -> Option<Vec<SourceDataPathSegment>> {
+fn saved_path_before_dot(source: &str, tokens: &[Token], dot_index: usize) -> SavedPathRecovery {
     let mut cursor = dot_index;
     let mut pieces = Vec::new();
+    let mut invalid_key_list = false;
 
     loop {
-        let mut segment = cursor.checked_sub(1)?;
+        let Some(mut segment) = cursor.checked_sub(1) else {
+            return unrecovered_saved_path(tokens, dot_index);
+        };
         let key_slots = if tokens[segment].kind == TokenKind::RightParen {
             let close_paren = segment;
-            let open_paren = matching_open_paren(tokens, close_paren)?;
-            let name = open_paren.checked_sub(1)?;
+            let Some(open_paren) = matching_open_paren(tokens, close_paren) else {
+                return unrecovered_saved_path(tokens, dot_index);
+            };
+            let Some(name) = open_paren.checked_sub(1) else {
+                return unrecovered_saved_path(tokens, dot_index);
+            };
             segment = name;
-            count_top_level_arguments(tokens, open_paren, close_paren)?
+            match count_top_level_arguments(tokens, open_paren, close_paren) {
+                Some(count) => count,
+                None => {
+                    invalid_key_list = true;
+                    0
+                }
+            }
         } else {
             0
         };
         if tokens[segment].kind != TokenKind::Identifier {
-            return None;
+            return unrecovered_saved_path(tokens, dot_index);
         }
-        let before = segment.checked_sub(1)?;
+        let Some(before) = segment.checked_sub(1) else {
+            return unrecovered_saved_path(tokens, dot_index);
+        };
         let name = tokens[segment].text(source).to_string();
         match tokens[before].kind {
             TokenKind::Caret => {
+                if invalid_key_list {
+                    return SavedPathRecovery::Invalid;
+                }
                 pieces.push(SavedPathPiece::Root { name, key_slots });
-                return Some(source_data_path_segments(pieces));
+                return SavedPathRecovery::Complete(source_data_path_segments(pieces));
             }
             TokenKind::Dot | TokenKind::QuestionDot => {
                 pieces.push(SavedPathPiece::Member { name, key_slots });
                 cursor = before;
             }
-            _ => return None,
+            _ => return unrecovered_saved_path(tokens, dot_index),
         }
     }
+}
+
+fn unrecovered_saved_path(tokens: &[Token], dot_index: usize) -> SavedPathRecovery {
+    if saved_path_attempt_before_dot(tokens, dot_index) {
+        SavedPathRecovery::Invalid
+    } else {
+        SavedPathRecovery::NotSavedPath
+    }
+}
+
+fn saved_path_attempt_before_dot(tokens: &[Token], dot_index: usize) -> bool {
+    let Some(mut i) = dot_index.checked_sub(1) else {
+        return false;
+    };
+    let mut depth = 0usize;
+
+    loop {
+        match tokens[i].kind {
+            TokenKind::Caret => return true,
+            TokenKind::RightParen | TokenKind::RightBracket => depth += 1,
+            TokenKind::LeftParen | TokenKind::LeftBracket => {
+                depth = depth.saturating_sub(1);
+            }
+            kind if depth == 0 && is_saved_path_attempt_boundary(kind) => return false,
+            _ => {}
+        }
+
+        let Some(prev) = i.checked_sub(1) else {
+            return false;
+        };
+        i = prev;
+    }
+}
+
+fn is_saved_path_attempt_boundary(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(_)
+            | TokenKind::Colon
+            | TokenKind::DoubleColon
+            | TokenKind::Comma
+            | TokenKind::DotDot
+            | TokenKind::DotDotEqual
+            | TokenKind::Equal
+            | TokenKind::EqualEqual
+            | TokenKind::BangEqual
+            | TokenKind::QuestionQuestion
+            | TokenKind::Less
+            | TokenKind::LessEqual
+            | TokenKind::Greater
+            | TokenKind::GreaterEqual
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::At
+    )
+}
+
+enum SavedPathRecovery {
+    Complete(Vec<SourceDataPathSegment>),
+    Invalid,
+    NotSavedPath,
 }
 
 enum SavedPathPiece {
@@ -263,32 +355,41 @@ fn count_top_level_arguments(
     close_index: usize,
 ) -> Option<usize> {
     let mut depth = 0usize;
-    let mut saw_token = false;
-    let mut commas = 0usize;
+    let mut complete_slots = 0usize;
+    let mut slot_has_token = false;
 
     for token in &tokens[open_index + 1..close_index] {
         match token.kind {
             TokenKind::LeftParen | TokenKind::LeftBracket => {
                 depth += 1;
-                saw_token = true;
+                slot_has_token = true;
             }
             TokenKind::RightParen | TokenKind::RightBracket => {
                 depth = depth.checked_sub(1)?;
-                saw_token = true;
+                slot_has_token = true;
             }
             TokenKind::Comma if depth == 0 => {
-                commas += 1;
-                saw_token = true;
+                if !slot_has_token {
+                    return None;
+                }
+                complete_slots += 1;
+                slot_has_token = false;
             }
-            _ => saw_token = true,
+            _ => slot_has_token = true,
         }
     }
 
     if depth != 0 {
         return None;
     }
+    if complete_slots == 0 && !slot_has_token {
+        return Some(0);
+    }
+    if !slot_has_token {
+        return None;
+    }
 
-    Some(if saw_token { commas + 1 } else { 0 })
+    Some(complete_slots + 1)
 }
 
 /// Whether the `:` at `colon_index` introduces a type annotation rather than a

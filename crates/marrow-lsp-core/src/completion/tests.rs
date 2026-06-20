@@ -34,6 +34,11 @@ resource Book
 store ^books(id: int): Book
     index byShelf(shelf, id)
 
+resource Pair
+    required label: string
+
+store ^pairs(left: int, right: int): Pair
+
 ;; Lifecycle state.
 pub enum Status
     ;; Ready for use.
@@ -262,6 +267,71 @@ fn after_unkeyed_root_dot_lists_no_schema_members_before_identity_keys() {
     assert!(
         labels.is_empty(),
         "root prefix must not offer declared members before identity keys, got {labels:?}"
+    );
+}
+
+#[test]
+fn after_two_key_root_dot_lists_declared_members_when_all_key_slots_are_present() {
+    let (program, file) = project();
+    let labels = complete(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(left, right).|\n",
+    );
+
+    assert_eq!(labels, ["label"]);
+}
+
+#[test]
+fn after_two_key_root_dot_returns_empty_when_a_top_level_key_slot_is_missing() {
+    let (program, file) = project();
+
+    for source in [
+        "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(left,).|\n",
+        "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(,right).|\n",
+        "module shelf::app\n\npub fn f(left: int, right: int)\n    const x = ^pairs(left,,right).|\n",
+    ] {
+        let labels = complete(&program, &file, source);
+        assert!(
+            labels.is_empty(),
+            "malformed key list must fail closed, got {labels:?} for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_saved_path_looking_dots_return_no_bare_completions() {
+    let (program, file) = project();
+
+    for source in [
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)).|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books((id).|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..|\n",
+    ] {
+        let labels = complete(&program, &file, source);
+        assert!(
+            labels.is_empty(),
+            "malformed saved path must fail closed, got {labels:?} for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_non_saved_dot_keeps_bare_completion() {
+    let (program, file) = project();
+    let labels = complete(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn f(foo: int)\n    const x = foo.|\n",
+    );
+
+    assert!(
+        labels.contains(&"return".to_string()),
+        "ordinary non-saved dot should keep bare keyword completion, got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"foo".to_string()),
+        "ordinary non-saved dot should keep local completion, got {labels:?}"
     );
 }
 
