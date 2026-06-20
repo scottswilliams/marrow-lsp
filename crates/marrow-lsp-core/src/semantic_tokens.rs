@@ -16,8 +16,8 @@ use std::path::Path;
 
 use encoding::push;
 use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend};
-use marrow_check::BindingIndex;
-use marrow_syntax::{LexedSource, SourceFile, TokenKind};
+use marrow_check::{AnalysisSnapshot, BindingIndex};
+use marrow_syntax::{LexedSource, ParsedSource, TokenKind};
 
 use crate::positions::LineIndex;
 
@@ -98,26 +98,28 @@ pub fn legend() -> SemanticTokensLegend {
 /// and the modifier bitset. `index` supplies the UTF-16 position mapping.
 pub fn semantic_tokens(
     lexed: &LexedSource,
-    file: &SourceFile,
+    parsed: &ParsedSource,
     index: &LineIndex,
 ) -> Vec<SemanticToken> {
-    semantic_tokens_with_bindings(lexed, file, index, None)
+    semantic_tokens_with_project_facts(lexed, parsed, index, None, None)
 }
 
-/// Like [`semantic_tokens`], with optional project binding facts for resolved
-/// identifier uses. The binding index is supplied by the caller so semantic-token
-/// requests never rebuild project analysis.
-pub fn semantic_tokens_with_bindings(
+/// Like [`semantic_tokens`], with optional project facts for default-library
+/// callables and resolved identifier uses. Callers supply cached facts so
+/// semantic-token requests never rebuild project analysis.
+pub fn semantic_tokens_with_project_facts(
     lexed: &LexedSource,
-    file: &SourceFile,
+    parsed: &ParsedSource,
     index: &LineIndex,
+    analysis: Option<(&AnalysisSnapshot, &Path)>,
     binding_index: Option<(&BindingIndex, &Path)>,
 ) -> Vec<SemanticToken> {
+    let file = &parsed.file;
     let source = index.text();
     let const_declaration_overrides =
         declarations::const_declaration_overrides(lexed, file, source);
     let declaration_overrides = declarations::declaration_overrides(lexed, file, source);
-    let builtin_overrides = builtins::builtin_overrides(lexed, source);
+    let builtin_overrides = builtins::builtin_overrides(lexed, parsed, source, analysis);
     let reference_overrides = binding_index
         .map(|(binding_index, path)| {
             references::reference_overrides(lexed, source, binding_index, path)

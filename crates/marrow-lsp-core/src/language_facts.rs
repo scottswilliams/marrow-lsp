@@ -156,12 +156,6 @@ const OPERATOR_FACTS: &[OperatorFact] = &[
     },
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BareBuiltinKind {
-    Function,
-    ScalarConversion,
-}
-
 pub(crate) fn bare_function_builtins() -> &'static [BareBuiltin] {
     BARE_FUNCTION_BUILTINS
 }
@@ -207,16 +201,6 @@ pub(crate) fn operator_hover(spelling: &str) -> Option<String> {
                 fact.spelling, fact.description
             )
         })
-}
-
-pub(crate) fn bare_builtin_kind(name: &str) -> Option<BareBuiltinKind> {
-    if scalar_type_from_name(name).is_some() {
-        return Some(BareBuiltinKind::ScalarConversion);
-    }
-    bare_function_builtins()
-        .iter()
-        .any(|builtin| builtin.name == name)
-        .then_some(BareBuiltinKind::Function)
 }
 
 fn std_modules() -> Vec<&'static str> {

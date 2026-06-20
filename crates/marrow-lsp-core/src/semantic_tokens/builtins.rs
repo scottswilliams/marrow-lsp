@@ -1,51 +1,72 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
-use marrow_schema::stdlib;
-use marrow_syntax::{LexedSource, Token, TokenKind};
-
-use crate::language_facts::{self, BareBuiltinKind};
+use marrow_check::{
+    AnalysisSnapshot,
+    tooling::{self, CallableSignatureKind},
+};
+use marrow_syntax::{LexedSource, ParsedSource, SourceSpan, Token, TokenKind};
 
 use super::{
     ByteSpan, MOD_DEFAULT_LIBRARY, TYPE_FUNCTION, TYPE_NAMESPACE, TYPE_TYPE, TokenStyle,
-    syntax::{is_path_segment_token, is_trivia},
+    syntax::is_path_segment_token,
 };
 
 pub(super) fn builtin_overrides(
     lexed: &LexedSource,
+    parsed: &ParsedSource,
     source: &str,
+    analysis: Option<(&AnalysisSnapshot, &Path)>,
 ) -> HashMap<ByteSpan, TokenStyle> {
     let mut overrides = HashMap::new();
-    for (index, token) in lexed.tokens.iter().enumerate() {
-        if !is_call_leaf(lexed, index) {
+    let token_indices = token_indices_by_span(lexed);
+
+    for call in tooling::callable_callee_contexts(source, lexed, parsed) {
+        let Some(callable) = intrinsic_callable(analysis, &call.callee_path_segments) else {
             continue;
-        }
-        let text = token.text(source);
-        let token_type = if is_std_library_call(lexed, source, index) {
-            Some(TYPE_FUNCTION)
-        } else if is_bare_call_leaf(lexed, index) {
-            match language_facts::bare_builtin_kind(text) {
-                Some(BareBuiltinKind::Function) => Some(TYPE_FUNCTION),
-                Some(BareBuiltinKind::ScalarConversion) => Some(TYPE_TYPE),
-                None => None,
-            }
-        } else {
-            None
         };
-        if let Some(token_type) = token_type {
-            if is_std_library_call(lexed, source, index) {
-                insert_builtin_namespace_prefix(&mut overrides, &lexed.tokens[index - 4]);
-                insert_builtin_namespace_prefix(&mut overrides, &lexed.tokens[index - 2]);
+        if callable == CallableSignatureKind::StandardLibrary {
+            let leaf = token_indices
+                .get(&byte_span(call.callee_leaf_span))
+                .copied();
+            for prefix in leaf
+                .into_iter()
+                .flat_map(|index| callee_prefix_tokens(lexed, index))
+            {
+                insert_builtin_namespace_prefix(&mut overrides, prefix);
             }
-            overrides.insert(
-                (token.span.start_byte, token.span.end_byte),
-                TokenStyle {
-                    token_type,
-                    modifiers: MOD_DEFAULT_LIBRARY,
-                },
-            );
         }
+        overrides.insert(
+            byte_span(call.callee_leaf_span),
+            TokenStyle {
+                token_type: callable_token_type(callable),
+                modifiers: MOD_DEFAULT_LIBRARY,
+            },
+        );
     }
     overrides
+}
+
+fn intrinsic_callable(
+    analysis: Option<(&AnalysisSnapshot, &Path)>,
+    segments: &[String],
+) -> Option<CallableSignatureKind> {
+    let signature = match analysis {
+        Some((snapshot, file)) => {
+            tooling::intrinsic_callable_signature_for_file(snapshot, file, segments)
+        }
+        None => tooling::intrinsic_callable_signature(segments),
+    }?;
+    Some(signature.kind)
+}
+
+fn callable_token_type(kind: CallableSignatureKind) -> u32 {
+    match kind {
+        CallableSignatureKind::ScalarConversion => TYPE_TYPE,
+        CallableSignatureKind::Builtin
+        | CallableSignatureKind::ErrorConstructor
+        | CallableSignatureKind::IdentityConstructor
+        | CallableSignatureKind::StandardLibrary => TYPE_FUNCTION,
+    }
 }
 
 fn insert_builtin_namespace_prefix(overrides: &mut HashMap<ByteSpan, TokenStyle>, token: &Token) {
@@ -58,46 +79,33 @@ fn insert_builtin_namespace_prefix(overrides: &mut HashMap<ByteSpan, TokenStyle>
     );
 }
 
-fn is_call_leaf(lexed: &LexedSource, index: usize) -> bool {
-    is_path_segment_token(lexed.tokens[index].kind)
-        && lexed
-            .tokens
-            .get(index + 1)
-            .is_some_and(|token| token.kind == TokenKind::LeftParen)
+fn byte_span(span: SourceSpan) -> ByteSpan {
+    (span.start_byte, span.end_byte)
 }
 
-fn is_bare_call_leaf(lexed: &LexedSource, index: usize) -> bool {
-    is_call_leaf(lexed, index) && starts_at_callee_root(lexed, index)
+fn token_indices_by_span(lexed: &LexedSource) -> HashMap<ByteSpan, usize> {
+    lexed
+        .tokens
+        .iter()
+        .enumerate()
+        .map(|(index, token)| ((token.span.start_byte, token.span.end_byte), index))
+        .collect()
 }
 
-fn is_std_library_call(lexed: &LexedSource, source: &str, index: usize) -> bool {
-    index >= 4
+fn callee_prefix_tokens(lexed: &LexedSource, leaf: usize) -> Vec<&Token> {
+    let mut indices = vec![leaf];
+    let mut index = leaf;
+    while index >= 2
         && lexed.tokens[index - 1].kind == TokenKind::DoubleColon
         && is_path_segment_token(lexed.tokens[index - 2].kind)
-        && lexed.tokens[index - 3].kind == TokenKind::DoubleColon
-        && is_path_segment_token(lexed.tokens[index - 4].kind)
-        && lexed.tokens[index - 4].text(source) == "std"
-        && starts_at_callee_root(lexed, index - 4)
-        && stdlib::lookup(
-            lexed.tokens[index - 2].text(source),
-            lexed.tokens[index].text(source),
-        )
-        .is_some()
-}
-
-fn starts_at_callee_root(lexed: &LexedSource, index: usize) -> bool {
-    !previous_significant_kind(lexed, index).is_some_and(|kind| {
-        matches!(
-            kind,
-            TokenKind::DoubleColon | TokenKind::Dot | TokenKind::QuestionDot
-        )
-    })
-}
-
-fn previous_significant_kind(lexed: &LexedSource, index: usize) -> Option<TokenKind> {
-    lexed.tokens[..index]
-        .iter()
-        .rev()
-        .find(|token| !is_trivia(token.kind))
-        .map(|token| token.kind)
+    {
+        index -= 2;
+        indices.push(index);
+    }
+    indices.reverse();
+    indices.pop();
+    indices
+        .into_iter()
+        .map(|index| &lexed.tokens[index])
+        .collect()
 }

@@ -51,7 +51,7 @@ fn modifier_bit(modifier: &SemanticTokenModifier) -> u32 {
 fn decoded_for(source: &str) -> (LineIndex, DecodedTokens) {
     let index = LineIndex::new(source);
     let parsed = parse_source(source);
-    let decoded = absolute(&semantic_tokens(&lex_source(source), &parsed.file, &index));
+    let decoded = absolute(&semantic_tokens(&lex_source(source), &parsed, &index));
     (index, decoded)
 }
 
@@ -78,10 +78,11 @@ fn decoded_for_checked(source: &str) -> (LineIndex, DecodedTokens) {
         .find(|analyzed| analyzed.path == file)
         .expect("analyzed source file");
     let index = LineIndex::new(source);
-    let decoded = absolute(&semantic_tokens_with_bindings(
+    let decoded = absolute(&semantic_tokens_with_project_facts(
         &lex_source(source),
-        &parsed.parsed.file,
+        &parsed.parsed,
         &index,
+        Some((&snapshot, &file)),
         Some((&binding_index, &file)),
     ));
     assert!(
@@ -127,10 +128,11 @@ fn decoded_for_checked_file(
         .find(|analyzed| analyzed.path == active_file)
         .expect("analyzed active source file");
     let index = LineIndex::new(active_source);
-    let decoded = absolute(&semantic_tokens_with_bindings(
+    let decoded = absolute(&semantic_tokens_with_project_facts(
         &lex_source(active_source),
-        &parsed.parsed.file,
+        &parsed.parsed,
         &index,
+        Some((&snapshot, &active_file)),
         Some((&binding_index, &active_file)),
     ));
     assert!(
@@ -731,7 +733,7 @@ fn saved_root_sigil_and_name_are_marked_distinctly_from_a_variable() {
     let source = "module a\n\npub fn f()\n    const books: int = 1\n    delete ^books(books)\n";
     let index = LineIndex::new(source);
     let parsed = parse_source(source);
-    let tokens = semantic_tokens(&lex_source(source), &parsed.file, &index);
+    let tokens = semantic_tokens(&lex_source(source), &parsed, &index);
     let decoded = absolute(&tokens);
 
     // The saved-root tokens carry the dedicated type and the modification bit.
@@ -762,7 +764,7 @@ fn keywords_types_numbers_strings_and_comments_are_classified() {
     let source = "module a\n\nconst N: int = 42 ; a count\n";
     let index = LineIndex::new(source);
     let parsed = parse_source(source);
-    let decoded = absolute(&semantic_tokens(&lex_source(source), &parsed.file, &index));
+    let decoded = absolute(&semantic_tokens(&lex_source(source), &parsed, &index));
     let types: std::collections::HashSet<u32> =
         decoded.iter().map(|(_, _, _, ty, _)| *ty).collect();
     assert!(
@@ -782,7 +784,7 @@ fn namespace_separator_is_its_own_type() {
     let source = "module a\n\npub fn f()\n    std::clock::now()\n";
     let index = LineIndex::new(source);
     let parsed = parse_source(source);
-    let decoded = absolute(&semantic_tokens(&lex_source(source), &parsed.file, &index));
+    let decoded = absolute(&semantic_tokens(&lex_source(source), &parsed, &index));
     assert!(
         decoded.iter().any(|(_, _, _, ty, _)| *ty == TYPE_NAMESPACE),
         "the `::` separator colors as a namespace operator"
@@ -1203,6 +1205,54 @@ fn f()
         legend_index(&SemanticTokenType::VARIABLE),
         0,
     );
+}
+
+#[test]
+fn imported_standard_library_module_calls_use_marrow_callable_facts() {
+    let source = "\
+module m
+use std::text
+
+fn f()
+    const len_value = text::length(\"abc\")
+";
+    let (index, decoded) = decoded_for_checked(source);
+    let default_library = modifier_bit(&SemanticTokenModifier::DEFAULT_LIBRARY);
+
+    assert_token(
+        source,
+        &index,
+        &decoded,
+        "    const len_value = text::length(\"abc\")",
+        "text",
+        legend_index(&SemanticTokenType::NAMESPACE),
+        default_library,
+    );
+    assert_token(
+        source,
+        &index,
+        &decoded,
+        "    const len_value = text::length(\"abc\")",
+        "length",
+        legend_index(&SemanticTokenType::FUNCTION),
+        default_library,
+    );
+}
+
+#[test]
+fn semantic_tokens_have_no_local_intrinsic_callable_model() {
+    let source = include_str!("builtins.rs");
+    for forbidden in [
+        "marrow_schema::stdlib",
+        "language_facts::bare_builtin_kind",
+        "BareBuiltinKind",
+        "active_callable_context",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "semantic tokens must consume marrow_check callable facts instead of {forbidden}"
+        );
+    }
 }
 
 #[test]

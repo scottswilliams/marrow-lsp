@@ -707,17 +707,21 @@ impl LanguageServer for Backend {
         let Some(document) = documents.get(&url) else {
             return Ok(None);
         };
-        let binding_index = if snapshot_has_document_text(workspace.latest(), &path, &document.text)
-            && workspace.latest_matches_open_documents(documents)
-        {
-            workspace.binding_index()
-        } else {
-            None
-        };
-        let data = semantic_tokens::semantic_tokens_with_bindings(
+        let has_fresh_analysis =
+            snapshot_has_document_text(workspace.latest(), &path, &document.text)
+                && workspace.latest_matches_open_documents(documents);
+        if has_fresh_analysis {
+            let _ = workspace.binding_index();
+        }
+        let snapshot = has_fresh_analysis.then(|| workspace.latest()).flatten();
+        let binding_index = has_fresh_analysis
+            .then(|| workspace.binding_index_cached())
+            .flatten();
+        let data = semantic_tokens::semantic_tokens_with_project_facts(
             &document.lexed,
-            &document.parsed.file,
+            &document.parsed,
             &document.index,
+            snapshot.map(|snapshot| (snapshot, path.as_path())),
             binding_index.map(|index| (index, path.as_path())),
         );
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
