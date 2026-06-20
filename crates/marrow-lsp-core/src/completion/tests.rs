@@ -230,6 +230,17 @@ fn after_keyed_root_dot_lists_declared_saved_path_members() {
 }
 
 #[test]
+fn after_single_key_root_dot_accepts_trailing_comma() {
+    let (program, file) = project();
+    let labels = complete(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id,).|\n",
+    );
+    assert_eq!(labels, ["title", "shelf", "tags", "notes"]);
+}
+
+#[test]
 fn after_saved_layer_dot_lists_declared_nested_members() {
     let (program, file) = project();
     let items = complete_items(
@@ -283,7 +294,7 @@ fn after_two_key_root_dot_lists_declared_members_when_all_key_slots_are_present(
 }
 
 #[test]
-fn after_two_key_root_dot_returns_empty_when_a_top_level_key_slot_is_missing() {
+fn after_two_key_root_dot_returns_empty_when_key_slots_are_missing_or_malformed() {
     let (program, file) = project();
 
     for source in [
@@ -294,7 +305,24 @@ fn after_two_key_root_dot_returns_empty_when_a_top_level_key_slot_is_missing() {
         let labels = complete(&program, &file, source);
         assert!(
             labels.is_empty(),
-            "malformed key list must fail closed, got {labels:?} for {source:?}"
+            "incomplete or malformed key list must fail closed, got {labels:?} for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_saved_path_member_prefixes_return_no_bare_completions() {
+    let (program, file) = project();
+
+    for source in [
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).return|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).\"title\"|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).123|\n",
+    ] {
+        let labels = complete(&program, &file, source);
+        assert!(
+            labels.is_empty(),
+            "malformed saved member prefix must fail closed, got {labels:?} for {source:?}"
         );
     }
 }
@@ -328,6 +356,7 @@ fn ordinary_non_saved_dot_keeps_bare_completion() {
 
     for source in [
         "module shelf::app\n\npub fn f(foo: int)\n    const x = foo.|\n",
+        "module shelf::app\n\npub fn f(foo: int)\n    const x = foo.return|\n",
         "module shelf::app\n\npub fn f(foo: int, id: int)\n    const x = wrap(^books(id)).|\n",
     ] {
         let labels = complete(&program, &file, source);

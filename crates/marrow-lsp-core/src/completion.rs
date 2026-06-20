@@ -161,6 +161,7 @@ fn classify(source: &str, lexed: &LexedSource, offset: usize) -> Context {
                 Context::Bare
             }
         }
+        _ if malformed_saved_member_receiver(&tokens, anchor) => Context::InvalidSavedPath,
         _ => Context::Bare,
     }
 }
@@ -250,9 +251,12 @@ fn unrecovered_saved_path(tokens: &[Token], dot_index: usize) -> SavedPathRecove
 }
 
 fn malformed_saved_member_receiver_before_dot(tokens: &[Token], dot_index: usize) -> bool {
-    let Some(receiver) = dot_index.checked_sub(1) else {
-        return false;
-    };
+    dot_index
+        .checked_sub(1)
+        .is_some_and(|receiver| malformed_saved_member_receiver(tokens, receiver))
+}
+
+fn malformed_saved_member_receiver(tokens: &[Token], receiver: usize) -> bool {
     let Some(delimiter) = receiver.checked_sub(1) else {
         return false;
     };
@@ -418,7 +422,7 @@ fn count_top_level_arguments(
         return Some(0);
     }
     if !slot_has_token {
-        return None;
+        return Some(complete_slots);
     }
 
     Some(complete_slots + 1)
