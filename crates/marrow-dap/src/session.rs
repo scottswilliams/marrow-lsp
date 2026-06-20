@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
-use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType};
+use marrow_check::{
+    AnalysisSnapshot, CheckedDebugExpression, DebugExpressionDataAccess, MarrowType, ScalarType,
+};
 use marrow_run::{DebugValue, EntryArgument, EntryInvocation};
 use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
@@ -334,6 +336,18 @@ impl DapInputError {
             message: message.into(),
             contract,
         }
+    }
+}
+
+fn reject_durable_debug_expression(
+    expression: &CheckedDebugExpression,
+) -> Result<(), DapInputError> {
+    match expression.data_access() {
+        DebugExpressionDataAccess::LocalOnly => Ok(()),
+        DebugExpressionDataAccess::RequiresDurableData => Err(DapInputError::new(
+            RAW_DATA_INSPECTION_BLOCKED,
+            ERROR_DURABLE_DATA_BLOCKED,
+        )),
     }
 }
 
@@ -818,6 +832,7 @@ impl<W: Write> Session<W> {
                     ERROR_BREAKPOINT_CONDITION_INVALID,
                 )
             })?;
+        reject_durable_debug_expression(&expression)?;
         if !matches!(expression.ty(), MarrowType::Primitive(ScalarType::Bool)) {
             return Err(DapInputError::new(
                 BREAKPOINT_CONDITION_INVALID,
@@ -1167,8 +1182,8 @@ impl<W: Write> Session<W> {
     }
 
     /// `evaluate`: watch, REPL, and hover requests evaluate checked Marrow
-    /// debug expressions at the current stopped frame. Durable paths remain
-    /// blocked.
+    /// debug expressions at the current stopped frame. Expressions that require
+    /// durable data remain blocked.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
         let input = match parse_evaluate_input(arguments) {
             Ok(input) => input,
@@ -1177,14 +1192,6 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        if input.expression.trim_start().starts_with('^') {
-            self.respond_error(
-                request,
-                RAW_DATA_INSPECTION_BLOCKED,
-                ERROR_DURABLE_DATA_BLOCKED,
-            );
-            return;
-        }
 
         let Some((file, span)) = self.current_stop_file_span() else {
             self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
@@ -1236,6 +1243,10 @@ impl<W: Write> Session<W> {
                     diagnostic_message(EVALUATE_EXPRESSION_INVALID, &diagnostics),
                     ERROR_EVALUATE_EXPRESSION_INVALID,
                 )
+            })
+            .and_then(|expression| {
+                reject_durable_debug_expression(&expression)?;
+                Ok(expression)
             })
     }
 
@@ -1868,6 +1879,30 @@ mod tests {
 
     use super::*;
 
+    fn write_durable_debug_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let source = "module shelf\n\
+                      \n\
+                      resource Book\n\
+                      \x20   required title: string\n\
+                      store ^books(id: int): Book\n\
+                      fn storedTitle(id: int): string\n\
+                      \x20   return ^books(id).title ?? \"\"\n\
+                      pub fn main()\n\
+                      \x20   const id: int = 1\n\
+                      \x20   const title: string = \"Dune\"\n\
+                      \x20   print(title)\n";
+        std::fs::write(src.join("shelf.mw"), source).unwrap();
+        std::fs::write(
+            dir.path().join("marrow.json"),
+            "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
+        )
+        .unwrap();
+        dir
+    }
+
     fn stopped_info() -> StopInfo {
         StopInfo {
             reason: crate::step::StopReason::Entry,
@@ -1915,6 +1950,30 @@ mod tests {
             terminating: false,
         });
         (session, seen_rx)
+    }
+
+    #[test]
+    fn checked_evaluate_expression_blocks_durable_data_access() {
+        let dir = write_durable_debug_project();
+        let launch = crate::project::prepare(dir.path(), None, &[]).expect("launch");
+        let stop_points = StopPointIndex::from_runtime(launch.session.runtime_program());
+        let file = dir.path().join("src").join("shelf.mw");
+        let stop = stop_points
+            .stops(&normalize_existing_path(file), 11)
+            .and_then(|stops| stops.first())
+            .expect("line 11 stop");
+        let mut session = Session::new(Vec::new());
+        session.analysis = Some(launch.analysis_snapshot);
+
+        let direct = session
+            .checked_evaluate_expression(&stop.file, stop.span, "(^books(id).title ?? \"\")")
+            .expect_err("durable data expression should be blocked");
+        assert_eq!(direct.contract.code, "dap.durableData.blocked");
+
+        let helper = session
+            .checked_evaluate_expression(&stop.file, stop.span, "storedTitle(id) == \"Dune\"")
+            .expect_err("helper-mediated durable data expression should be blocked");
+        assert_eq!(helper.contract.code, "dap.durableData.blocked");
     }
 
     #[test]

@@ -153,6 +153,30 @@ fn write_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
+fn write_durable_helper_fixture(dir: &Path) -> std::path::PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  resource Book\n\
+                  \x20   required title: string\n\
+                  store ^books(id: int): Book\n\
+                  fn storedTitle(id: int): string\n\
+                  \x20   return ^books(id).title ?? \"\"\n\
+                  pub fn main()\n\
+                  \x20   const id: int = 1\n\
+                  \x20   const title: string = \"Dune\"\n\
+                  \x20   print(title)\n";
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
+    )
+    .unwrap();
+    file
+}
+
 fn write_repeated_call_fixture(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -1040,11 +1064,7 @@ fn valid_evaluate_envelopes_keep_typed_contracts() {
         json!({ "expression": "^books(1).title", "context": "watch" }),
     );
     let durable = client.response_for(durable);
-    assert_blocked_response(
-        &durable,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
-    );
+    assert_response_marrow_error(&durable, "dap.notStopped", "invalid-state", None);
 }
 
 #[test]
@@ -1812,21 +1832,17 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
         json!({ "expression": "^books(1).title", "context": "watch" }),
     );
     let watch = client.response_for(watch);
-    assert_blocked_response(
-        &watch,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
-    );
+    assert_evaluate_envelope_error(&watch, "dap.evaluate.expressionInvalid", "invalid-params");
 
     let hover_watch = client.request(
         "evaluate",
         json!({ "expression": "^books(1).title", "context": "hover" }),
     );
     let hover_watch = client.response_for(hover_watch);
-    assert_blocked_response(
+    assert_evaluate_envelope_error(
         &hover_watch,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
+        "dap.evaluate.expressionInvalid",
+        "invalid-params",
     );
 
     // continue to termination: expect the print output and a terminated event.
@@ -2292,6 +2308,44 @@ fn false_conditional_breakpoint_verifies_but_does_not_stop() {
     );
     let response = client.response_for(set);
     assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn durable_conditional_breakpoint_is_blocked_through_marrow_data_access_fact() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_durable_helper_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 11, "condition": "storedTitle(id) == \"Dune\"" }],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoint = &response["body"]["breakpoints"][0];
+    assert_eq!(breakpoint["verified"], false, "{response}");
+    assert_eq!(breakpoint["line"], 11, "{response}");
+    assert_breakpoint_marrow_contract(
+        breakpoint,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
+    );
 
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
@@ -2795,11 +2849,7 @@ fn dap_local_values_consume_runtime_debug_facts() {
         json!({ "expression": "^books(1).title", "context": "watch" }),
     );
     let watch = client.response_for(watch);
-    assert_blocked_response(
-        &watch,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
-    );
+    assert_evaluate_envelope_error(&watch, "dap.evaluate.expressionInvalid", "invalid-params");
 }
 
 #[test]
@@ -2970,14 +3020,57 @@ fn durable_data_inspection_is_blocked_by_default() {
     );
     let local_watch = client.response_for(local_watch);
     assert_evaluate_runtime_debug_value(&local_watch, "Dune", 0);
+}
+
+#[test]
+fn durable_watch_is_blocked_through_marrow_data_access_fact() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_durable_helper_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 11 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 11);
 
     let durable_watch = client.request(
         "evaluate",
-        json!({ "expression": "  ^books(1).title", "context": "watch" }),
+        json!({ "expression": "(^books(id).title ?? \"\")", "context": "watch" }),
     );
     let durable_watch = client.response_for(durable_watch);
     assert_blocked_response(
         &durable_watch,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
+    );
+
+    let root_durable_watch = client.request(
+        "evaluate",
+        json!({ "expression": "^books(id).title", "context": "watch" }),
+    );
+    let root_durable_watch = client.response_for(root_durable_watch);
+    assert_blocked_response(
+        &root_durable_watch,
         "dap.durableData.blocked",
         "typed durable watch/path facts",
     );
