@@ -294,9 +294,7 @@ store ^settings: Settings
     (dir, src.join("settings.mw"))
 }
 
-fn native_surface_project() -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
+fn write_surface_project(root: &Path) -> PathBuf {
     std::fs::write(
         root.join("marrow.json"),
         r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
@@ -320,6 +318,7 @@ surface Books from ^books
     fields title, author
     update author
     collection ^books.byAuthor as byAuthor
+    action retitle
 
 pub fn seed()
     var book: Book
@@ -327,10 +326,21 @@ pub fn seed()
     book.author = \"Frank Herbert\"
     transaction
         ^books(1) = book
+
+pub fn retitle(id: int, title: string): string
+    transaction
+        ^books(id).title = title
+    return title
 ",
     )
     .unwrap();
+    src.join("books.mw")
+}
 
+fn native_surface_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = write_surface_project(root);
     let session = ProjectSession::open(
         root,
         ProjectOpen::run().with_entry_override("app::books::seed".to_string()),
@@ -343,7 +353,14 @@ pub fn seed()
         .expect("seed native surface project");
     assert_eq!(output, "");
 
-    (dir, src.join("books.mw"))
+    (dir, file)
+}
+
+fn catalog_only_surface_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_surface_project(dir.path());
+    commit_then_check(dir.path()).expect("commit surface catalog");
+    (dir, file)
 }
 
 fn point_read_operation(file: &Path) -> Json {
@@ -376,6 +393,82 @@ fn point_read_operation(file: &Path) -> Json {
             }
         }
     })
+}
+
+fn update_author_operation(file: &Path, value: &str) -> Json {
+    let (workspace, _) = load_project(file, None).expect("surface project checks");
+    let program = workspace.program().expect("checked program");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(program);
+    let update = abi
+        .surfaces
+        .iter()
+        .find_map(|surface| surface.update.as_ref())
+        .expect("update descriptor");
+    let author = update
+        .fields
+        .iter()
+        .find(|field| field.render_label == "author")
+        .expect("author update field");
+
+    json!({
+        "profile_version": "surface.operation.v1",
+        "operation_tag": update.operation_tag,
+        "request": {
+            "kind": "point_update",
+            "request": {
+                "identity": {
+                    "store_catalog_id": update.store_catalog_id,
+                    "keys": [{ "kind": "int", "value": "1" }]
+                },
+                "fields": [{
+                    "catalog_id": author.member_catalog_id,
+                    "value": { "kind": "string", "value": value }
+                }]
+            }
+        }
+    })
+}
+
+fn retitle_action_operation(file: &Path, title: &str) -> Json {
+    let (workspace, _) = load_project(file, None).expect("surface project checks");
+    let program = workspace.program().expect("checked program");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(program);
+    let action = abi
+        .surfaces
+        .iter()
+        .flat_map(|surface| surface.actions.iter())
+        .find(|action| action.alias == "retitle")
+        .expect("retitle action descriptor");
+
+    json!({
+        "profile_version": "surface.operation.v1",
+        "operation_tag": action.operation_tag,
+        "request": {
+            "kind": "action",
+            "request": {
+                "arguments": [
+                    {
+                        "name": "id",
+                        "value": { "kind": "int", "value": "1" }
+                    },
+                    {
+                        "name": "title",
+                        "value": { "kind": "string", "value": title }
+                    }
+                ]
+            }
+        }
+    })
+}
+
+fn read_field(result: &Json, name: &str) -> Json {
+    result["response"]["result"]["record"]["fields"]
+        .as_array()
+        .expect("record fields")
+        .iter()
+        .find(|field| field["render_label"] == name)
+        .unwrap_or_else(|| panic!("field {name} in {result}"))["value"]
+        .clone()
 }
 
 #[test]
@@ -535,9 +628,9 @@ resource Book
 
 #[test]
 fn surface_routes_returns_read_only_manifest_without_data_gate() {
-    let (_dir, file) = native_surface_project();
+    let (_dir, file) = catalog_only_surface_project();
 
-    let result = surface_routes(&file);
+    let result = surface_routes(&file, SurfaceRouteScope::ReadOnly);
 
     assert_eq!(result["profile_version"], "surface.route.v1", "{result}");
     assert_eq!(
@@ -571,6 +664,33 @@ fn surface_routes_returns_read_only_manifest_without_data_gate() {
 }
 
 #[test]
+fn surface_routes_all_scope_includes_write_and_action_routes_without_data_gate() {
+    let (_dir, file) = catalog_only_surface_project();
+
+    let result = surface_routes(&file, SurfaceRouteScope::All);
+
+    let routes = result["routes"].as_array().expect("surface routes");
+    let aliases = routes
+        .iter()
+        .map(|route| route["alias"].as_str().expect("route alias"))
+        .collect::<Vec<_>>();
+    assert_eq!(aliases, vec!["get", "byAuthor", "update", "retitle"]);
+    assert!(
+        routes.iter().any(|route| route["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("/surface/v1/update/"))),
+        "all-scope routes must expose update paths: {result}"
+    );
+    assert!(
+        routes.iter().any(|route| route["path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("/surface/v1/action/"))),
+        "all-scope routes must expose action paths: {result}"
+    );
+    assert_production_contract(&result, "surface route manifest");
+}
+
+#[test]
 fn surface_read_refuses_before_project_loading_when_data_access_is_disabled() {
     let request = json!({
         "profile_version": "surface.operation.v1",
@@ -588,6 +708,105 @@ fn surface_read_refuses_before_project_loading_when_data_access_is_disabled() {
         "disabled surface reads must not reach project loading: {result}"
     );
     assert_production_contract(&result, "surface read operation");
+}
+
+#[test]
+fn surface_write_refuses_before_project_loading_when_data_access_is_disabled() {
+    let request = json!({
+        "profile_version": "surface.operation.v1",
+        "operation_tag": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "request": {
+            "kind": "point_update",
+            "request": {
+                "identity": {
+                    "store_catalog_id": "cat_00000000000000000000000000000000",
+                    "keys": [{ "kind": "int", "value": "1" }]
+                },
+                "fields": []
+            }
+        }
+    });
+
+    let result = surface_write(Path::new("/nope/project/src/main.mw"), request, false)
+        .expect("valid operation request");
+
+    assert_eq!(result["available"], false, "{result}");
+    assert_eq!(result["dataAccess"], "disabled", "{result}");
+    assert!(
+        result.get("error").is_none(),
+        "disabled surface writes must not reach project loading: {result}"
+    );
+    assert_production_contract(&result, "surface write operation");
+    assert_eq!(
+        result["contract"]["basis"],
+        "Marrow surface operation writable executor"
+    );
+    assert_eq!(result["contract"]["operations"], "read/update/action");
+}
+
+#[test]
+fn surface_write_executes_canonical_point_update_request() {
+    let (_dir, file) = native_surface_project();
+    let before =
+        surface_read(&file, point_read_operation(&file), true).expect("valid read operation");
+
+    let result = surface_write(&file, update_author_operation(&file, "Brian Herbert"), true)
+        .expect("valid update operation");
+    let after =
+        surface_read(&file, point_read_operation(&file), true).expect("valid read operation");
+
+    assert_eq!(result["available"], true, "{result}");
+    assert_eq!(result["response"]["result"]["kind"], "updated", "{result}");
+    assert!(
+        result["store_stamp"]["commit_id"].as_u64() > before["store_stamp"]["commit_id"].as_u64(),
+        "surface write must advance the store commit id: before={before} write={result}"
+    );
+    assert_eq!(
+        read_field(&after, "author"),
+        json!({ "kind": "string", "value": "Brian Herbert" }),
+        "{after}"
+    );
+    assert!(
+        after["store_stamp"]["commit_id"].as_u64() >= result["store_stamp"]["commit_id"].as_u64(),
+        "later reads must observe the write stamp: write={result} after={after}"
+    );
+    assert_production_contract(&result, "surface write operation");
+}
+
+#[test]
+fn surface_write_executes_canonical_action_request_and_returns_canonical_errors() {
+    let (_dir, file) = native_surface_project();
+
+    let result = surface_write(&file, retitle_action_operation(&file, "Dune MCP"), true)
+        .expect("valid action operation");
+    let after =
+        surface_read(&file, point_read_operation(&file), true).expect("valid read operation");
+
+    assert_eq!(result["available"], true, "{result}");
+    assert_eq!(result["response"]["result"]["kind"], "action", "{result}");
+    assert_eq!(
+        result["response"]["result"]["result"]["value"],
+        json!({ "kind": "string", "value": "Dune MCP" }),
+        "{result}"
+    );
+    assert_eq!(
+        read_field(&after, "title"),
+        json!({ "kind": "string", "value": "Dune MCP" }),
+        "{after}"
+    );
+
+    let action_request = retitle_action_operation(&file, "unused");
+    let mut wrong_body = update_author_operation(&file, "Wrong Body");
+    wrong_body["operation_tag"] = action_request["operation_tag"].clone();
+    let mismatch = surface_write(&file, wrong_body, true).expect("valid operation DTO");
+    assert_eq!(mismatch["available"], true, "{mismatch}");
+    assert_eq!(mismatch["error"]["code"], "surface.request", "{mismatch}");
+    assert_eq!(
+        mismatch["error"]["message"],
+        "surface operation request body does not match the operation tag",
+        "{mismatch}"
+    );
+    assert_production_contract(&mismatch, "surface write operation");
 }
 
 #[test]

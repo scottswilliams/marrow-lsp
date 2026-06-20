@@ -14,7 +14,7 @@ use marrow_lsp_core::data_explorer::{
 use marrow_lsp_core::mcp::{
     self, COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
     DATA_READ_MISSING_FACTS, RESOURCE_SCHEMA_MISSING_FACTS, RUN_MISSING_FACTS, RunMode,
-    SAVED_DATA_MISSING_FACTS,
+    SAVED_DATA_MISSING_FACTS, SurfaceRouteScope,
 };
 use serde_json::{Value as Json, json};
 
@@ -128,7 +128,7 @@ fn run_input_schema() -> Json {
 fn surface_operation_schema() -> Json {
     json!({
         "type": "object",
-        "description": "Canonical marrow_json surface.operation.v1 request envelope. The body is decoded only by Marrow's SurfaceOperationRequestJson DTO and executed by the read-only surface executor.",
+        "description": "Canonical marrow_json surface.operation.v1 request envelope. The body is decoded only by Marrow's SurfaceOperationRequestJson DTO and executed by Marrow's surface executor.",
         "properties": {
             "profile_version": { "const": "surface.operation.v1" },
             "operation_tag": string_prop("Stable operation tag from mw_surface_routes."),
@@ -243,20 +243,24 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_surface_routes",
-            "description": "Return the Marrow-owned read-only surface route manifest for the checked project using the canonical surface ABI and route DTOs. This opens no data store and needs no data-access opt-in.",
+            "description": "Return the Marrow-owned surface route manifest for the checked project using the canonical surface ABI and route DTOs. By default this returns read routes only; pass includeWrites true to explicitly include update/action routes. This opens no data store and needs no data-access opt-in.",
             "_meta": marrow_meta(json!({
                 "status": "ready",
                 "stableProductionApi": true,
-                "description": "surface read route manifest",
+                "description": "surface route manifest",
                 "basis": "Marrow surface route manifest DTO",
                 "missingFacts": [],
                 "dataAccess": "not-required",
-                "operations": "read-only",
+                "operations": "read/update/action by explicit route scope",
             })),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
+                    "includeWrites": {
+                        "type": "boolean",
+                        "description": "When true, include canonical update/action routes as well as read routes. Defaults to false.",
+                    },
                 },
                 "required": ["file"],
             },
@@ -272,6 +276,27 @@ pub fn tools() -> Json {
                 "missingFacts": [],
                 "dataAccess": "gated",
                 "operations": "read-only",
+            })),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": string_prop("Absolute path to any .mw file inside the project."),
+                    "operation": surface_operation_schema(),
+                },
+                "required": ["file", "operation"],
+            },
+        },
+        {
+            "name": "mw_surface_write",
+            "description": "Execute one canonical surface.operation.v1 read, update, or action request against the project's writable Marrow surface session. This is gated by data access, refuses before project/store opening when disabled, and returns canonical Marrow surface operation response or error envelopes.",
+            "_meta": marrow_meta(json!({
+                "status": "ready",
+                "stableProductionApi": true,
+                "description": "surface write operation",
+                "basis": "Marrow surface operation writable executor",
+                "missingFacts": [],
+                "dataAccess": "gated",
+                "operations": "read/update/action",
             })),
             "inputSchema": {
                 "type": "object",
@@ -463,12 +488,22 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
         }
         "mw_surface_routes" => {
             let file = required_path(arguments, "file")?;
-            Ok(mcp::surface_routes(&file))
+            let scope = if optional_bool(arguments, "includeWrites")? {
+                SurfaceRouteScope::All
+            } else {
+                SurfaceRouteScope::ReadOnly
+            };
+            Ok(mcp::surface_routes(&file, scope))
         }
         "mw_surface_read" => {
             let file = required_path(arguments, "file")?;
             let operation = required_object(arguments, "operation")?;
             mcp::surface_read(&file, operation, policy.allow_data)
+        }
+        "mw_surface_write" => {
+            let file = required_path(arguments, "file")?;
+            let operation = required_object(arguments, "operation")?;
+            mcp::surface_write(&file, operation, policy.allow_data)
         }
         "mw_saved_roots" => {
             let file = required_path(arguments, "file")?;
@@ -519,6 +554,14 @@ fn optional_str<'a>(arguments: &'a Json, key: &str) -> Result<Option<&'a str>, S
         None | Some(Json::Null) => Ok(None),
         Some(Json::String(value)) => Ok(Some(value)),
         Some(_) => Err(format!("argument `{key}` must be a string when present")),
+    }
+}
+
+fn optional_bool(arguments: &Json, key: &str) -> Result<bool, String> {
+    match arguments.get(key) {
+        None | Some(Json::Null) => Ok(false),
+        Some(Json::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("argument `{key}` must be a boolean when present")),
     }
 }
 
@@ -596,6 +639,7 @@ mod tests {
             "mw_resource_schema",
             "mw_surface_routes",
             "mw_surface_read",
+            "mw_surface_write",
             "mw_saved_roots",
             "mw_data_children",
             "mw_data_read",
@@ -661,14 +705,17 @@ mod tests {
         let surface_routes = contract(tools, "mw_surface_routes");
         assert_eq!(surface_routes["status"], "ready");
         assert_eq!(surface_routes["stableProductionApi"], true);
-        assert_eq!(surface_routes["description"], "surface read route manifest");
+        assert_eq!(surface_routes["description"], "surface route manifest");
         assert_eq!(surface_routes["basis"], "Marrow surface route manifest DTO");
         assert_eq!(
             strings(&surface_routes["missingFacts"]),
             Vec::<String>::new()
         );
         assert_eq!(surface_routes["dataAccess"], "not-required");
-        assert_eq!(surface_routes["operations"], "read-only");
+        assert_eq!(
+            surface_routes["operations"],
+            "read/update/action by explicit route scope"
+        );
 
         let surface_read = contract(tools, "mw_surface_read");
         assert_eq!(surface_read["status"], "ready");
@@ -681,6 +728,21 @@ mod tests {
         assert_eq!(strings(&surface_read["missingFacts"]), Vec::<String>::new());
         assert_eq!(surface_read["dataAccess"], "gated");
         assert_eq!(surface_read["operations"], "read-only");
+
+        let surface_write = contract(tools, "mw_surface_write");
+        assert_eq!(surface_write["status"], "ready");
+        assert_eq!(surface_write["stableProductionApi"], true);
+        assert_eq!(surface_write["description"], "surface write operation");
+        assert_eq!(
+            surface_write["basis"],
+            "Marrow surface operation writable executor"
+        );
+        assert_eq!(
+            strings(&surface_write["missingFacts"]),
+            Vec::<String>::new()
+        );
+        assert_eq!(surface_write["dataAccess"], "gated");
+        assert_eq!(surface_write["operations"], "read/update/action");
     }
 
     #[test]
@@ -789,7 +851,15 @@ mod tests {
             json!(["file"])
         );
         assert_eq!(
+            tool(tools, "mw_surface_routes")["inputSchema"]["properties"]["includeWrites"]["type"],
+            "boolean"
+        );
+        assert_eq!(
             tool(tools, "mw_surface_read")["inputSchema"]["required"],
+            json!(["file", "operation"])
+        );
+        assert_eq!(
+            tool(tools, "mw_surface_write")["inputSchema"]["required"],
             json!(["file", "operation"])
         );
         assert_eq!(
@@ -943,6 +1013,32 @@ mod tests {
         assert_eq!(result["dataAccess"], "disabled");
         assert_eq!(result["contract"]["status"], "ready");
         assert_eq!(result["contract"]["stableProductionApi"], true);
+        let result = call(
+            "mw_surface_write",
+            &json!({
+                "file": "/nope/x.mw",
+                "operation": {
+                    "profile_version": "surface.operation.v1",
+                    "operation_tag": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "request": {
+                        "kind": "point_update",
+                        "request": {
+                            "identity": {
+                                "store_catalog_id": "cat_00000000000000000000000000000000",
+                                "keys": [{ "kind": "int", "value": "1" }]
+                            },
+                            "fields": []
+                        }
+                    }
+                }
+            }),
+            policy,
+        )
+        .unwrap();
+        assert_eq!(result["dataAccess"], "disabled");
+        assert_eq!(result["contract"]["status"], "ready");
+        assert_eq!(result["contract"]["stableProductionApi"], true);
+        assert_eq!(result["contract"]["operations"], "read/update/action");
     }
 
     #[test]

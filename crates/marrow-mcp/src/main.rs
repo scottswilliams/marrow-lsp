@@ -9,12 +9,13 @@
 //! only protocol messages.
 //!
 //! ## Data-access gate
-//! The saved-root and data-inspection tools read a project's real stored data, so they are a
-//! data-exfiltration boundary. They are disabled unless the operator opts in at
-//! launch with `MARROW_MCP_ALLOW_DATA=1` (or the `--allow-data` flag). When
-//! disabled, those tools return a clear refusal and read nothing. Execution
-//! (`mw_run`) is always sandboxed (a fresh in-memory store, a locked-down host),
-//! so it needs no gate.
+//! Saved-root, data-inspection, and surface operation tools read a project's real
+//! stored data, so they are a data-exfiltration boundary. They are disabled
+//! unless the operator opts in at launch with `MARROW_MCP_ALLOW_DATA=1` (or the
+//! `--allow-data` flag). When disabled, those tools return a clear refusal and
+//! read nothing. Surface route listing reads only source/catalog facts and stays
+//! outside this gate. Execution (`mw_run`) is always sandboxed (a fresh in-memory
+//! store, a locked-down host), so it needs no gate.
 
 mod server;
 
@@ -206,7 +207,7 @@ fn summarize(name: &str, result: &Json) -> String {
             "mw_complete" => count_summary(result, "items", "no completions", "completion"),
             "mw_resource_schema" => count_summary(result, "resources", "no resources", "resource"),
             "mw_surface_routes" => count_summary(result, "routes", "no routes", "route"),
-            "mw_surface_read" => surface_read_summary(result),
+            "mw_surface_read" | "mw_surface_write" => surface_read_summary(result),
             "mw_saved_roots" => {
                 if result.get("available").and_then(Json::as_bool) != Some(true) {
                     "data unavailable".to_string()
@@ -495,6 +496,52 @@ mod tests {
         assert_eq!(replies[0]["result"]["serverInfo"]["name"], "marrow-mcp");
         let tools = replies[1]["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "mw_check"));
+        assert!(tools.iter().any(|tool| tool["name"] == "mw_surface_write"));
+    }
+
+    #[test]
+    fn tools_call_to_surface_write_refuses_when_data_access_is_disabled() {
+        let policy = Policy { allow_data: false };
+        let replies = drive(
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "mw_surface_write",
+                    "arguments": {
+                        "file": "/nope/project/src/main.mw",
+                        "operation": {
+                            "profile_version": "surface.operation.v1",
+                            "operation_tag": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                            "request": {
+                                "kind": "point_update",
+                                "request": {
+                                    "identity": {
+                                        "store_catalog_id": "cat_00000000000000000000000000000000",
+                                        "keys": [{ "kind": "int", "value": "1" }]
+                                    },
+                                    "fields": []
+                                }
+                            }
+                        }
+                    }
+                }
+            })],
+            policy,
+        );
+        let result = &replies[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        assert_eq!(result["structuredContent"]["dataAccess"], "disabled");
+        assert_eq!(result["structuredContent"]["contract"]["status"], "ready");
+        assert_eq!(
+            result["structuredContent"]["contract"]["operations"],
+            "read/update/action"
+        );
+        assert_eq!(
+            result["content"][0]["text"],
+            "surface write operation (ready): data access disabled"
+        );
     }
 
     #[test]
@@ -847,6 +894,7 @@ mod tests {
             "mw_data_children",
             "mw_data_integrity",
             "mw_surface_read",
+            "mw_surface_write",
         ] {
             assert_eq!(summarize(tool, &result), "data access disabled");
         }

@@ -9,10 +9,11 @@
 //!
 //! Two boundaries are enforced here, not in the transport:
 //!
-//! - **Data access** ([`saved_roots`]) reads a project's real stored tree, so the
-//!   transport gates it behind an explicit opt-in and passes `allow_data = false`
-//!   otherwise; the function then returns a clear refusal envelope and never
-//!   touches the store.
+//! - **Data access** ([`saved_roots`], [`surface_read`], [`surface_write`]) reads
+//!   a project's real stored tree, so the transport gates it behind an explicit
+//!   opt-in and passes `allow_data = false` otherwise; the function then returns
+//!   a clear refusal envelope and never touches the store. [`surface_routes`]
+//!   reads only source/catalog facts and stays outside this gate.
 //! - **Execution** ([`run`]) evaluates a function through Marrow's fresh-memory
 //!   project session — never the project's real store — under a locked-down
 //!   [`Host`] that grants only a deterministic clock and a captured log: no
@@ -24,13 +25,14 @@ use std::path::{Path, PathBuf};
 use marrow_check::{CheckedProgram, type_at};
 use marrow_json::surface::{
     SURFACE_OPERATION_PROFILE_VERSION, SURFACE_ROUTE_PROFILE_VERSION, SurfaceAbiJson,
-    SurfaceOperationRequestJson, SurfaceRouteManifestJson,
+    SurfaceOperationRequestJson, SurfaceRouteManifestJson, execute_project_surface_operation,
     execute_project_surface_operation_read_only,
 };
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation, Host,
     ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError,
-    ProjectSurfaceReadSession, RunOutput, RuntimeError, SessionEntry, Value, run_entry_with_host,
+    ProjectSurfaceReadSession, ProjectSurfaceSession, RunOutput, RuntimeError, SessionEntry,
+    StoreStamp, Value, run_entry_with_host,
 };
 use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
@@ -119,11 +121,18 @@ fn resource_schema_contract() -> Json {
     presentation_contract("development helper", RESOURCE_SCHEMA_MISSING_FACTS)
 }
 
-fn surface_routes_contract() -> Json {
-    let mut contract = production_contract("surface read route manifest");
+fn surface_routes_contract(scope: SurfaceRouteScope) -> Json {
+    let description = match scope {
+        SurfaceRouteScope::ReadOnly => "surface read route manifest",
+        SurfaceRouteScope::All => "surface route manifest",
+    };
+    let mut contract = production_contract(description);
     contract["basis"] = json!("Marrow surface route manifest DTO");
     contract["dataAccess"] = json!("not-required");
-    contract["operations"] = json!("read-only");
+    contract["operations"] = match scope {
+        SurfaceRouteScope::ReadOnly => json!("read-only"),
+        SurfaceRouteScope::All => json!("read/update/action"),
+    };
     contract
 }
 
@@ -132,6 +141,14 @@ fn surface_read_contract() -> Json {
     contract["basis"] = json!("Marrow surface operation read-only executor");
     contract["dataAccess"] = json!("gated");
     contract["operations"] = json!("read-only");
+    contract
+}
+
+fn surface_write_contract() -> Json {
+    let mut contract = production_contract("surface write operation");
+    contract["basis"] = json!("Marrow surface operation writable executor");
+    contract["dataAccess"] = json!("gated");
+    contract["operations"] = json!("read/update/action");
     contract
 }
 
@@ -390,11 +407,17 @@ pub fn resource_schema(file: &Path, name: &str) -> Json {
     with_contract(json!({ "resources": resources }), contract)
 }
 
-/// `mw_surface_routes`: the Marrow-owned read route manifest for the checked
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRouteScope {
+    ReadOnly,
+    All,
+}
+
+/// `mw_surface_routes`: the Marrow-owned route manifest for the checked
 /// project's stable surface operations. This reads source/catalog facts only; it
 /// does not open the project's data store and does not need the data-access gate.
-pub fn surface_routes(file: &Path) -> Json {
-    let contract = surface_routes_contract();
+pub fn surface_routes(file: &Path, scope: SurfaceRouteScope) -> Json {
+    let contract = surface_routes_contract(scope);
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
         Err(error) => return with_contract(empty_surface_route_manifest(error), contract),
@@ -404,7 +427,9 @@ pub fn surface_routes(file: &Path) -> Json {
     };
     let abi = SurfaceAbiJson::from_program(program);
     let mut manifest = SurfaceRouteManifestJson::from_abi(&abi);
-    manifest.routes.retain(|route| route.request.is_read());
+    if scope == SurfaceRouteScope::ReadOnly {
+        manifest.routes.retain(|route| route.request.is_read());
+    }
     let result = serde_json::to_value(manifest).expect("surface route manifest DTO serializes");
     with_contract(result, contract)
 }
@@ -457,11 +482,7 @@ pub fn surface_read(file: &Path, operation: Json, allow_data: bool) -> Result<Js
         }
     };
     let store_stamp = match session.store_stamp() {
-        Ok(stamp) => json!({
-            "store_uid": stamp.store_uid,
-            "catalog_epoch": stamp.catalog_epoch,
-            "commit_id": stamp.commit_id,
-        }),
+        Ok(stamp) => store_stamp_json(stamp),
         Err(error) => {
             return Ok(with_contract(
                 json!({ "available": false, "error": error.message() }),
@@ -476,6 +497,71 @@ pub fn surface_read(file: &Path, operation: Json, allow_data: bool) -> Result<Js
         Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
     };
     Ok(with_contract(result, contract))
+}
+
+/// `mw_surface_write`: execute one canonical `surface.operation.v1` request
+/// through Marrow's writable project surface executor. The MCP data-access gate
+/// is checked before project or store opening; operation bodies are admitted only
+/// by the Marrow JSON DTO and executor.
+pub fn surface_write(file: &Path, operation: Json, allow_data: bool) -> Result<Json, String> {
+    let contract = surface_write_contract();
+    if !allow_data {
+        return Ok(data_disabled(contract));
+    }
+    let request: SurfaceOperationRequestJson = serde_json::from_value(operation)
+        .map_err(|error| format!("invalid mw_surface_write operation: {error}"))?;
+    let workspace = match load_project(file, None) {
+        Ok((workspace, _)) => workspace,
+        Err(error) => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": error }),
+                contract,
+            ));
+        }
+    };
+    let project = match workspace.project() {
+        Some(project) => project,
+        None => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": "no project resolved for the file" }),
+                contract,
+            ));
+        }
+    };
+    let session = match ProjectSurfaceSession::open(&project.root) {
+        Ok(session) => session,
+        Err(error) => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": error.message() }),
+                contract,
+            ));
+        }
+    };
+    let operation_result = execute_project_surface_operation(&session, &request);
+    let store_stamp = match session.store_stamp() {
+        Ok(stamp) => store_stamp_json(stamp),
+        Err(error) => {
+            return Ok(with_contract(
+                json!({ "available": false, "error": error.message() }),
+                contract,
+            ));
+        }
+    };
+    let result = match operation_result {
+        Ok(response) => {
+            json!({ "available": true, "store_stamp": store_stamp, "response": response })
+        }
+        Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
+    };
+    Ok(with_contract(result, contract))
+}
+
+fn store_stamp_json(stamp: StoreStamp) -> Json {
+    json!({
+        "store_uid": stamp.store_uid,
+        "catalog_epoch": stamp.catalog_epoch,
+        "commit_id": stamp.commit_id,
+    })
 }
 
 /// Project one resource schema to JSON: name, stores, and member tree. The member

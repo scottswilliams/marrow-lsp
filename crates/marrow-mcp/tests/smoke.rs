@@ -134,6 +134,10 @@ fn initialize_list_tools_then_call_mw_check() {
         "mw_surface_read listed, got {names:?}"
     );
     assert!(
+        names.contains(&"mw_surface_write"),
+        "mw_surface_write listed, got {names:?}"
+    );
+    assert!(
         !names.contains(&"mw_saved_get") && !names.contains(&"mw_saved_children"),
         "old saved-data child/get tools stay absent, got {names:?}"
     );
@@ -309,6 +313,47 @@ fn data_tools_refuse_without_the_opt_in() {
     assert_eq!(
         structured["contract"]["description"],
         "surface read operation"
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "mw_surface_write",
+                "arguments": {
+                    "file": "/nope/project/src/main.mw",
+                    "operation": {
+                        "profile_version": "surface.operation.v1",
+                        "operation_tag": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        "request": {
+                            "kind": "point_update",
+                            "request": {
+                                "identity": {
+                                    "store_catalog_id": "cat_00000000000000000000000000000000",
+                                    "keys": [{ "kind": "int", "value": "1" }]
+                                },
+                                "fields": []
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    );
+    let response = wait_for(&mut stdout, 6, Duration::from_secs(10));
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(
+        structured["dataAccess"], "disabled",
+        "without the opt-in, mw_surface_write must refuse before loading the file, got {response}"
+    );
+    assert_eq!(structured["available"], false);
+    assert_eq!(structured["contract"]["status"], "ready");
+    assert_eq!(
+        structured["contract"]["description"],
+        "surface write operation"
     );
 
     let _ = server.0.kill();
