@@ -1587,7 +1587,7 @@ pub fn echo(book: Book): Book
 }
 
 #[test]
-fn hover_over_evolve_transform_type_annotation_shows_resource_hover() {
+fn hover_over_evolve_transform_type_annotation_is_unavailable_without_binding_fact() {
     let source = "\
 module a
 
@@ -1605,19 +1605,9 @@ evolve
     let index = index_for(&snapshot);
 
     let offset = offset_of(source, "draft: Book") + "draft: ".len();
-    let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup");
-    };
-    let value = markup.value;
-
     assert!(
-        value.starts_with("```marrow\nresource Book\n```"),
-        "evolve transform type annotation should show resource hover: {value}"
-    );
-    assert!(
-        value.contains("Books saved by id."),
-        "resource docs should be included: {value}"
+        hover_with_index(&snapshot, &index, &file, offset).is_none(),
+        "evolve transform body type refs stay unavailable until Marrow emits a binding fact"
     );
 }
 

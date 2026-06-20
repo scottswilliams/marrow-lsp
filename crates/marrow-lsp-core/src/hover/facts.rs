@@ -2,8 +2,8 @@ use std::path::Path;
 
 use marrow_check::{
     AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedConst, CheckedFacts, CheckedFunction,
-    CheckedParam, DefItem, DirectEffectFacts, FunctionFact, MarrowType, Resolution, ResolvableKind,
-    SymbolKind, SymbolRef, UseSiteKind, resolve, type_at,
+    CheckedParam, DirectEffectFacts, FunctionFact, MarrowType, SymbolKind, SymbolRef, UseSiteKind,
+    type_at,
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema};
 use marrow_syntax::{FunctionDecl, IndexDecl, Keyword, ResourceMember, TokenKind, lex_source};
@@ -93,12 +93,6 @@ pub(super) fn collect<'a>(
         return Some(fact);
     }
     if let Some(fact) = resource_member_fact(snapshot, index, file, offset) {
-        return Some(fact);
-    }
-    if let Some(fact) = resource_constructor_fact(snapshot, file, offset) {
-        return Some(fact);
-    }
-    if let Some(fact) = type_name_fact(snapshot, file, offset) {
         return Some(fact);
     }
 
@@ -348,50 +342,6 @@ fn resource_member_fact<'a>(
     }
 }
 
-fn resource_constructor_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-    let segments = tokens::resource_constructor_segments_at(&analyzed.source, offset)?;
-    let from_module = module_name_for_file(snapshot, file)?;
-    match resolve(
-        &snapshot.program,
-        from_module,
-        &segments,
-        ResolvableKind::Resource,
-    ) {
-        Resolution::Found(def) => match def.item {
-            DefItem::Resource(schema) => Some(HoverFact::Resource { schema }),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn type_name_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-    if type_at(&snapshot.program, file, &analyzed.parsed, offset).is_some() {
-        return None;
-    }
-    if !crate::type_context::type_annotation_at(&analyzed.parsed.file, offset) {
-        return None;
-    }
-    let (segments, segment_index) =
-        tokens::qualified_name_at_with_position(&analyzed.source, offset)?;
-    if segment_index + 1 == segments.len()
-        && let Some(schema) = resource_schema_for_type_name(snapshot, file, &segments)
-    {
-        return Some(HoverFact::Resource { schema });
-    }
-    None
-}
-
 fn symbol_docs_at_hover_target<'a>(
     snapshot: &'a AnalysisSnapshot,
     index: &BindingIndex,
@@ -639,26 +589,6 @@ fn resource_schema_for_symbol<'a>(
         .find(|schema| schema.name == resource.name)
 }
 
-fn resource_schema_for_type_name<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    segments: &[String],
-) -> Option<&'a ResourceSchema> {
-    let from_module = module_name_for_file(snapshot, file)?;
-    match resolve(
-        &snapshot.program,
-        from_module,
-        segments,
-        ResolvableKind::Resource,
-    ) {
-        Resolution::Found(def) => match def.item {
-            DefItem::Resource(schema) => Some(schema),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn enum_schema_for_symbol<'a>(
     snapshot: &'a AnalysisSnapshot,
     symbol: &SymbolRef,
@@ -695,13 +625,4 @@ fn enum_schema_in_file<'a>(
         .enums
         .iter()
         .find(|enum_schema| enum_schema.name == name)
-}
-
-fn module_name_for_file<'a>(snapshot: &'a AnalysisSnapshot, file: &Path) -> Option<&'a str> {
-    snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == file)
-        .map(|module| module.name.as_str())
 }

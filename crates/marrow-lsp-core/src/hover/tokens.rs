@@ -18,25 +18,6 @@ fn next_significant_kind(tokens: &[Token], index: usize) -> Option<TokenKind> {
         .map(|token| token.kind)
 }
 
-pub(super) fn resource_constructor_segments_at(source: &str, offset: usize) -> Option<Vec<String>> {
-    is_resource_constructor_leaf(source, offset).then(|| qualified_name_at(source, offset))?
-}
-
-fn is_resource_constructor_leaf(source: &str, offset: usize) -> bool {
-    let tokens = lex_source(source).tokens;
-    let Some((_start, end, index)) = qualified_name_token_bounds(&tokens, offset) else {
-        return false;
-    };
-    index == end
-        && tokens
-            .get(end + 1)
-            .is_some_and(|token| token.kind == TokenKind::LeftParen)
-}
-
-fn qualified_name_at(source: &str, offset: usize) -> Option<Vec<String>> {
-    qualified_name_at_with_position(source, offset).map(|(segments, _)| segments)
-}
-
 pub(super) fn qualified_name_at_with_position(
     source: &str,
     offset: usize,
