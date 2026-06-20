@@ -13,18 +13,6 @@ pub(super) fn is_path_segment_token(kind: TokenKind) -> bool {
     matches!(kind, TokenKind::Identifier | TokenKind::Keyword(_))
 }
 
-pub(super) fn is_trivia(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Indent
-            | TokenKind::Dedent
-            | TokenKind::Newline
-            | TokenKind::Eof
-            | TokenKind::Comment
-            | TokenKind::DocComment
-    )
-}
-
 /// The semantic token type for a lexer token kind, or `None` for trivia and
 /// structural tokens the editor does not color.
 pub(super) fn token_type(kind: TokenKind) -> Option<u32> {

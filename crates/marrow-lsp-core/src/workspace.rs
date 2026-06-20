@@ -12,7 +12,10 @@ use marrow_check::{
     AnalysisIdentity, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
     read_accepted_catalog_artifact,
 };
-use marrow_project::{ProjectConfig, parse_config, test_module_file};
+use marrow_project::{
+    DiscoverError, ProjectConfig, discover_modules, discover_test_modules, parse_config,
+    test_module_file,
+};
 
 pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
 
@@ -160,32 +163,30 @@ impl Workspace {
         self.binding_index.as_ref()
     }
 
-    /// Whether the latest snapshot still matches the editor's open analysis files.
-    pub fn latest_matches_open_documents(&self, documents: &Documents) -> bool {
+    /// Whether the latest snapshot still matches the editor-visible source world.
+    pub fn latest_matches_sources(&self, documents: &Documents) -> bool {
         let (Some(snapshot), Some(project)) = (self.latest.as_ref(), self.project.as_ref()) else {
             return false;
         };
-        if open_analysis_paths(project, documents) != self.latest_open_analysis_paths {
+        let current_open_analysis_paths = open_analysis_paths(project, documents);
+        if current_open_analysis_paths != self.latest_open_analysis_paths {
             return false;
         }
-        documents.iter().all(|(url, document)| {
-            let Some(path) = url_to_path(url) else {
-                return true;
-            };
-            if !project.analyzes_file(&path) {
-                return true;
-            }
-            snapshot
+        current_analysis_paths(project, &current_open_analysis_paths)
+            .is_ok_and(|paths| paths == snapshot_paths(snapshot))
+            && snapshot
                 .files
                 .iter()
-                .find(|analyzed| analyzed.path == path)
-                .is_some_and(|analyzed| analyzed.source == document.text)
-        })
+                .all(|file| match open_document_text(documents, &file.path) {
+                    Some(source) => source == file.source.as_str(),
+                    None => std::fs::read_to_string(&file.path)
+                        .is_ok_and(|source| source == file.source.as_str()),
+                })
     }
 
     /// The latest snapshot only when it still matches the editor-visible sources.
     pub fn fresh_latest(&self, documents: &Documents) -> Option<&AnalysisSnapshot> {
-        self.latest_matches_open_documents(documents)
+        self.latest_matches_sources(documents)
             .then_some(self.latest.as_ref()?)
     }
 
@@ -253,6 +254,21 @@ impl Workspace {
         self.latest_open_analysis_paths = latest_open_analysis_paths;
         Ok(self.latest.as_ref().expect("just stored a snapshot"))
     }
+
+    /// Drop cached checked facts while keeping the resolved project config.
+    pub fn invalidate_analysis(&mut self) {
+        self.latest = None;
+        self.last_program = None;
+        self.binding_index = None;
+        self.binding_index_key = None;
+        self.latest_open_analysis_paths.clear();
+    }
+
+    /// Drop cached checked facts and force the next recompute to re-read config.
+    pub fn invalidate_project(&mut self) {
+        self.project = None;
+        self.invalidate_analysis();
+    }
 }
 
 /// Walk up from `file` to the nearest directory holding a `marrow.json`, parse it,
@@ -303,6 +319,38 @@ fn open_analysis_paths(project: &Project, documents: &Documents) -> Vec<PathBuf>
     paths.sort();
     paths.dedup();
     paths
+}
+
+fn current_analysis_paths(
+    project: &Project,
+    open_analysis_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, DiscoverError> {
+    let mut paths: Vec<PathBuf> = discover_modules(&project.root, &project.config)?
+        .into_iter()
+        .chain(discover_test_modules(&project.root, &project.config)?)
+        .map(|file| file.path)
+        .collect();
+    paths.extend(open_analysis_paths.iter().cloned());
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn snapshot_paths(snapshot: &AnalysisSnapshot) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn open_document_text<'a>(documents: &'a Documents, path: &Path) -> Option<&'a str> {
+    documents.iter().find_map(|(url, document)| {
+        (url_to_path(url).as_deref() == Some(path)).then_some(document.text.as_str())
+    })
 }
 
 /// The filesystem path of a `file://` URL, or `None` for any other scheme.
@@ -425,12 +473,123 @@ mod tests {
 
         let mut workspace = Workspace::new();
         workspace.recompute(&app, &documents).unwrap();
-        assert!(workspace.latest_matches_open_documents(&documents));
+        assert!(workspace.latest_matches_sources(&documents));
 
         documents.close(&defs_url);
         assert!(
-            !workspace.latest_matches_open_documents(&documents),
+            !workspace.latest_matches_sources(&documents),
             "closing an analyzed overlay changes the source set backing the snapshot"
+        );
+    }
+
+    #[test]
+    fn latest_source_match_rejects_a_closed_file_changed_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let app = src.join("app.mw");
+        let schema = src.join("schema.mw");
+        std::fs::write(&app, "module app\n\npub fn f(): int\n    return 1\n").unwrap();
+        std::fs::write(&schema, "module schema\n\npub fn g(): int\n    return 1\n").unwrap();
+
+        let app_url = path_to_url(&app).unwrap();
+        let mut documents = Documents::new();
+        documents.open(
+            app_url,
+            "module app\n\npub fn f(): int\n    return 1\n".to_string(),
+        );
+
+        let mut workspace = Workspace::new();
+        workspace.recompute(&app, &documents).unwrap();
+        assert!(workspace.latest_matches_sources(&documents));
+
+        std::fs::write(
+            &schema,
+            "module schema\n\npub fn changed(): int\n    return 1\n",
+        )
+        .unwrap();
+
+        assert!(
+            !workspace.latest_matches_sources(&documents),
+            "closed files changed on disk make the cached source world stale"
+        );
+    }
+
+    #[test]
+    fn latest_source_match_rejects_a_closed_file_added_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let app = src.join("app.mw");
+        std::fs::write(&app, "module app\n\npub fn f(): int\n    return 1\n").unwrap();
+
+        let app_url = path_to_url(&app).unwrap();
+        let mut documents = Documents::new();
+        documents.open(
+            app_url,
+            "module app\n\npub fn f(): int\n    return 1\n".to_string(),
+        );
+
+        let mut workspace = Workspace::new();
+        workspace.recompute(&app, &documents).unwrap();
+        assert!(workspace.latest_matches_sources(&documents));
+
+        std::fs::write(
+            src.join("new_module.mw"),
+            "module new_module\n\npub fn g(): int\n    return 1\n",
+        )
+        .unwrap();
+
+        assert!(
+            !workspace.latest_matches_sources(&documents),
+            "new closed analysis files make the cached source world stale"
+        );
+    }
+
+    #[test]
+    fn latest_source_match_rejects_a_closed_file_deleted_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let app = src.join("app.mw");
+        let schema = src.join("schema.mw");
+        std::fs::write(&app, "module app\n\npub fn f(): int\n    return 1\n").unwrap();
+        std::fs::write(&schema, "module schema\n\npub fn g(): int\n    return 1\n").unwrap();
+
+        let app_url = path_to_url(&app).unwrap();
+        let mut documents = Documents::new();
+        documents.open(
+            app_url,
+            "module app\n\npub fn f(): int\n    return 1\n".to_string(),
+        );
+
+        let mut workspace = Workspace::new();
+        workspace.recompute(&app, &documents).unwrap();
+        assert!(workspace.latest_matches_sources(&documents));
+
+        std::fs::remove_file(&schema).unwrap();
+
+        assert!(
+            !workspace.latest_matches_sources(&documents),
+            "deleted closed analysis files make the cached source world stale"
         );
     }
 

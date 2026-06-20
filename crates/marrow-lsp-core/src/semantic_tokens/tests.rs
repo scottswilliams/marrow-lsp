@@ -1256,6 +1256,22 @@ fn semantic_tokens_have_no_local_intrinsic_callable_model() {
 }
 
 #[test]
+fn semantic_tokens_have_no_local_identity_type_annotation_model() {
+    let source = include_str!("type_annotations.rs");
+    for forbidden in [
+        "add_declaration_type_annotation_overrides",
+        "add_type_annotation_overrides",
+        "ResourceMember",
+        "TypeRef",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "semantic tokens must consume marrow_check identity type annotation facts instead of {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn checked_qualified_call_prefixes_are_namespaces_while_leaf_keeps_role() {
     let source = "\
 module m
@@ -1377,13 +1393,12 @@ pub fn f(
 }
 
 #[test]
-fn evolve_transform_type_annotations_color_identity_id_as_struct() {
+fn identity_type_annotations_without_checked_facts_do_not_claim_identity_type() {
     let source = "\
 module m
 
-evolve
-    transform ^books
-        const id: Id(^books) = 1
+fn f(id: Id(^authors))
+    return
 ";
     let (index, decoded) = decoded_for(source);
 
@@ -1391,7 +1406,60 @@ evolve
         source,
         &index,
         &decoded,
-        "        const id: Id(^books) = 1",
+        "fn f(id: Id(^authors))",
+        "Id",
+        legend_index(&SemanticTokenType::KEYWORD),
+        0,
+    );
+}
+
+#[test]
+fn checked_unresolved_identity_type_annotations_keep_id_as_keyword() {
+    let source = "\
+module m
+
+resource Author
+    name: string
+
+store ^authors(id: int): Author
+
+fn f(id: Id(^missing))
+    return
+";
+    let (index, decoded) = decoded_for_checked(source);
+
+    assert_token(
+        source,
+        &index,
+        &decoded,
+        "fn f(id: Id(^missing))",
+        "Id",
+        legend_index(&SemanticTokenType::KEYWORD),
+        0,
+    );
+}
+
+#[test]
+fn evolve_transform_type_annotations_color_identity_id_as_struct() {
+    let source = "\
+module m
+
+resource Book
+    title: string
+
+store ^books(id: int): Book
+
+evolve
+    transform ^books
+        var id: Id(^books)
+";
+    let (index, decoded) = decoded_for_checked(source);
+
+    assert_token(
+        source,
+        &index,
+        &decoded,
+        "        var id: Id(^books)",
         "Id",
         legend_index(&SemanticTokenType::STRUCT),
         0,

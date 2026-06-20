@@ -5,7 +5,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
@@ -178,6 +178,35 @@ impl Drop for Server {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+fn initialized_server() -> (Server, ChildStdin, BufReader<ChildStdout>, Value) {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let initialize = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+    (server, stdin, stdout, initialize)
 }
 
 #[test]
@@ -1337,6 +1366,218 @@ pub fn call(): int
     assert_ne!(
         answer_type, function_type,
         "stale project BindingIndex facts must not be applied to semantic tokens: {response}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn semantic_tokens_drop_identity_type_facts_when_closed_sibling_changes_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let schema_file = src.join("schema.mw");
+    let app_file = src.join("app.mw");
+    let schema = "\
+module schema
+
+resource Book
+    title: string
+
+store ^books(id: int): Book
+";
+    let app = "\
+module app
+
+fn f(id: Id(^books))
+    return
+";
+    std::fs::write(&schema_file, schema).unwrap();
+    std::fs::write(&app_file, app).unwrap();
+
+    let (mut server, mut stdin, mut stdout, initialize) = initialized_server();
+    let keyword_type = semantic_token_type_index(&initialize, "keyword");
+    let struct_type = semantic_token_type_index(&initialize, "struct");
+
+    let app_uri = url::Url::from_file_path(&app_file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": app_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": app
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &app_uri, Duration::from_secs(10));
+
+    std::fs::write(
+        &schema_file,
+        "\
+module schema
+
+resource Book
+    title: string
+",
+    )
+    .unwrap();
+
+    let schema_uri = url::Url::from_file_path(&schema_file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": {
+                "changes": [{ "uri": schema_uri, "type": 2 }]
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/semanticTokens/full",
+            "params": {
+                "textDocument": { "uri": app_uri }
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let id_type = semantic_token_type_at(&response, 2, "fn f(id: ".len() as u64)
+        .expect("semantic token for Id constructor");
+
+    assert_eq!(
+        id_type, keyword_type,
+        "closed-file disk edits must make checked identity type facts unavailable: {response}"
+    );
+    assert_ne!(
+        id_type, struct_type,
+        "stale identity type facts must not color Id as a struct: {response}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
+fn semantic_tokens_keep_identity_type_facts_after_unrelated_watched_file_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
+    let schema_file = project.join("src/schema.mw");
+    let app_file = project.join("src/app.mw");
+    let schema = "\
+module schema
+
+resource Book
+    title: string
+
+store ^books(id: int): Book
+";
+    let app = "\
+module app
+
+fn f(id: Id(^books))
+    return
+";
+    std::fs::write(&schema_file, schema).unwrap();
+    std::fs::write(&app_file, app).unwrap();
+
+    let other_project = root.join("other");
+    std::fs::create_dir_all(other_project.join("src")).unwrap();
+    std::fs::write(
+        other_project.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
+    let other_file = other_project.join("src/other.mw");
+    std::fs::write(
+        &other_file,
+        "module other\n\npub fn f(): int\n    return 1\n",
+    )
+    .unwrap();
+
+    let (mut server, mut stdin, mut stdout, initialize) = initialized_server();
+    let keyword_type = semantic_token_type_index(&initialize, "keyword");
+    let struct_type = semantic_token_type_index(&initialize, "struct");
+
+    let app_uri = url::Url::from_file_path(&app_file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": app_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": app
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &app_uri, Duration::from_secs(10));
+
+    std::fs::write(
+        &other_file,
+        "module other\n\npub fn changed(): int\n    return 1\n",
+    )
+    .unwrap();
+    let other_uri = url::Url::from_file_path(&other_file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": {
+                "changes": [{ "uri": other_uri, "type": 2 }]
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/semanticTokens/full",
+            "params": {
+                "textDocument": { "uri": app_uri }
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let id_type = semantic_token_type_at(&response, 2, "fn f(id: ".len() as u64)
+        .expect("semantic token for Id constructor");
+
+    assert_eq!(
+        id_type, struct_type,
+        "unrelated watched files must not clear current project identity type facts: {response}"
+    );
+    assert_ne!(
+        id_type, keyword_type,
+        "unrelated watched files should not make fresh checked facts unavailable: {response}"
     );
 
     let _ = server.0.kill();

@@ -383,6 +383,36 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let changed_paths: Vec<std::path::PathBuf> = params
+            .changes
+            .iter()
+            .filter_map(|event| url_to_path(&event.uri))
+            .collect();
+        if changed_paths.is_empty() {
+            return;
+        }
+
+        let recompute_path = {
+            let mut state = self.state.lock().await;
+            let Some(change) = watched_project_change(&state.workspace, &changed_paths) else {
+                return;
+            };
+            match change {
+                WatchedProjectChange::ProjectConfig(path) => {
+                    state.workspace.invalidate_project();
+                    path
+                }
+                WatchedProjectChange::AnalysisFile(path) => {
+                    state.workspace.invalidate_analysis();
+                    path
+                }
+            }
+        };
+
+        self.schedule_recompute(recompute_path);
+    }
+
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
         let position = params.text_document_position_params;
         let url = position.text_document.uri;
@@ -709,7 +739,7 @@ impl LanguageServer for Backend {
         };
         let has_fresh_analysis =
             snapshot_has_document_text(workspace.latest(), &path, &document.text)
-                && workspace.latest_matches_open_documents(documents);
+                && workspace.latest_matches_sources(documents);
         if has_fresh_analysis {
             let _ = workspace.binding_index();
         }
@@ -764,7 +794,8 @@ fn to_core_position(position: Position) -> CorePosition {
 }
 
 /// Ensure a snapshot exists, then build and cache its binding index only when
-/// the target file and every open snapshot file still match their buffers.
+/// the target file and every analyzed source still matches the editor-visible
+/// source world.
 /// Returns `None` for stale text or for a file outside any project.
 fn ensure_fresh_index<'a>(
     workspace: &'a mut Workspace,
@@ -778,10 +809,35 @@ fn ensure_fresh_index<'a>(
     if !snapshot_has_document_text(workspace.latest(), file, text) {
         return None;
     }
-    if !workspace.latest_matches_open_documents(documents) {
+    if !workspace.latest_matches_sources(documents) {
         return None;
     }
     workspace.binding_index()
+}
+
+enum WatchedProjectChange {
+    ProjectConfig(std::path::PathBuf),
+    AnalysisFile(std::path::PathBuf),
+}
+
+fn watched_project_change(
+    workspace: &Workspace,
+    changed_paths: &[std::path::PathBuf],
+) -> Option<WatchedProjectChange> {
+    let project = workspace.project()?;
+    let config_path = project.root.join("marrow.json");
+    if let Some(path) = changed_paths.iter().find(|path| *path == &config_path) {
+        return Some(WatchedProjectChange::ProjectConfig(path.clone()));
+    }
+    changed_paths
+        .iter()
+        .find(|path| project.analyzes_file(path) || snapshot_has_file(workspace.latest(), path))
+        .cloned()
+        .map(WatchedProjectChange::AnalysisFile)
+}
+
+fn snapshot_has_file(snapshot: Option<&AnalysisSnapshot>, path: &std::path::Path) -> bool {
+    snapshot.is_some_and(|snapshot| snapshot.files.iter().any(|file| file.path == path))
 }
 
 /// The byte offset of `position` in the buffer at `url`, from that buffer's cached
@@ -858,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_open_document_match_rejects_a_stale_sibling_file() {
+    fn snapshot_source_match_rejects_a_stale_open_sibling_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
@@ -883,7 +939,7 @@ mod tests {
         let mut workspace = Workspace::new();
         workspace.recompute(&a, &documents).unwrap();
 
-        assert!(workspace.latest_matches_open_documents(&documents));
+        assert!(workspace.latest_matches_sources(&documents));
 
         documents.change(
             &b_url,
@@ -891,13 +947,13 @@ mod tests {
         );
 
         assert!(
-            !workspace.latest_matches_open_documents(&documents),
+            !workspace.latest_matches_sources(&documents),
             "a project-wide binding index must not be exposed when another open snapshot file is stale"
         );
     }
 
     #[test]
-    fn snapshot_open_document_match_rejects_a_new_source_file_absent_from_snapshot() {
+    fn snapshot_source_match_rejects_a_new_open_source_file_absent_from_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
@@ -919,7 +975,7 @@ mod tests {
         let mut workspace = Workspace::new();
         workspace.recompute(&app, &documents).unwrap();
 
-        assert!(workspace.latest_matches_open_documents(&documents));
+        assert!(workspace.latest_matches_sources(&documents));
 
         let new_defs = a_src.join("defs.mw");
         let defs_url = Url::from_file_path(&new_defs).unwrap();
@@ -929,7 +985,7 @@ mod tests {
         );
 
         assert!(
-            !workspace.latest_matches_open_documents(&documents),
+            !workspace.latest_matches_sources(&documents),
             "a new open source-root file absent from the cached snapshot can change project bindings"
         );
     }

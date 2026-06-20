@@ -125,8 +125,7 @@ pub fn semantic_tokens_with_project_facts(
             references::reference_overrides(lexed, source, binding_index, path)
         })
         .unwrap_or_default();
-    let type_annotation_overrides =
-        type_annotations::type_annotation_overrides(lexed, file, source);
+    let type_annotation_overrides = type_annotations::type_annotation_overrides(analysis);
 
     let mut tokens = Vec::new();
     let mut prev_line = 0u32;

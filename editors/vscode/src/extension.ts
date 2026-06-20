@@ -65,7 +65,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         .get<boolean>("liveData", false),
     },
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/marrow.json"),
+      fileEvents: [
+        vscode.workspace.createFileSystemWatcher("**/marrow.json"),
+        vscode.workspace.createFileSystemWatcher("**/*.mw"),
+      ],
     },
   };
 
