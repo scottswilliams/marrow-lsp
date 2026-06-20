@@ -146,7 +146,7 @@ fn classify(source: &str, lexed: &LexedSource, offset: usize) -> Context {
                 SavedPathRecovery::NotSavedPath => Context::Bare,
             }
         }
-        TokenKind::DotDot => {
+        TokenKind::DotDot | TokenKind::DotDotEqual => {
             if saved_path_attempt_before_dot(&tokens, anchor) {
                 Context::InvalidSavedPath
             } else {
@@ -248,53 +248,65 @@ fn unrecovered_saved_path(tokens: &[Token], dot_index: usize) -> SavedPathRecove
 }
 
 fn saved_path_attempt_before_dot(tokens: &[Token], dot_index: usize) -> bool {
-    let Some(mut i) = dot_index.checked_sub(1) else {
+    let Some(mut end) = dot_index.checked_sub(1) else {
         return false;
     };
-    let mut depth = 0usize;
+    if matches!(tokens[end].kind, TokenKind::DotDot | TokenKind::DotDotEqual) {
+        let Some(prev) = end.checked_sub(1) else {
+            return false;
+        };
+        end = prev;
+    }
 
+    saved_path_attempt_ending_at(tokens, end)
+}
+
+fn saved_path_attempt_ending_at(tokens: &[Token], mut i: usize) -> bool {
     loop {
         match tokens[i].kind {
             TokenKind::Caret => return true,
-            TokenKind::RightParen | TokenKind::RightBracket => depth += 1,
-            TokenKind::LeftParen | TokenKind::LeftBracket => {
-                depth = depth.saturating_sub(1);
+            TokenKind::Identifier => return saved_path_callee_prefix_before(tokens, i),
+            TokenKind::RightParen => match matching_open_paren(tokens, i) {
+                Some(open) => {
+                    if let Some(callee) = open.checked_sub(1)
+                        && tokens[callee].kind == TokenKind::Identifier
+                    {
+                        return saved_path_callee_prefix_before(tokens, callee);
+                    }
+                    let Some(prev) = open.checked_sub(1) else {
+                        return false;
+                    };
+                    i = prev;
+                }
+                None => {
+                    let Some(prev) = i.checked_sub(1) else {
+                        return false;
+                    };
+                    i = prev;
+                }
+            },
+            TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::RightBracket => {
+                let Some(prev) = i.checked_sub(1) else {
+                    return false;
+                };
+                i = prev;
             }
-            kind if depth == 0 && is_saved_path_attempt_boundary(kind) => return false,
-            _ => {}
+            _ => return false,
         }
-
-        let Some(prev) = i.checked_sub(1) else {
-            return false;
-        };
-        i = prev;
     }
 }
 
-fn is_saved_path_attempt_boundary(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Keyword(_)
-            | TokenKind::Colon
-            | TokenKind::DoubleColon
-            | TokenKind::Comma
-            | TokenKind::DotDot
-            | TokenKind::DotDotEqual
-            | TokenKind::Equal
-            | TokenKind::EqualEqual
-            | TokenKind::BangEqual
-            | TokenKind::QuestionQuestion
-            | TokenKind::Less
-            | TokenKind::LessEqual
-            | TokenKind::Greater
-            | TokenKind::GreaterEqual
-            | TokenKind::Plus
-            | TokenKind::Minus
-            | TokenKind::Star
-            | TokenKind::Slash
-            | TokenKind::Percent
-            | TokenKind::At
-    )
+fn saved_path_callee_prefix_before(tokens: &[Token], callee: usize) -> bool {
+    let Some(before) = callee.checked_sub(1) else {
+        return false;
+    };
+    match tokens[before].kind {
+        TokenKind::Caret => true,
+        TokenKind::Dot | TokenKind::QuestionDot => before
+            .checked_sub(1)
+            .is_some_and(|end| saved_path_attempt_ending_at(tokens, end)),
+        _ => false,
+    }
 }
 
 enum SavedPathRecovery {

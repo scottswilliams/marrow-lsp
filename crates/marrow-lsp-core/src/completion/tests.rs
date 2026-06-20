@@ -307,6 +307,8 @@ fn malformed_saved_path_looking_dots_return_no_bare_completions() {
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)).|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books((id).|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)...|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..=|\n",
     ] {
         let labels = complete(&program, &file, source);
         assert!(
@@ -319,20 +321,21 @@ fn malformed_saved_path_looking_dots_return_no_bare_completions() {
 #[test]
 fn ordinary_non_saved_dot_keeps_bare_completion() {
     let (program, file) = project();
-    let labels = complete(
-        &program,
-        &file,
-        "module shelf::app\n\npub fn f(foo: int)\n    const x = foo.|\n",
-    );
 
-    assert!(
-        labels.contains(&"return".to_string()),
-        "ordinary non-saved dot should keep bare keyword completion, got {labels:?}"
-    );
-    assert!(
-        labels.contains(&"foo".to_string()),
-        "ordinary non-saved dot should keep local completion, got {labels:?}"
-    );
+    for source in [
+        "module shelf::app\n\npub fn f(foo: int)\n    const x = foo.|\n",
+        "module shelf::app\n\npub fn f(foo: int, id: int)\n    const x = wrap(^books(id)).|\n",
+    ] {
+        let labels = complete(&program, &file, source);
+        assert!(
+            labels.contains(&"return".to_string()),
+            "ordinary non-saved dot should keep bare keyword completion, got {labels:?} for {source:?}"
+        );
+        assert!(
+            labels.contains(&"foo".to_string()),
+            "ordinary non-saved dot should keep local completion, got {labels:?} for {source:?}"
+        );
+    }
 }
 
 #[test]
