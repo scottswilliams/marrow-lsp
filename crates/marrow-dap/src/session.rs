@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
 use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType};
@@ -44,7 +46,6 @@ const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
 const STOP_POINT_FACTS: &str = "canonical stop-point facts";
 const BREAKPOINT_EXPRESSION_FACTS: &str = "canonical stop-point and breakpoint expression facts";
-const HOVER_EVALUATE_FACTS: &str = "canonical evaluate facts";
 const DURABLE_WATCH_PATH_FACTS: &str = "typed durable watch/path facts";
 const RAW_DATA_INSPECTION_BLOCKED: &str =
     "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
@@ -61,8 +62,6 @@ const BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: &str =
 const BREAKPOINTS_INVALID: &str = "`breakpoints` must be an array";
 const BREAKPOINT_INVALID_LINE: &str = "missing or invalid breakpoint line";
 const BREAKPOINT_NO_STOP_POINT: &str = "no executable Marrow stop point at this source line";
-const HOVER_EVALUATE_BLOCKED: &str =
-    "blocked-on-marrow: DAP hover evaluate needs canonical evaluate facts from Marrow";
 const EVALUATE_EXPRESSION_INVALID: &str = "missing or invalid evaluate expression";
 const EVALUATE_CONTEXT_INVALID: &str = "invalid evaluate context";
 const VARIABLES_REFERENCE_INVALID: &str = "missing or invalid variablesReference";
@@ -122,8 +121,6 @@ const ERROR_EVALUATE_CONTEXT_INVALID: DapError =
     DapError::new("dap.evaluate.contextInvalid", STATUS_INVALID_PARAMS);
 const ERROR_EVALUATE_RUNTIME: DapError =
     DapError::new("dap.evaluate.runtimeError", STATUS_RUNTIME_ERROR);
-const ERROR_HOVER_EVALUATE_BLOCKED: DapError =
-    DapError::blocked("dap.hoverEvaluate.blocked", HOVER_EVALUATE_FACTS);
 const ERROR_VARIABLES_REFERENCE_INVALID: DapError =
     DapError::new("dap.variables.referenceInvalid", STATUS_INVALID_PARAMS);
 const ERROR_VARIABLES_PAGE_INVALID: DapError =
@@ -233,9 +230,12 @@ struct Running {
     handle: JoinHandle<Option<crate::run::Outcome>>,
     control: Sender<Control>,
     events: Receiver<RunEvent>,
+    terminate: Arc<AtomicBool>,
     /// The most recent stop, kept so `stackTrace`/`scopes` answer without
     /// re-querying. `None` while the run is executing (not parked).
     stopped_at: Option<StopInfo>,
+    pending_resume: Option<Resume>,
+    terminating: bool,
 }
 
 /// The protocol-thread session.
@@ -345,14 +345,11 @@ struct VariablesInput {
 
 struct EvaluateInput<'a> {
     expression: &'a str,
-    context: Option<EvaluateContext>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EvaluateContext {
-    Watch,
-    Repl,
-    Hover,
+enum RunPump {
+    Continue,
+    ParkedOrDone,
 }
 
 impl<W: Write> Session<W> {
@@ -529,11 +526,17 @@ impl<W: Write> Session<W> {
                 };
                 self.on_evaluate(request, &arguments);
             }
-            "disconnect" | "terminate" => {
+            "disconnect" => {
                 if self.arguments_or_reject(request).is_none() {
                     return;
                 }
                 self.on_disconnect(request);
+            }
+            "terminate" => {
+                if self.arguments_or_reject(request).is_none() {
+                    return;
+                }
+                self.on_terminate(request);
             }
             other => self.respond_error(
                 request,
@@ -568,7 +571,7 @@ impl<W: Write> Session<W> {
                 "supportsConditionalBreakpoints": true,
                 "supportsHitConditionalBreakpoints": true,
                 "supportsLogPoints": true,
-                "supportsEvaluateForHovers": false,
+                "supportsEvaluateForHovers": true,
             }),
         );
     }
@@ -669,6 +672,15 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
+
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.stopped_at.is_none())
+        {
+            self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
+            return;
+        }
 
         if self.stop_points.is_some() {
             if requested.is_empty() {
@@ -889,10 +901,12 @@ impl<W: Write> Session<W> {
                     handle: running.handle,
                     control: running.control,
                     events: running.events,
+                    terminate: running.terminate,
                     stopped_at: None,
+                    pending_resume: None,
+                    terminating: false,
                 });
                 self.respond(request, true, json!({}));
-                self.pump_until_stopped_or_done();
             }
             Err(error) => {
                 self.respond_error(request, error, ERROR_RUN_INVALID);
@@ -1075,14 +1089,27 @@ impl<W: Write> Session<W> {
             .collect()
     }
 
+    fn require_stopped_run(&mut self, request: &Json) -> bool {
+        match self.running.as_ref() {
+            None => {
+                self.respond_error(request, "not running", ERROR_NOT_RUNNING);
+                false
+            }
+            Some(running) if running.stopped_at.is_none() => {
+                self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
+                false
+            }
+            Some(_) => true,
+        }
+    }
+
     /// `continue`: resume until the run finishes or another supported stop occurs.
     fn on_continue(&mut self, request: &Json, arguments: &Json) {
         if let Err(error) = parse_thread_id(arguments) {
             self.respond_error(request, error.message, error.contract);
             return;
         }
-        if self.running.is_none() {
-            self.respond_error(request, "not running", ERROR_NOT_RUNNING);
+        if !self.require_stopped_run(request) {
             return;
         }
         self.respond(request, true, json!({ "allThreadsContinued": true }));
@@ -1120,19 +1147,15 @@ impl<W: Write> Session<W> {
 
     /// `pause`: stop at the next statement.
     ///
-    /// The protocol loop pumps run events synchronously, so it can read a request
-    /// only while the run is parked at a stop — a pause therefore takes effect by
-    /// resuming with the [`Resume::Pause`] mode, which stops before the very next
-    /// statement (and reports `pause`). A client that is already stopped sees a
-    /// one-statement advance; this is the honest behavior of a synchronous pump,
-    /// which cannot interrupt a statement mid-flight.
+    /// A pause request cannot interrupt a statement mid-flight. It resumes the
+    /// parked run with [`Resume::Pause`], which stops before the next statement and
+    /// reports `pause`.
     fn on_pause(&mut self, request: &Json, arguments: &Json) {
         if let Err(error) = parse_thread_id(arguments) {
             self.respond_error(request, error.message, error.contract);
             return;
         }
-        if self.running.is_none() {
-            self.respond_error(request, "not running", ERROR_NOT_RUNNING);
+        if !self.require_stopped_run(request) {
             return;
         }
         self.respond(request, true, json!({}));
@@ -1143,8 +1166,9 @@ impl<W: Write> Session<W> {
         self.resume_run(Resume::Pause);
     }
 
-    /// `evaluate`: watch/REPL requests evaluate checked Marrow debug expressions
-    /// at the current stopped frame. Durable paths and hover remain blocked.
+    /// `evaluate`: watch, REPL, and hover requests evaluate checked Marrow
+    /// debug expressions at the current stopped frame. Durable paths remain
+    /// blocked.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
         let input = match parse_evaluate_input(arguments) {
             Ok(input) => input,
@@ -1153,14 +1177,6 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        if input.context == Some(EvaluateContext::Hover) {
-            self.respond_error(
-                request,
-                HOVER_EVALUATE_BLOCKED,
-                ERROR_HOVER_EVALUATE_BLOCKED,
-            );
-            return;
-        }
         if input.expression.trim_start().starts_with('^') {
             self.respond_error(
                 request,
@@ -1254,9 +1270,27 @@ impl<W: Write> Session<W> {
         body
     }
 
-    /// `disconnect` / `terminate`: unwind the run (rolling back any open
-    /// transaction) and end the session.
+    /// `disconnect`: unwind the run (rolling back any open transaction) and end
+    /// the session.
     fn on_disconnect(&mut self, request: &Json) {
+        self.respond(request, true, json!({}));
+        self.terminate_session();
+    }
+
+    /// `terminate`: end a parked run, or cancel a resume that has not physically
+    /// woken the run-thread yet.
+    fn on_terminate(&mut self, request: &Json) {
+        match self.running.as_ref() {
+            None => {
+                self.respond_error(request, "not running", ERROR_NOT_RUNNING);
+                return;
+            }
+            Some(running) if running.stopped_at.is_none() && running.pending_resume.is_none() => {
+                self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
+                return;
+            }
+            Some(_) => {}
+        }
         self.respond(request, true, json!({}));
         self.terminate_session();
     }
@@ -1278,24 +1312,64 @@ impl<W: Write> Session<W> {
         }
     }
 
-    /// Resume the parked run with `mode`, clear the stop-scoped reference table,
-    /// then pump until the next stop or the run's end.
+    /// Mark the parked run as logically resumed and clear stop-scoped references.
+    /// The protocol loop flushes the physical resume after draining queued client
+    /// requests, so a pipelined terminate can cancel the wake-up before user code
+    /// executes.
     fn resume_run(&mut self, mode: Resume) {
         self.expandables.clear();
         if let Some(running) = self.running.as_mut() {
             running.stopped_at = None;
-            if running.control.send(Control::Resume(mode)).is_err() {
-                // The run-thread is gone; finish the session.
-                self.finish_run();
-                return;
-            }
+            running.pending_resume = Some(mode);
         }
-        self.pump_until_stopped_or_done();
     }
 
-    /// Read run-thread events until the run parks at a stop (then return, leaving
-    /// the session waiting for the client) or finishes (then emit terminated/exited
-    /// and clean up). Output events are forwarded as they arrive.
+    /// Send a staged resume once queued client requests have had a chance to run.
+    /// Returns `true` when the run was woken or collected after a send failure.
+    pub fn flush_resume(&mut self) -> bool {
+        let send = match self.running.as_mut() {
+            Some(running) if running.terminating => {
+                running.pending_resume = None;
+                return false;
+            }
+            Some(running) => running
+                .pending_resume
+                .take()
+                .map(|mode| running.control.send(Control::Resume(mode))),
+            None => None,
+        };
+        match send {
+            Some(Ok(())) => true,
+            Some(Err(_)) => {
+                self.finish_run();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Pump one pending run-thread event without blocking. Returns `true` when
+    /// an event was consumed or the finished run was collected.
+    pub fn pump_run_event(&mut self) -> bool {
+        let event = match self.running.as_ref() {
+            Some(running) => running.events.try_recv(),
+            None => return false,
+        };
+        match event {
+            Ok(event) => {
+                self.handle_run_event(event);
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.finish_run();
+                true
+            }
+        }
+    }
+
+    /// Read run-thread events until the run parks at a stop or finishes. Output
+    /// events are forwarded as they arrive.
     fn pump_until_stopped_or_done(&mut self) {
         loop {
             let event = match self.running.as_ref() {
@@ -1303,30 +1377,10 @@ impl<W: Write> Session<W> {
                 None => return,
             };
             match event {
-                Ok(RunEvent::Stopped(info)) => {
-                    let reason = info.reason;
-                    if let Some(running) = self.running.as_mut() {
-                        running.stopped_at = Some(info);
-                    }
-                    self.event(
-                        "stopped",
-                        json!({
-                            "reason": reason.as_str(),
-                            "threadId": THREAD_ID,
-                            "allThreadsStopped": true,
-                        }),
-                    );
-                    return;
-                }
-                Ok(RunEvent::Output(output)) => {
-                    self.event(
-                        "output",
-                        json!({ "category": "console", "output": logpoint_output(output) }),
-                    );
-                }
-                // An Answer here would be a protocol-thread bug (we only recv
-                // answers inside `query`); ignore and keep pumping.
-                Ok(RunEvent::Answer(_)) => continue,
+                Ok(event) => match self.handle_run_event(event) {
+                    RunPump::ParkedOrDone => return,
+                    RunPump::Continue => continue,
+                },
                 // The events channel closed: the run-thread finished. Collect its
                 // outcome and end the session.
                 Err(_) => {
@@ -1334,6 +1388,43 @@ impl<W: Write> Session<W> {
                     return;
                 }
             }
+        }
+    }
+
+    fn handle_run_event(&mut self, event: RunEvent) -> RunPump {
+        match event {
+            RunEvent::Stopped(info) => {
+                if self
+                    .running
+                    .as_ref()
+                    .is_some_and(|running| running.terminating)
+                {
+                    return RunPump::Continue;
+                }
+                let reason = info.reason;
+                if let Some(running) = self.running.as_mut() {
+                    running.stopped_at = Some(info);
+                }
+                self.event(
+                    "stopped",
+                    json!({
+                        "reason": reason.as_str(),
+                        "threadId": THREAD_ID,
+                        "allThreadsStopped": true,
+                    }),
+                );
+                RunPump::ParkedOrDone
+            }
+            RunEvent::Output(output) => {
+                self.event(
+                    "output",
+                    json!({ "category": "console", "output": logpoint_output(output) }),
+                );
+                RunPump::Continue
+            }
+            // An Answer here would be a protocol-thread bug; answers are only
+            // received inside `query`.
+            RunEvent::Answer(_) => RunPump::Continue,
         }
     }
 
@@ -1376,7 +1467,11 @@ impl<W: Write> Session<W> {
     /// Terminate the run-thread (if any) and mark the session done. Sends a
     /// terminate control so the hook unwinds, then drains to completion.
     fn terminate_session(&mut self) {
-        if let Some(running) = self.running.as_ref() {
+        if let Some(running) = self.running.as_mut() {
+            running.terminate.store(true, Ordering::Relaxed);
+            running.stopped_at = None;
+            running.pending_resume = None;
+            running.terminating = true;
             let _ = running.control.send(Control::Terminate);
         }
         // Drain any final events and join.
@@ -1640,29 +1735,21 @@ fn parse_evaluate_input(arguments: &Json) -> Result<EvaluateInput<'_>, DapInputE
             ERROR_EVALUATE_EXPRESSION_INVALID,
         ));
     }
-    let context = match arguments.get("context") {
-        Some(context) => {
-            let context = context.as_str().ok_or_else(|| {
-                DapInputError::new(EVALUATE_CONTEXT_INVALID, ERROR_EVALUATE_CONTEXT_INVALID)
-            })?;
-            Some(match context {
-                "watch" => EvaluateContext::Watch,
-                "repl" => EvaluateContext::Repl,
-                "hover" => EvaluateContext::Hover,
-                _ => {
-                    return Err(DapInputError::new(
-                        EVALUATE_CONTEXT_INVALID,
-                        ERROR_EVALUATE_CONTEXT_INVALID,
-                    ));
-                }
-            })
+    if let Some(context) = arguments.get("context") {
+        let context = context.as_str().ok_or_else(|| {
+            DapInputError::new(EVALUATE_CONTEXT_INVALID, ERROR_EVALUATE_CONTEXT_INVALID)
+        })?;
+        match context {
+            "watch" | "repl" | "hover" => {}
+            _ => {
+                return Err(DapInputError::new(
+                    EVALUATE_CONTEXT_INVALID,
+                    ERROR_EVALUATE_CONTEXT_INVALID,
+                ));
+            }
         }
-        None => None,
-    };
-    Ok(EvaluateInput {
-        expression,
-        context,
-    })
+    }
+    Ok(EvaluateInput { expression })
 }
 
 fn requested_breakpoint(point: &Json) -> RequestedBreakpoint {
@@ -1777,7 +1864,113 @@ fn parse_launch_args(args: Option<&Json>) -> Result<Vec<EntryArgument>, DapInput
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+
+    fn stopped_info() -> StopInfo {
+        StopInfo {
+            reason: crate::step::StopReason::Entry,
+            span: SourceSpan::default(),
+            file: None,
+            line: 1,
+            column: 1,
+            depth: 0,
+        }
+    }
+
+    fn session_with_running(
+        stopped_at: Option<StopInfo>,
+        pending_resume: Option<Resume>,
+    ) -> (Session<Vec<u8>>, std::sync::mpsc::Receiver<&'static str>) {
+        let (control_tx, control_rx) = std::sync::mpsc::channel();
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            while let Ok(control) = control_rx.recv() {
+                match control {
+                    Control::Resume(_) => {
+                        let _ = seen_tx.send("resume");
+                    }
+                    Control::Terminate => {
+                        let _ = seen_tx.send("terminate");
+                        break;
+                    }
+                    Control::Query(_) | Control::SetBreakpoints(_) => {
+                        let _ = seen_tx.send("other");
+                    }
+                }
+            }
+            drop(events_tx);
+            None
+        });
+        let mut session = Session::new(Vec::new());
+        session.running = Some(Running {
+            handle,
+            control: control_tx,
+            events: events_rx,
+            terminate: Arc::new(AtomicBool::new(false)),
+            stopped_at,
+            pending_resume,
+            terminating: false,
+        });
+        (session, seen_rx)
+    }
+
+    #[test]
+    fn queued_terminate_cancels_staged_resume_before_wake() {
+        let (mut session, seen) = session_with_running(Some(stopped_info()), None);
+        let cont = json!({
+            "seq": 1,
+            "type": "request",
+            "command": "continue",
+            "arguments": { "threadId": 1 },
+        });
+        session.handle(&cont);
+        assert!(seen.try_recv().is_err());
+
+        let terminate = json!({
+            "seq": 2,
+            "type": "request",
+            "command": "terminate",
+            "arguments": {},
+        });
+        session.handle(&terminate);
+
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "terminate"
+        );
+        assert!(seen.try_recv().is_err());
+        assert!(session.done());
+    }
+
+    #[test]
+    fn terminate_after_physical_resume_is_not_acknowledged() {
+        let (mut session, seen) = session_with_running(None, None);
+        let terminate = json!({
+            "seq": 1,
+            "type": "request",
+            "command": "terminate",
+            "arguments": {},
+        });
+        session.handle(&terminate);
+
+        assert!(seen.try_recv().is_err());
+        assert!(!session.done());
+        let output = String::from_utf8(session.out).unwrap();
+        let (_, body) = output.split_once("\r\n\r\n").unwrap();
+        let response: Json = serde_json::from_str(body).unwrap();
+        assert_eq!(response["success"], false, "{response}");
+        assert_eq!(
+            response["body"]["marrowError"]["code"], "dap.notStopped",
+            "{response}"
+        );
+        assert_eq!(
+            response["body"]["marrowError"]["status"], "invalid-state",
+            "{response}"
+        );
+    }
 
     #[test]
     fn breakpoint_response_reports_unverified_source_line() {

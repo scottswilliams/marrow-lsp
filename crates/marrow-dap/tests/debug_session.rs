@@ -219,6 +219,39 @@ fn stopped_fixture_client() -> (tempfile::TempDir, Client) {
     (dir, client)
 }
 
+fn entry_stopped_client_with_breakpoint(
+    line: u32,
+) -> (tempfile::TempDir, std::path::PathBuf, Client) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": line }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+
+    (dir, file, client)
+}
+
 /// Write a fixture whose entry accepts a typed string argument.
 fn write_arg_fixture(dir: &Path) {
     let src = dir.join("src");
@@ -627,6 +660,19 @@ fn unsupported_commands_do_not_parse_request_arguments() {
 }
 
 #[test]
+fn terminate_without_a_running_session_reports_not_running() {
+    let mut client = initialized_client();
+
+    let terminate = client.request("terminate", json!({}));
+    let terminate = client.response_for(terminate);
+    assert_response_marrow_error(&terminate, "dap.notRunning", "invalid-state", None);
+
+    let threads = client.request("threads", json!({}));
+    let threads = client.response_for(threads);
+    assert_eq!(threads["success"], true, "{threads}");
+}
+
+#[test]
 fn prelaunch_breakpoint_inputs_return_distinct_blocked_contracts() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
@@ -954,7 +1000,7 @@ fn malformed_evaluate_contexts_fail_the_request() {
 }
 
 #[test]
-fn valid_evaluate_envelopes_keep_blocked_contracts() {
+fn valid_evaluate_envelopes_keep_typed_contracts() {
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
@@ -987,11 +1033,7 @@ fn valid_evaluate_envelopes_keep_blocked_contracts() {
         json!({ "expression": "title", "context": "hover" }),
     );
     let hover = client.response_for(hover);
-    assert_blocked_response(
-        &hover,
-        "dap.hoverEvaluate.blocked",
-        "canonical evaluate facts",
-    );
+    assert_response_marrow_error(&hover, "dap.notStopped", "invalid-state", None);
 
     let durable = client.request(
         "evaluate",
@@ -1739,6 +1781,13 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
     let title = client.response_for(title);
     assert_evaluate_runtime_debug_value(&title, "Dune", 0);
 
+    let hover_title = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "hover" }),
+    );
+    let hover_title = client.response_for(hover_title);
+    assert_evaluate_runtime_debug_value(&hover_title, "Dune", 0);
+
     let addition = client.request("evaluate", json!({ "expression": "1 + 1" }));
     let addition = client.response_for(addition);
     assert_evaluate_runtime_debug_value(&addition, "2", 0);
@@ -1769,6 +1818,17 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
         "typed durable watch/path facts",
     );
 
+    let hover_watch = client.request(
+        "evaluate",
+        json!({ "expression": "^books(1).title", "context": "hover" }),
+    );
+    let hover_watch = client.response_for(hover_watch);
+    assert_blocked_response(
+        &hover_watch,
+        "dap.durableData.blocked",
+        "typed durable watch/path facts",
+    );
+
     // continue to termination: expect the print output and a terminated event.
     let cont = client.request("continue", json!({ "threadId": thread_id }));
     assert_eq!(client.response_for(cont)["success"], true);
@@ -1779,6 +1839,105 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
         "{output}"
     );
     client.event("terminated");
+}
+
+#[test]
+fn pipelined_hover_after_continue_reports_not_stopped() {
+    let (_dir, _file, mut client) = entry_stopped_client_with_breakpoint(6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    let hover = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "hover" }),
+    );
+
+    assert_eq!(client.response_for(cont)["success"], true);
+    let hover = client.response_for(hover);
+    assert_response_marrow_error(&hover, "dap.notStopped", "invalid-state", None);
+}
+
+#[test]
+fn pipelined_double_continue_rejects_second_resume() {
+    let (_dir, _file, mut client) = entry_stopped_client_with_breakpoint(6);
+
+    let first = client.request("continue", json!({ "threadId": 1 }));
+    let second = client.request("continue", json!({ "threadId": 1 }));
+
+    assert_eq!(client.response_for(first)["success"], true);
+    let second = client.response_for(second);
+    assert_response_marrow_error(&second, "dap.notStopped", "invalid-state", None);
+
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+
+    let hover = client.request(
+        "evaluate",
+        json!({ "expression": "title", "context": "hover" }),
+    );
+    let hover = client.response_for(hover);
+    assert_eq!(hover["success"], true, "{hover}");
+    assert_eq!(hover["body"]["result"], "Dune", "{hover}");
+}
+
+#[test]
+fn pipelined_pause_after_continue_reports_not_stopped() {
+    let (_dir, _file, mut client) = entry_stopped_client_with_breakpoint(6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    let pause = client.request("pause", json!({ "threadId": 1 }));
+
+    assert_eq!(client.response_for(cont)["success"], true);
+    let pause = client.response_for(pause);
+    assert_response_marrow_error(&pause, "dap.notStopped", "invalid-state", None);
+
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+}
+
+#[test]
+fn pipelined_breakpoint_edit_after_continue_reports_not_stopped() {
+    let (_dir, file, mut client) = entry_stopped_client_with_breakpoint(6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [],
+        }),
+    );
+
+    assert_eq!(client.response_for(cont)["success"], true);
+    let set = client.response_for(set);
+    assert_response_marrow_error(&set, "dap.notStopped", "invalid-state", None);
+
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+}
+
+#[test]
+fn terminate_while_running_suppresses_later_stop_events() {
+    let (_dir, _file, mut client) = entry_stopped_client_with_breakpoint(6);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    let terminate = client.request("terminate", json!({}));
+
+    assert_eq!(client.response_for(cont)["success"], true);
+    assert_eq!(client.response_for(terminate)["success"], true);
+
+    for _ in 0..100 {
+        let message = client.read();
+        assert_ne!(
+            message["event"], "stopped",
+            "terminating while running must not publish a stale stopped frame: {message}"
+        );
+        if message["type"] == "event" && message["event"] == "terminated" {
+            return;
+        }
+    }
+    panic!("terminate did not end the session within the bounded message loop");
 }
 
 #[test]
@@ -2841,15 +3000,15 @@ fn local_state_failures_expose_typed_contracts() {
 }
 
 #[test]
-fn hover_evaluate_is_blocked_until_canonical_facts_exist_initialize_capability() {
+fn initialize_advertises_stopped_frame_hover_evaluate() {
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
     let response = client.response_for(init);
     assert_eq!(response["success"], true, "{response}");
-    assert_ne!(
+    assert_eq!(
         response["body"]["supportsEvaluateForHovers"], true,
-        "hover evaluation must not be advertised until Marrow exposes canonical evaluate facts: {response}"
+        "hover evaluation is backed by the same stopped-frame Marrow debug-expression facts as watch evaluate: {response}"
     );
     assert_eq!(
         response["body"]["supportsConditionalBreakpoints"], true,
@@ -2866,7 +3025,7 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_initialize_capability()
 }
 
 #[test]
-fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
+fn hover_evaluate_uses_stopped_frame_debug_expression_facts() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
     let mut client = Client::spawn();
@@ -2900,11 +3059,7 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_request() {
         json!({ "expression": "title", "context": "hover" }),
     );
     let hover = client.response_for(hover);
-    assert_blocked_response(
-        &hover,
-        "dap.hoverEvaluate.blocked",
-        "canonical evaluate facts",
-    );
+    assert_evaluate_runtime_debug_value(&hover, "Dune", 0);
 }
 
 #[test]

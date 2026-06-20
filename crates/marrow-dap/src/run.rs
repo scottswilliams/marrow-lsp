@@ -6,6 +6,8 @@
 //! env ever leaves the run-thread.
 
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
@@ -33,6 +35,7 @@ pub struct RunHandle {
     pub handle: JoinHandle<Option<Outcome>>,
     pub control: Sender<Control>,
     pub events: Receiver<RunEvent>,
+    pub terminate: Arc<AtomicBool>,
 }
 
 struct RunRequest {
@@ -43,6 +46,7 @@ struct RunRequest {
     invocation: EntryInvocation,
     stop_on_entry: bool,
     breakpoints: ArmedBreakpoints,
+    terminate: Arc<AtomicBool>,
 }
 
 /// Start the run on a dedicated thread. Project preparation and invocation happen
@@ -58,6 +62,7 @@ pub fn spawn(
 ) -> Result<RunHandle, String> {
     let (event_tx, event_rx) = channel::<RunEvent>();
     let (control_tx, control_rx) = channel::<Control>();
+    let terminate = Arc::new(AtomicBool::new(false));
     let request = RunRequest {
         project_dir,
         entry,
@@ -66,6 +71,7 @@ pub fn spawn(
         invocation,
         stop_on_entry,
         breakpoints,
+        terminate: Arc::clone(&terminate),
     };
 
     let handle = thread::Builder::new()
@@ -77,6 +83,7 @@ pub fn spawn(
         handle,
         control: control_tx,
         events: event_rx,
+        terminate,
     })
 }
 
@@ -97,6 +104,7 @@ fn run_on_thread(
         invocation,
         stop_on_entry,
         breakpoints,
+        terminate,
     } = request;
     let launch = match crate::project::prepare_admitted(
         &project_dir,
@@ -118,7 +126,7 @@ fn run_on_thread(
         invocation,
         ..
     } = launch;
-    let debugger = Debugger::new(stop_on_entry, breakpoints, events, control);
+    let debugger = Debugger::new(stop_on_entry, breakpoints, events, control, terminate);
     run_with_session(&session, invocation, debugger)
 }
 

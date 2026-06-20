@@ -17,12 +17,16 @@
 //! protocol thread never touches the frame; it sends [`Control::Query`] messages
 //! and reads back owned [`QueryResult`] values the run-thread computed. A
 //! [`Control::Resume`] sets the next step mode and returns `Ok(())` so the run
-//! proceeds; a [`Control::Terminate`] returns `Err`, which the runtime unwinds —
-//! rolling back any open transaction. The frame borrow is thus confined to one
-//! thread by construction; the channels carry only `Send` owned data.
+//! proceeds; a [`Control::Terminate`] wakes a parked run, while an active run also
+//! observes the shared termination flag before each statement. Either path returns
+//! `Err`, which the runtime unwinds — rolling back any open transaction. The frame
+//! borrow is thus confined to one thread by construction; the channels carry only
+//! `Send` owned data.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
 use marrow_check::CheckedDebugExpression;
@@ -240,6 +244,7 @@ pub struct Debugger {
     entered: bool,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
+    terminate: Arc<AtomicBool>,
 }
 
 impl Debugger {
@@ -249,6 +254,7 @@ impl Debugger {
         breakpoints: ArmedBreakpoints,
         events: Sender<RunEvent>,
         control: Receiver<Control>,
+        terminate: Arc<AtomicBool>,
     ) -> Self {
         Debugger {
             // Until the client steps, run freely unless stop-on-entry fires.
@@ -258,6 +264,7 @@ impl Debugger {
             entered: false,
             events,
             control,
+            terminate,
         }
     }
 
@@ -350,6 +357,9 @@ impl StepHook for Debugger {
         span: marrow_syntax::SourceSpan,
         frame: Frame<'_, '_>,
     ) -> Result<(), RuntimeError> {
+        if self.terminate.load(Ordering::Relaxed) {
+            return Err(terminated());
+        }
         let depth = frame.depth();
         let breakpoint = self.breakpoints.evaluate(&frame, span.line);
         for output in breakpoint.outputs {

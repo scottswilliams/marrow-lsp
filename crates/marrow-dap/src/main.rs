@@ -23,7 +23,9 @@ mod session;
 mod step;
 mod variables;
 
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use session::Session;
 
@@ -34,26 +36,61 @@ fn main() {
         "marrow-dap: starting (version {})",
         env!("CARGO_PKG_VERSION")
     );
-    let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let mut input = BufReader::new(stdin.lock());
+    let input = BufReader::new(std::io::stdin());
     let out = stdout.lock();
-    serve(&mut input, out);
+    serve(input, out);
 }
 
-/// The protocol loop: read one framed request at a time and dispatch it to the
-/// session until the client disconnects or the stream closes. The session pumps
-/// run-thread events inline (a request that resumes the run blocks here until the
-/// next stop or the run's end), so all client-visible ordering is sequential.
-fn serve(input: &mut impl std::io::BufRead, out: impl Write) {
+/// The protocol loop dispatches client requests and run-thread events until the
+/// client disconnects or the session ends. Requests already accepted into the
+/// internal queue are handled before staged resumes and newly available run
+/// events, so those requests observe the resumed state before the run is woken.
+fn serve<R>(mut input: R, out: impl Write)
+where
+    R: BufRead + Send + 'static,
+{
+    let (requests_tx, requests_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Some(message) = protocol::read_message(&mut input) {
+            if message.get("type").and_then(|value| value.as_str()) == Some("request")
+                && requests_tx.send(message).is_err()
+            {
+                break;
+            }
+        }
+    });
+
     let mut session = Session::new(out);
-    while let Some(message) = protocol::read_message(input) {
-        // DAP carries requests as `type: "request"`; ignore anything else.
-        if message.get("type").and_then(|value| value.as_str()) == Some("request") {
+    loop {
+        while let Ok(message) = requests_rx.try_recv() {
             session.handle(&message);
+            if session.done() {
+                return;
+            }
+        }
+
+        if session.flush_resume() {
+            if session.done() {
+                return;
+            }
+            continue;
+        }
+
+        if session.pump_run_event() {
+            if session.done() {
+                return;
+            }
+            continue;
+        }
+
+        match requests_rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(message) => session.handle(&message),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
         }
         if session.done() {
-            break;
+            return;
         }
     }
 }
