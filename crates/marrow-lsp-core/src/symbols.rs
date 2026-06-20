@@ -732,7 +732,7 @@ surface Books from ^books
         let config =
             parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#)
                 .unwrap();
-        analyze_project(root, &config, &ProjectSources::new(), None).unwrap()
+        analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap()
     }
 
     #[test]

@@ -3,11 +3,15 @@ use std::path::Path;
 use marrow_check::{
     AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedConst, CheckedFacts, CheckedFunction,
     CheckedParam, DirectEffectFacts, FunctionFact, MarrowType, SymbolKind, SymbolRef, UseSiteKind,
+    tooling::{self, CallableSignature, CallableSignatureKind},
     type_at,
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema};
-use marrow_syntax::{FunctionDecl, IndexDecl, Keyword, ResourceMember, TokenKind, lex_source};
+use marrow_syntax::{
+    FunctionDecl, IndexDecl, Keyword, ResourceMember, Token, TokenKind, lex_source,
+};
 
+use crate::callables::render_callable_signature;
 use crate::language_facts;
 
 use super::source;
@@ -365,32 +369,34 @@ fn default_library_call_text(
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     let tokens = lex_source(&analyzed.source).tokens;
     let index = tokens::path_segment_index_at(&tokens, offset)?;
-    if let Some(value) = std_library_path_text(&tokens, &analyzed.source, index) {
+    if let Some(value) = std_library_path_text(snapshot, file, &tokens, &analyzed.source, index) {
         return Some(value);
     }
-    if let Some(name) = tokens::bare_call_name_at(&tokens, &analyzed.source, index) {
-        if let Some(value) = language_facts::bare_builtin_hover(name) {
-            return Some(value);
-        }
-        if let Some(value) = language_facts::scalar_conversion_hover(name) {
-            return Some(value);
-        }
-    }
-    None
+
+    let (segments, leaf_index) = tokens::callable_path_at(&tokens, &analyzed.source, index)?;
+    (index == leaf_index)
+        .then(|| tooling::intrinsic_callable_signature_for_file(snapshot, file, &segments))?
+        .map(|signature| render_callable_text(&signature))
 }
 
 fn std_library_path_text(
-    tokens: &[marrow_syntax::Token],
+    snapshot: &AnalysisSnapshot,
+    file: &Path,
+    tokens: &[Token],
     source: &str,
     index: usize,
 ) -> Option<String> {
     let (module_index, op_index) = tokens::std_operation_call_for_segment(tokens, source, index)?;
+    if index == op_index {
+        return None;
+    }
     let module = tokens[module_index].text(source);
     let op = tokens[op_index].text(source);
-    if index == op_index {
-        return language_facts::std_operation_hover(module, op);
-    }
-    language_facts::std_operation_hover(module, op)?;
+    let segments = ["std", module, op]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    tooling::intrinsic_callable_signature_for_file(snapshot, file, &segments)?;
     if index + 2 == module_index {
         return Some(language_facts::std_namespace_hover());
     }
@@ -398,6 +404,38 @@ fn std_library_path_text(
         return language_facts::std_module_hover(module);
     }
     None
+}
+
+fn render_callable_text(callable: &CallableSignature) -> String {
+    let mut sections = vec![callable_context(callable.kind).to_string()];
+    if let Some(docs) = join_callable_docs(&callable.docs) {
+        sections.push(docs);
+    }
+    format!(
+        "{}\n\n{}",
+        render_callable_signature(callable),
+        sections.join("\n\n")
+    )
+}
+
+fn callable_context(kind: CallableSignatureKind) -> &'static str {
+    match kind {
+        CallableSignatureKind::Builtin => "default library builtin.",
+        CallableSignatureKind::ScalarConversion => "default library scalar conversion.",
+        CallableSignatureKind::ErrorConstructor => "default library Error constructor.",
+        CallableSignatureKind::IdentityConstructor => "default library Id constructor.",
+        CallableSignatureKind::StandardLibrary => "default library std operation.",
+    }
+}
+
+fn join_callable_docs(lines: &[String]) -> Option<String> {
+    let joined = lines
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let joined = joined.trim();
+    (!joined.is_empty()).then(|| joined.to_string())
 }
 
 fn operator_text(snapshot: &AnalysisSnapshot, file: &Path, offset: usize) -> Option<String> {

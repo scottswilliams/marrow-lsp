@@ -3,13 +3,11 @@ use std::path::Path;
 use marrow_check::{
     AnalysisSnapshot, CheckedFunction, CheckedProgram, DefItem, Resolution, ResolvableKind,
     resolve,
-    tooling::{
-        self, CallableArgumentStyle, CallableSignature, CallableValueShape,
-        ResourceConstructorSignature,
-    },
+    tooling::{self, CallableArgumentStyle, CallableSignature, ResourceConstructorSignature},
 };
 use marrow_syntax::{Declaration, FunctionDecl, SourceSpan};
 
+use crate::callables::{render_callable_parameter_label, render_callable_signature};
 use crate::types::render_type;
 
 pub(super) struct Signature {
@@ -58,14 +56,8 @@ fn render_intrinsic_signature(callable: CallableSignature) -> Signature {
         .iter()
         .map(|param| render_intrinsic_parameter(param, callable.argument_style))
         .collect::<Vec<_>>();
-    let params_label = joined_param_labels(&params);
-    let path = callable.path.join("::");
-    let label = match callable.return_shape.as_ref().map(render_callable_shape) {
-        Some(ret) => format!("{path}({params_label}): {ret}"),
-        None => format!("{path}({params_label})"),
-    };
     Signature {
-        label,
+        label: render_callable_signature(&callable),
         documentation: join_docs(&callable.docs),
         params,
     }
@@ -78,41 +70,14 @@ fn render_intrinsic_parameter(
     match style {
         CallableArgumentStyle::Positional => Parameter {
             name: None,
-            label: positional_intrinsic_parameter_label(param),
+            label: render_callable_parameter_label(param, style),
             documentation: join_docs(&param.docs),
         },
         CallableArgumentStyle::NamedFields => Parameter {
             name: Some(param.label.clone()),
-            label: format!("{}: {}", param.label, render_callable_shape(&param.shape)),
+            label: render_callable_parameter_label(param, style),
             documentation: join_docs(&param.docs),
         },
-    }
-}
-
-fn positional_intrinsic_parameter_label(param: &tooling::CallableParameter) -> String {
-    let label = match param.shape {
-        CallableValueShape::SavedRoot if param.label == "root" => "^root".to_string(),
-        _ => param.label.clone(),
-    };
-    if param.repeat {
-        format!("{label}...")
-    } else {
-        label
-    }
-}
-
-fn render_callable_shape(shape: &CallableValueShape) -> String {
-    match shape {
-        CallableValueShape::Type(ty) => render_type(ty),
-        CallableValueShape::Scalar => "scalar".to_string(),
-        CallableValueShape::Value => "value".to_string(),
-        CallableValueShape::Sequence => "sequence".to_string(),
-        CallableValueShape::Collection => "collection".to_string(),
-        CallableValueShape::SavedPath => "path".to_string(),
-        CallableValueShape::SavedLayer => "layer".to_string(),
-        CallableValueShape::SavedRoot => "^root".to_string(),
-        CallableValueShape::Identity => "Id".to_string(),
-        CallableValueShape::ErrorCode => "ErrorCode".to_string(),
     }
 }
 

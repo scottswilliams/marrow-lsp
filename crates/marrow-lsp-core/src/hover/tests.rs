@@ -19,7 +19,7 @@ fn analyze(source: &str) -> (AnalysisSnapshot, std::path::PathBuf) {
     std::fs::write(&file, source).unwrap();
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     // Keep the temp dir alive for the snapshot's lifetime by leaking it; the
     // OS reclaims it when the test process exits.
     std::mem::forget(dir);
@@ -42,7 +42,7 @@ fn analyze_files(files: &[(&str, &str)], target: &str) -> (AnalysisSnapshot, std
     }
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     let file = src.join(target);
     std::mem::forget(dir);
     (snapshot, file)
@@ -441,7 +441,6 @@ pub fn g(): Id(^books)
     return nextId(^books)
 
 pub fn h()
-    write(\"a\")
     print(\"b\")
     return count(^books)
 ";
@@ -480,11 +479,6 @@ pub fn h()
         "builtin docs should be specific to the hovered builtin: {next_id_value}"
     );
 
-    let write_value = hover_value(&snapshot, &index, &file, source, "write(\"a");
-    assert!(
-        write_value.contains("Writes rendered text to output without a newline."),
-        "write hover should describe output behavior without implying saved-state mutation: {write_value}"
-    );
     let print_value = hover_value(&snapshot, &index, &file, source, "print(\"b");
     assert!(
         print_value.contains("Writes rendered text to output with a newline."),
@@ -499,7 +493,7 @@ pub fn h()
 }
 
 #[test]
-fn hover_over_std_call_leaf_shows_signature_and_capability() {
+fn hover_over_std_call_leaf_shows_signature_and_context() {
     let source = "\
 module a
 
@@ -515,13 +509,30 @@ pub fn f(): int
         "std signature should lead the hover: {value}"
     );
     assert!(
-        value.contains("Capability: pure"),
-        "std hover should include capability context: {value}"
-    );
-    assert!(
         value.contains("default library"),
         "std hover should identify default-library context: {value}"
     );
+}
+
+#[test]
+fn hover_over_imported_std_call_leaf_uses_contextual_callable_signature() {
+    let source = "\
+module a
+
+use std::text
+
+pub fn f(): int
+    return text::length(\"abc\")
+";
+    let (snapshot, file) = analyze(source);
+    let index = index_for(&snapshot);
+    let value = hover_value(&snapshot, &index, &file, source, "length(\"abc");
+
+    assert!(
+        value.starts_with("```marrow\nstd::text::length(string): int\n```"),
+        "std signature should be expanded from the file import context: {value}"
+    );
+    assert!(value.contains("default library std operation"));
 }
 
 #[test]
@@ -1261,6 +1272,21 @@ pub fn f(): bool
             .is_some_and(|value| value.contains("default library")),
         "qualified foo::std::text text segment should not get default-library docs: {text_value:?}"
     );
+}
+
+#[test]
+fn hover_has_no_local_intrinsic_callable_model() {
+    let source = include_str!("facts.rs");
+    for forbidden in [
+        "language_facts::bare_builtin_hover",
+        "language_facts::scalar_conversion_hover",
+        "language_facts::std_operation_hover",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "hover must consume marrow_check callable facts instead of {forbidden}"
+        );
+    }
 }
 
 #[test]

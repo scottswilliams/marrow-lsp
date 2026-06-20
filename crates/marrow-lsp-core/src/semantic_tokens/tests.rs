@@ -70,7 +70,7 @@ fn decoded_for_checked(source: &str) -> (LineIndex, DecodedTokens) {
 
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     let binding_index = build_binding_index(&snapshot);
     let parsed = snapshot
         .files
@@ -119,7 +119,7 @@ fn decoded_for_checked_file(
     let active_file = src.join(active_relative);
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     let binding_index = build_binding_index(&snapshot);
     let parsed = snapshot
         .files

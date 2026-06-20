@@ -228,8 +228,14 @@ impl Workspace {
         let sources = overlay(&project.root, documents);
         let accepted = read_accepted_catalog_artifact(&project.root)
             .map_err(WorkspaceError::AcceptedCatalog)?;
-        let snapshot = analyze_project(&project.root, &project.config, &sources, accepted.as_ref())
-            .map_err(WorkspaceError::Discover)?;
+        let snapshot = analyze_project(
+            &project.root,
+            &project.config,
+            &sources,
+            accepted.as_ref(),
+            None,
+        )
+        .map_err(WorkspaceError::Discover)?;
         let binding_index_key = BindingIndexKey::new(project, &snapshot);
 
         // Retain the last program that had modules, so a later recompute whose

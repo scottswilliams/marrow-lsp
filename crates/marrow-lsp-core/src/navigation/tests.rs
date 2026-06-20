@@ -41,7 +41,7 @@ fn analyze_files(files: &[(&str, &str)]) -> (AnalysisSnapshot, Vec<PathBuf>, Ind
     }
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     std::mem::forget(dir);
     (snapshot, paths, Indices(indices))
 }

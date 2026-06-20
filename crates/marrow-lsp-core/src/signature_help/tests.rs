@@ -90,7 +90,7 @@ pub fn run(): int
     .unwrap();
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     (snapshot, app)
 }
 
@@ -163,7 +163,7 @@ fn single_file_snapshot(source: &str) -> AnalysisSnapshot {
 
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    analyze_project(root, &config, &ProjectSources::new(), None).unwrap()
+    analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap()
 }
 
 fn signature_label(help: &SignatureHelp) -> &str {
@@ -904,7 +904,7 @@ resource Badge
     .unwrap();
     let config =
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
-    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
 
     let help = help_at(
         &snapshot.program,

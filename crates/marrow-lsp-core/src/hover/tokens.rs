@@ -181,6 +181,51 @@ pub(super) fn bare_call_name_at<'a>(
         .then(|| tokens[index].text(source))
 }
 
+pub(super) fn callable_path_at(
+    tokens: &[Token],
+    source: &str,
+    index: usize,
+) -> Option<(Vec<String>, usize)> {
+    if let Some(name) = bare_call_name_at(tokens, source, index) {
+        return Some((vec![name.to_string()], index));
+    }
+
+    let mut start = index;
+    while start >= 2
+        && tokens[start - 1].kind == TokenKind::DoubleColon
+        && is_path_segment_token(tokens[start - 2].kind)
+    {
+        start -= 2;
+    }
+    let mut end = index;
+    while end + 2 < tokens.len()
+        && tokens[end + 1].kind == TokenKind::DoubleColon
+        && is_path_segment_token(tokens[end + 2].kind)
+    {
+        end += 2;
+    }
+    if !starts_at_callee_root(tokens, start) || !is_call_leaf(tokens, end) {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = start;
+    loop {
+        if !is_path_segment_token(tokens[cursor].kind) {
+            return None;
+        }
+        segments.push(tokens[cursor].text(source).to_string());
+        if cursor == end {
+            break;
+        }
+        if cursor + 2 > end || tokens[cursor + 1].kind != TokenKind::DoubleColon {
+            return None;
+        }
+        cursor += 2;
+    }
+    Some((segments, end))
+}
+
 fn is_call_leaf(tokens: &[Token], index: usize) -> bool {
     is_path_segment_token(tokens[index].kind)
         && tokens
