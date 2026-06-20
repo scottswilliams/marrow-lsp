@@ -451,6 +451,30 @@ pub fn f(): string
 }
 
 #[test]
+fn prepare_rename_of_a_saved_field_returns_none() {
+    let source = "\
+module a
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+pub fn f(): string
+    return ^books(1).title ?? \"\"
+";
+    let (snapshot, file, indices) = analyze(source);
+    let index = build_binding_index(&snapshot);
+
+    let field_offset = offset_of(source, "required title") + "required ".len();
+    assert_eq!(
+        prepare_rename(&index, &indices, &file, field_offset),
+        None,
+        "prepare_rename must not advertise source-only edits for saved fields"
+    );
+}
+
+#[test]
 fn rename_of_an_imported_module_alias_is_refused_without_local_retargeting() {
     let library = "\
 module shelf::books
@@ -543,6 +567,32 @@ fn prepare_rename_returns_the_identifier_range() {
     assert_eq!(range.start.line, line);
     assert_eq!(range.start.character, character);
     assert_eq!(range.end.character, character + 1, "the range covers `n`");
+}
+
+#[test]
+fn prepare_rename_returns_ranges_for_source_only_params_and_functions() {
+    let source = "\
+module a
+
+pub fn add(count: int): int
+    return count
+
+pub fn call(): int
+    return add(1)
+";
+    let (snapshot, file, indices) = analyze(source);
+    let index = build_binding_index(&snapshot);
+    let line_index = indices.0.get(&file).unwrap();
+
+    let param_use = offset_of(source, "return count") + "return ".len();
+    let param_range = prepare_rename(&index, &indices, &file, param_use)
+        .expect("source-only params remain prepare_rename targets");
+    assert_eq!(range_text(source, line_index, param_range), "count");
+
+    let function_use = offset_of(source, "return add") + "return ".len();
+    let function_range = prepare_rename(&index, &indices, &file, function_use)
+        .expect("source-only functions remain prepare_rename targets");
+    assert_eq!(range_text(source, line_index, function_range), "add");
 }
 
 #[test]
@@ -1635,12 +1685,13 @@ fn f(): b::Status
         analyze_files(&[("a/b.mw", status_source), ("app.mw", app_source)]);
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
-    let app_index = indices.0.get(app_file).unwrap();
 
     let annotation = offset_of(app_source, "const current: b::Status") + "const current: b::".len();
-    let prepared = prepare_rename(&index, &indices, app_file, annotation + 1)
-        .expect("enum annotation can prepare rename");
-    assert_eq!(range_text(app_source, app_index, prepared), "Status");
+    assert_eq!(
+        prepare_rename(&index, &indices, app_file, annotation + 1),
+        None,
+        "prepare_rename must not advertise source-only edits for catalog-backed enum annotations"
+    );
 
     let result = rename(&index, &indices, app_file, annotation + 1, "State");
     assert!(

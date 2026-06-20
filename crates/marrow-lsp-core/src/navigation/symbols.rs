@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::Path};
 
 use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
-use marrow_check::{BindingIndex, RenameSafety, SymbolRef};
+use marrow_check::{BindingIndex, RenameAction, RenameSafety, SymbolRef};
 
 use super::{
     catalog_uses,
@@ -90,7 +90,7 @@ pub fn prepare_rename(
     offset: usize,
 ) -> Option<Range> {
     let definition = index.definition(file, offset)?;
-    index.rename_action(&definition, "rename")?;
+    source_only_rename_action(index, &definition, "rename").ok()?;
     let name = symbol_name(&definition, indices)?;
     let line_index = indices.index_for(file)?;
     let (start, end) = name_in_span_at(line_index.text(), offset, &name)?;
@@ -111,15 +111,7 @@ pub fn rename(
     let definition = index
         .definition(file, offset)
         .ok_or(RenameError::NoSymbol)?;
-    if let RenameSafety::SavedDataBacked = index.rename_safety(&definition) {
-        return Err(RenameError::SavedDataBacked);
-    }
-    let action = index
-        .rename_action(&definition, new_name)
-        .ok_or(RenameError::NotRenameable)?;
-    if action.evolve_rename.is_some() {
-        return Err(RenameError::SavedDataBacked);
-    }
+    let action = source_only_rename_action(index, &definition, new_name)?;
 
     let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     for edit in action.edits {
@@ -140,6 +132,23 @@ pub fn rename(
         document_changes: None,
         change_annotations: None,
     })
+}
+
+fn source_only_rename_action(
+    index: &BindingIndex,
+    definition: &SymbolRef,
+    new_name: &str,
+) -> Result<RenameAction, RenameError> {
+    if let RenameSafety::SavedDataBacked = index.rename_safety(definition) {
+        return Err(RenameError::SavedDataBacked);
+    }
+    let action = index
+        .rename_action(definition, new_name)
+        .ok_or(RenameError::NotRenameable)?;
+    if action.evolve_rename.is_some() {
+        return Err(RenameError::SavedDataBacked);
+    }
+    Ok(action)
 }
 
 fn symbol_location(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<Location> {
