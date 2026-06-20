@@ -612,28 +612,34 @@ fn f(s: Status)
 }
 
 #[test]
-fn definition_from_evolve_transform_type_annotation_is_blocked_without_binding_fact() {
+fn definition_from_evolve_transform_type_annotation_jumps_to_resource() {
     let source = "\
 module a
 
 resource Book
     required title: string
+    required slug: string
 
 store ^books(id: int): Book
 
 evolve
-    transform ^books
-        const draft: Book = Book(title: \"x\")
+    transform Book.title
+        const draft: Book = Book(title: old.slug, slug: old.slug)
+        return draft.title
 ";
     let (snapshot, file, indices) = analyze(source);
     let index = build_binding_index(&snapshot);
 
     let annotation = offset_of(source, "draft: Book") + "draft: ".len();
-    let location = definition(&snapshot, &index, &indices, &file, annotation + 1);
+    let location = definition(&snapshot, &index, &indices, &file, annotation + 1)
+        .expect("transform body type annotation resolves through BindingIndex");
+    let line_index = indices.0.get(&file).unwrap();
 
-    assert!(
-        location.is_none(),
-        "evolve transform navigation needs Marrow binding facts, got {location:?}"
+    assert_eq!(range_text(source, line_index, location.range), "Book");
+    let declaration = offset_of(source, "resource Book") + "resource ".len();
+    assert_eq!(
+        location.range,
+        range_for(source, declaration, declaration + "Book".len())
     );
 }
 
