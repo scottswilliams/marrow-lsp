@@ -359,17 +359,17 @@ fn open_saved_postfix_before_dot(tokens: &[Token], dot_index: usize) -> bool {
         match tokens[i].kind {
             TokenKind::RightParen => paren_depth += 1,
             TokenKind::LeftParen if paren_depth > 0 => paren_depth -= 1,
-            TokenKind::LeftParen if bracket_depth == 0 => {
-                if open_call_has_completed_saved_receiver(tokens, i) {
-                    return true;
-                }
+            TokenKind::LeftParen
+                if bracket_depth == 0 && open_call_has_completed_saved_receiver(tokens, i) =>
+            {
+                return true;
             }
             TokenKind::RightBracket => bracket_depth += 1,
             TokenKind::LeftBracket if bracket_depth > 0 => bracket_depth -= 1,
-            TokenKind::LeftBracket if paren_depth == 0 => {
-                if open_bracket_has_saved_receiver(tokens, i) {
-                    return true;
-                }
+            TokenKind::LeftBracket
+                if paren_depth == 0 && open_bracket_has_saved_receiver(tokens, i) =>
+            {
+                return true;
             }
             _ => {}
         }

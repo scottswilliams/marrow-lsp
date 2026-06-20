@@ -28,8 +28,8 @@ use marrow_json::resource_schema::{
 };
 use marrow_json::surface::{
     SURFACE_OPERATION_PROFILE_VERSION, SURFACE_ROUTE_PROFILE_VERSION, SurfaceAbiJson,
-    SurfaceOperationRequestJson, SurfaceRouteManifestJson, execute_project_surface_operation,
-    execute_project_surface_operation_read_only,
+    SurfaceOperationKind, SurfaceOperationRequestJson, SurfaceRouteManifestJson,
+    execute_project_surface_operation, execute_project_surface_operation_read_only,
 };
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation, Host,
@@ -410,7 +410,9 @@ pub fn surface_routes(file: &Path, scope: SurfaceRouteScope) -> Json {
     let abi = SurfaceAbiJson::from_program(program);
     let mut manifest = SurfaceRouteManifestJson::from_abi(&abi);
     if scope == SurfaceRouteScope::ReadOnly {
-        manifest.routes.retain(|route| route.request.is_read());
+        manifest
+            .routes
+            .retain(|route| SurfaceOperationKind::from(&route.request).is_read());
     }
     let result = serde_json::to_value(manifest).expect("surface route manifest DTO serializes");
     with_contract(result, contract)
