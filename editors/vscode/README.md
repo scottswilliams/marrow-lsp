@@ -23,9 +23,10 @@ Rust binaries. No parsing or position math runs in TypeScript.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
   project's `defaultEntry`, or set `entry` and typed `args` in `launch.json`. Marrow admits
   the args; `int`, `date`, and `bytes` use exact string forms. F5 remains useful for launch,
-  stop-on-entry, stepping, verified plain-line breakpoints, and variables. Conditional
-  breakpoints, hit conditions, logpoints, and durable-data debugger inspection remain blocked
-  until Marrow exposes the canonical facts behind those surfaces.
+  stop-on-entry, stepping, verified plain-line and conditional breakpoints, watch/REPL local
+  expression evaluation, and variables. Hit conditions, logpoints, hover evaluation, and
+  durable-data debugger inspection remain blocked until Marrow exposes the canonical facts
+  behind those surfaces.
 
 ## Requirements
 

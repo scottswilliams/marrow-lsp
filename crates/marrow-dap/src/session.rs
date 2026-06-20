@@ -196,6 +196,7 @@ impl BreakpointBlock {
 enum BreakpointRequest {
     Plain,
     Condition(String),
+    InvalidCondition,
     Blocked(BreakpointBlock),
 }
 
@@ -686,6 +687,13 @@ impl<W: Write> Session<W> {
                     BreakpointRequest::Blocked(block) => *block,
                     BreakpointRequest::Condition(_) => BreakpointBlock::Expression,
                     BreakpointRequest::Plain => BreakpointBlock::StopPoint,
+                    BreakpointRequest::InvalidCondition => {
+                        return unverified_breakpoint(
+                            line,
+                            BREAKPOINT_CONDITION_INVALID,
+                            ERROR_BREAKPOINT_CONDITION_INVALID,
+                        );
+                    }
                 };
                 unverified_breakpoint(line, block.message(), block.contract())
             }
@@ -711,6 +719,11 @@ impl<W: Write> Session<W> {
             BreakpointRequest::Blocked(block) => {
                 unverified_breakpoint(line, block.message(), block.contract())
             }
+            BreakpointRequest::InvalidCondition => unverified_breakpoint(
+                line,
+                BREAKPOINT_CONDITION_INVALID,
+                ERROR_BREAKPOINT_CONDITION_INVALID,
+            ),
             BreakpointRequest::Condition(condition) => {
                 match self.checked_condition(&stops[0], condition) {
                     Ok(_) => json!({ "verified": true, "line": line }),
@@ -774,7 +787,7 @@ impl<W: Write> Session<W> {
                             }
                         }
                     }
-                    BreakpointRequest::Blocked(_) => {}
+                    BreakpointRequest::InvalidCondition | BreakpointRequest::Blocked(_) => {}
                 }
             }
         }
@@ -1595,22 +1608,22 @@ fn requested_breakpoint(point: &Json) -> RequestedBreakpoint {
 }
 
 fn breakpoint_request(point: &Json) -> BreakpointRequest {
-    if ["hitCondition", "logMessage"].into_iter().any(|field| {
-        point
-            .get(field)
-            .and_then(Json::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    }) {
-        return BreakpointRequest::Blocked(BreakpointBlock::Expression);
+    for field in ["hitCondition", "logMessage"] {
+        match point.get(field) {
+            Some(Json::String(value)) if !value.trim().is_empty() => {
+                return BreakpointRequest::Blocked(BreakpointBlock::Expression);
+            }
+            Some(Json::Null) | None | Some(Json::String(_)) => {}
+            Some(_) => return BreakpointRequest::Blocked(BreakpointBlock::Expression),
+        }
     }
-    if let Some(condition) = point
-        .get("condition")
-        .and_then(Json::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        return BreakpointRequest::Condition(condition.to_string());
+    match point.get("condition") {
+        Some(Json::String(condition)) if !condition.trim().is_empty() => {
+            BreakpointRequest::Condition(condition.to_string())
+        }
+        Some(Json::Null) | None | Some(Json::String(_)) => BreakpointRequest::Plain,
+        Some(_) => BreakpointRequest::InvalidCondition,
     }
-    BreakpointRequest::Plain
 }
 
 fn parse_project(arguments: &Json) -> Result<&str, DapInputError> {

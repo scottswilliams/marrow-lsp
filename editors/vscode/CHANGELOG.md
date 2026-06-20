@@ -21,8 +21,8 @@ Initial release.
   Marrow-owned store facts.
 - F5 debugging via the `marrow-dap` adapter, with explicit `entry`, Marrow-admitted typed `args`
   where `int`, `date`, and `bytes` use exact string forms, stop-on-entry, statement stepping,
-  verified plain-line breakpoints, and variables. Conditional breakpoints, hit conditions,
-  logpoints, and durable-data debugger inspection remain blocked until Marrow exposes the
-  canonical facts behind those surfaces.
+  verified plain-line and conditional breakpoints, watch/REPL local expression evaluation, and
+  variables. Hit conditions, logpoints, hover evaluation, and durable-data debugger inspection
+  remain blocked until Marrow exposes the canonical facts behind those surfaces.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
   debug adapter (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`).

@@ -2029,7 +2029,7 @@ fn non_stop_point_breakpoint_is_not_armed_after_launch() {
 }
 
 #[test]
-fn expression_breakpoint_does_not_stop_without_stop_on_entry() {
+fn true_conditional_breakpoint_stops_without_stop_on_entry() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
 
@@ -2136,6 +2136,61 @@ fn invalid_conditional_breakpoints_are_not_armed() {
             "dap.breakpoint.conditionInvalid",
             "invalid-params",
             None,
+        );
+    }
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn non_string_breakpoint_expression_fields_are_rejected_and_unarmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [
+                { "line": 6, "condition": true },
+                { "line": 6, "hitCondition": 3 },
+                { "line": 6, "logMessage": { "text": "title changed" } },
+            ],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 3, "{response}");
+
+    assert_eq!(breakpoints[0]["verified"], false, "{response}");
+    assert_eq!(breakpoints[0]["line"], 6, "{response}");
+    assert_breakpoint_contract(
+        &breakpoints[0],
+        "dap.breakpoint.conditionInvalid",
+        "invalid-params",
+        None,
+    );
+
+    for breakpoint in &breakpoints[1..] {
+        assert_eq!(breakpoint["verified"], false, "{response}");
+        assert_eq!(breakpoint["line"], 6, "{response}");
+        assert_breakpoint_marrow_contract(
+            breakpoint,
+            "dap.breakpoint.expressionBlocked",
+            "canonical stop-point and breakpoint expression facts",
         );
     }
 
