@@ -309,6 +309,10 @@ fn malformed_saved_path_looking_dots_return_no_bare_completions() {
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)...|\n",
         "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..=|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).return.|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).\"title\".|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id).123.|\n",
+        "module shelf::app\n\npub fn f(id: int)\n    const x = ^books(id)..foo.|\n",
     ] {
         let labels = complete(&program, &file, source);
         assert!(

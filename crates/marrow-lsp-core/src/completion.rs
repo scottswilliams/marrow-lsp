@@ -240,11 +240,31 @@ fn saved_path_before_dot(source: &str, tokens: &[Token], dot_index: usize) -> Sa
 }
 
 fn unrecovered_saved_path(tokens: &[Token], dot_index: usize) -> SavedPathRecovery {
-    if saved_path_attempt_before_dot(tokens, dot_index) {
+    if malformed_saved_member_receiver_before_dot(tokens, dot_index)
+        || saved_path_attempt_before_dot(tokens, dot_index)
+    {
         SavedPathRecovery::Invalid
     } else {
         SavedPathRecovery::NotSavedPath
     }
+}
+
+fn malformed_saved_member_receiver_before_dot(tokens: &[Token], dot_index: usize) -> bool {
+    let Some(receiver) = dot_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(delimiter) = receiver.checked_sub(1) else {
+        return false;
+    };
+    if !matches!(
+        tokens[delimiter].kind,
+        TokenKind::Dot | TokenKind::QuestionDot | TokenKind::DotDot | TokenKind::DotDotEqual
+    ) {
+        return false;
+    }
+    delimiter
+        .checked_sub(1)
+        .is_some_and(|end| saved_path_attempt_ending_at(tokens, end))
 }
 
 fn saved_path_attempt_before_dot(tokens: &[Token], dot_index: usize) -> bool {
