@@ -19,6 +19,9 @@ fn project_snapshot() -> (AnalysisSnapshot, std::path::PathBuf) {
         "\
 module shelf::books
 
+enum Status
+    active
+
 ;; Books stored in the public shelf.
 resource Book
     ;; Title shown to readers.
@@ -36,6 +39,9 @@ store ^settings: Settings
 
 resource Badge
     required value: int
+
+resource Review
+    status: Status
 
 ;; Resolves the display title for a book.
 pub fn titleOf(
@@ -372,6 +378,27 @@ fn fully_qualified_resource_constructor_keeps_signature_help() {
 
     assert_eq!(signature_label(&help), "Badge(value: int): Badge");
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
+    assert_eq!(help.active_parameter, Some(0));
+}
+
+#[test]
+fn resource_constructor_signature_help_uses_checked_field_types() {
+    let (program, file) = project();
+    let help = help_at(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn run(): books::Review\n    return books::Review(|\n",
+    )
+    .expect("signature help");
+
+    assert_eq!(
+        signature_label(&help),
+        "Review(status: shelf::books::Status): Review"
+    );
+    assert_eq!(
+        parameter_labels(&help),
+        vec!["status: shelf::books::Status".to_string()]
+    );
     assert_eq!(help.active_parameter, Some(0));
 }
 

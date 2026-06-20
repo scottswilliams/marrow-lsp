@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use marrow_check::{
-    AnalysisSnapshot, CheckedFunction, CheckedProgram, Def, DefItem, Resolution, ResolvableKind,
+    AnalysisSnapshot, CheckedFunction, CheckedProgram, DefItem, Resolution, ResolvableKind,
     resolve,
+    tooling::{self, ResourceConstructorSignature},
 };
-use marrow_schema::{NodeKind, ResourceSchema, stdlib};
+use marrow_schema::stdlib;
 use marrow_syntax::{Declaration, FunctionDecl, SourceSpan};
 
 use crate::{language_facts, types::render_type};
@@ -31,7 +32,7 @@ pub(super) fn signature_for(
     if let Some(signature) = builtin_signature(segments) {
         return Some(signature);
     }
-    if let Some(signature) = resource_signature(program, from_module, segments) {
+    if let Some(signature) = resource_signature(program, file, segments) {
         return Some(signature);
     }
     function_signature(program, docs, from_module, segments)
@@ -60,30 +61,21 @@ fn builtin_signature(segments: &[String]) -> Option<Signature> {
 
 fn resource_signature(
     program: &CheckedProgram,
-    from_module: &str,
+    file: &Path,
     segments: &[String],
 ) -> Option<Signature> {
-    match resolve(program, from_module, segments, ResolvableKind::Resource) {
-        Resolution::Found(Def {
-            item: DefItem::Resource(resource),
-            ..
-        }) => Some(resource_constructor_signature(resource)),
-        _ => None,
-    }
+    tooling::resource_constructor_signature(program, file, segments)
+        .map(render_resource_constructor_signature)
 }
 
-fn resource_constructor_signature(resource: &ResourceSchema) -> Signature {
-    let params =
-        resource
-            .members
-            .iter()
-            .filter_map(|node| match &node.kind {
-                NodeKind::Slot { ty, .. } if node.key_params.is_empty() => Some(
-                    named_param_with_docs(&node.name, &ty.to_string(), join_docs(&node.docs)),
-                ),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+fn render_resource_constructor_signature(resource: ResourceConstructorSignature) -> Signature {
+    let params = resource
+        .fields
+        .iter()
+        .map(|field| {
+            named_param_with_docs(&field.name, &render_type(&field.ty), join_docs(&field.docs))
+        })
+        .collect::<Vec<_>>();
     Signature {
         label: format!(
             "{}({}): {}",
