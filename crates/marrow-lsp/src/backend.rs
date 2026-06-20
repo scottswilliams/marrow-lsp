@@ -561,12 +561,14 @@ impl LanguageServer for Backend {
         match navigation::rename(index, &indices, &path, offset, &new_name) {
             Ok(edit) => Ok(Some(edit)),
             // No symbol under the cursor is not an error — the editor simply does
-            // nothing. A saved-data-backed symbol is refused with a clear message so
-            // the user learns renaming it would orphan stored records.
+            // nothing. Known symbols that Marrow cannot rename are refused with a
+            // clear message.
             Err(RenameError::NoSymbol) => Ok(None),
-            Err(error @ (RenameError::SavedDataBacked | RenameError::InvalidName)) => {
-                Err(jsonrpc::Error::invalid_params(error.message()))
-            }
+            Err(
+                error @ (RenameError::NotRenameable
+                | RenameError::SavedDataBacked
+                | RenameError::InvalidName),
+            ) => Err(jsonrpc::Error::invalid_params(error.message())),
         }
     }
 

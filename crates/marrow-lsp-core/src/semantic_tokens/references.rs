@@ -195,7 +195,7 @@ fn style_for_symbol_kind(kind: SymbolKind) -> Option<TokenStyle> {
                 modifiers: MOD_READONLY,
             });
         }
-        SymbolKind::ModuleRef => return None,
+        SymbolKind::ModuleRef => TYPE_NAMESPACE,
     };
     Some(TokenStyle::plain(token_type))
 }

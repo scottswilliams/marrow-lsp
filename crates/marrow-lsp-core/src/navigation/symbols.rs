@@ -16,6 +16,8 @@ use super::{
 pub enum RenameError {
     /// The cursor is not on a renameable symbol.
     NoSymbol,
+    /// The cursor is on a known symbol, but Marrow has no source-only rename action for it.
+    NotRenameable,
     /// The requested replacement is not a single valid Marrow identifier.
     InvalidName,
     /// The symbol names data encoded on disk. Renaming it in source alone would
@@ -28,6 +30,7 @@ impl RenameError {
     pub fn message(&self) -> String {
         match self {
             Self::NoSymbol => "no renameable symbol at this position".to_string(),
+            Self::NotRenameable => "this symbol cannot be renamed from the editor".to_string(),
             Self::InvalidName => "new name must be a valid Marrow identifier".to_string(),
             Self::SavedDataBacked => "cannot rename: this names saved data, so renaming it in \
                  source would orphan the stored records on disk"
@@ -92,6 +95,7 @@ pub fn prepare_rename(
     offset: usize,
 ) -> Option<Range> {
     let definition = index.definition(file, offset)?;
+    index.rename_action(&definition, "rename")?;
     let name = symbol_name(&definition, indices)?;
     let line_index = indices.index_for(file)?;
     let (start, end) = name_in_span_at(line_index.text(), offset, &name)?;
@@ -115,27 +119,24 @@ pub fn rename(
     if let RenameSafety::SavedDataBacked = index.rename_safety(&definition) {
         return Err(RenameError::SavedDataBacked);
     }
-    let name = symbol_name(&definition, indices).ok_or(RenameError::NoSymbol)?;
+    let action = index
+        .rename_action(&definition, new_name)
+        .ok_or(RenameError::NotRenameable)?;
+    if action.evolve_rename.is_some() {
+        return Err(RenameError::SavedDataBacked);
+    }
 
     let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    for reference in index.references(&definition) {
-        let Some(line_index) = indices.index_for(&reference.file) else {
+    for edit in action.edits {
+        let Some(line_index) = indices.index_for(&edit.file) else {
             continue;
         };
-        let Some((start, end)) = name_in_span(
-            line_index.text(),
-            reference.span.start_byte,
-            reference.span.end_byte,
-            &name,
-        ) else {
-            continue;
-        };
-        let Some(url) = Url::from_file_path(&reference.file).ok() else {
+        let Some(url) = Url::from_file_path(&edit.file).ok() else {
             continue;
         };
         edits.entry(url).or_default().push(TextEdit {
-            range: line_index.range(start, end),
-            new_text: new_name.to_string(),
+            range: line_index.range(edit.span.start_byte, edit.span.end_byte),
+            new_text: edit.replacement,
         });
     }
 

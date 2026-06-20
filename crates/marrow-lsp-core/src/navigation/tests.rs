@@ -451,6 +451,42 @@ pub fn f(): string
 }
 
 #[test]
+fn rename_of_an_imported_module_alias_is_refused_without_local_retargeting() {
+    let library = "\
+module shelf::books
+
+resource Book
+    required title: string
+
+pub fn title(): string
+    return \"Dune\"
+";
+    let app = "\
+module shelf::app
+use shelf::books
+
+fn run(items: sequence[books::Book]): string
+    return books::title()
+";
+    let (snapshot, paths, indices) =
+        analyze_files(&[("shelf/books.mw", library), ("shelf/app.mw", app)]);
+    let app_file = &paths[1];
+    let index = build_binding_index(&snapshot);
+
+    let type_alias = offset_of(app, "sequence[books::Book]") + "sequence[".len();
+    assert!(
+        prepare_rename(&index, &indices, app_file, type_alias + 1).is_none(),
+        "prepare_rename must not advertise editor rename for imports without a Marrow rename action"
+    );
+    let result = rename(&index, &indices, app_file, type_alias + 1, "volumes");
+    assert_eq!(result, Err(RenameError::NotRenameable));
+
+    let call_alias = offset_of(app, "books::title()");
+    let result = rename(&index, &indices, app_file, call_alias + 1, "volumes");
+    assert_eq!(result, Err(RenameError::NotRenameable));
+}
+
+#[test]
 fn rename_off_any_symbol_is_no_symbol() {
     let source = "module a\n\npub fn f(): int\n    return 1\n";
     let (snapshot, file, indices) = analyze(source);
