@@ -13,8 +13,8 @@ use marrow_lsp_core::data_explorer::{
 };
 use marrow_lsp_core::mcp::{
     self, COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
-    DATA_READ_MISSING_FACTS, RESOURCE_SCHEMA_MISSING_FACTS, RUN_MISSING_FACTS, RunMode,
-    SAVED_DATA_MISSING_FACTS, SurfaceRouteScope,
+    DATA_READ_MISSING_FACTS, RUN_MISSING_FACTS, RunMode, SAVED_DATA_MISSING_FACTS,
+    SurfaceRouteScope,
 };
 use serde_json::{Value as Json, json};
 
@@ -219,24 +219,23 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_resource_schema",
-            "description": "Presentation-only development inspection helper over current checked schema facts: return one named resource schema, including saved root, identity keys, member tree (fields, keyed leaves, groups), and indexes. The resource `name` is required so this tool cannot materialize the whole catalog; paged catalog/schema listing waits for Marrow-owned DTOs. Missing catalog-bound resource/store/member identity, presence/default facts, and typed protocol DTOs; not a stable production schema API.",
+            "description": "Return Marrow's canonical resource.schema.v1 JSON DTO for one named resource schema, including catalog-bound resource, store, index, and member identities. The resource `name` is required; all-resource listing is outside this named lookup surface.",
             "_meta": marrow_meta(json!({
-                "status": "presentation-only",
-                "stableProductionApi": false,
-                "description": "development inspection helper",
-                "basis": "current checked schema facts",
-                "missingFacts": RESOURCE_SCHEMA_MISSING_FACTS,
+                "status": "ready",
+                "stableProductionApi": true,
+                "description": "resource schema DTO",
+                "basis": "Marrow resource schema DTO",
+                "missingFacts": [],
                 "boundedness": {
                     "requiresNamedResource": true,
-                    "wholeCatalog": "blocked",
-                    "blocker": "paged catalog/schema DTOs",
+                    "wholeCatalog": "outside-surface",
                 },
             })),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
-                    "name": string_prop("Source-level resource name for this development inspection helper; required until Marrow exposes paged catalog/schema DTOs."),
+                    "name": string_prop("Resource name for the canonical resource.schema.v1 named lookup surface."),
                 },
                 "required": ["file", "name"],
             },
@@ -702,6 +701,23 @@ mod tests {
         assert_eq!(type_at["basis"], "Marrow checked type_at facts");
         assert_eq!(strings(&type_at["missingFacts"]), Vec::<String>::new());
 
+        let schema = contract(tools, "mw_resource_schema");
+        assert_eq!(schema["status"], "ready");
+        assert_eq!(schema["stableProductionApi"], true);
+        assert_eq!(schema["description"], "resource schema DTO");
+        assert_eq!(schema["basis"], "Marrow resource schema DTO");
+        assert_eq!(strings(&schema["missingFacts"]), Vec::<String>::new());
+        assert_eq!(schema["boundedness"]["requiresNamedResource"], true);
+        assert_eq!(schema["boundedness"]["wholeCatalog"], "outside-surface");
+        assert_eq!(
+            tool(tools, "mw_resource_schema")["inputSchema"]["properties"]["name"]["description"],
+            "Resource name for the canonical resource.schema.v1 named lookup surface."
+        );
+        assert_eq!(
+            tool(tools, "mw_resource_schema")["inputSchema"]["required"],
+            json!(["file", "name"])
+        );
+
         let surface_routes = contract(tools, "mw_surface_routes");
         assert_eq!(surface_routes["status"], "ready");
         assert_eq!(surface_routes["stableProductionApi"], true);
@@ -757,22 +773,6 @@ mod tests {
         assert_eq!(
             strings(&complete["missingFacts"]),
             COMPLETION_MISSING_FACTS.to_vec()
-        );
-
-        let schema = contract(tools, "mw_resource_schema");
-        assert_eq!(schema["status"], "presentation-only");
-        assert_eq!(schema["stableProductionApi"], false);
-        assert_eq!(schema["description"], "development inspection helper");
-        assert_eq!(schema["basis"], "current checked schema facts");
-        assert_eq!(
-            strings(&schema["missingFacts"]),
-            RESOURCE_SCHEMA_MISSING_FACTS.to_vec()
-        );
-        assert_eq!(schema["boundedness"]["requiresNamedResource"], true);
-        assert_eq!(schema["boundedness"]["wholeCatalog"], "blocked");
-        assert_eq!(
-            schema["boundedness"]["blocker"],
-            "paged catalog/schema DTOs"
         );
 
         let saved_roots = contract(tools, "mw_saved_roots");
@@ -842,10 +842,6 @@ mod tests {
             "saved-data tools that accept client-authored paths stay absent"
         );
 
-        assert_eq!(
-            tool(tools, "mw_resource_schema")["inputSchema"]["required"],
-            json!(["file", "name"])
-        );
         assert_eq!(
             tool(tools, "mw_surface_routes")["inputSchema"]["required"],
             json!(["file"])

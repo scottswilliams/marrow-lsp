@@ -556,27 +556,33 @@ fn complete_in_a_function_body_lists_locals_and_keywords() {
 fn resource_schema_shapes_the_book_resource() {
     let (_dir, file) = project();
     let result = resource_schema(&file, "Book");
+    assert_eq!(
+        result["profile_version"], "resource.schema.v1",
+        "Marrow resource schema profile must be present: {result}"
+    );
+    assert_eq!(result["diagnostics"], json!([]), "{result}");
     let resources = result["resources"].as_array().unwrap();
     assert_eq!(resources.len(), 1, "one Book resource: {result}");
     let book = &resources[0];
+    assert_eq!(book["module"], "shelf::books");
     assert_eq!(book["name"], "Book");
+    assert!(book["catalogId"].is_string(), "{result}");
     let stores = book["stores"].as_array().unwrap();
     assert_eq!(stores.len(), 1);
     let store = &stores[0];
     assert_eq!(store["root"], "books");
     assert_eq!(store["resource"], "Book");
+    assert!(store["catalogId"].is_string(), "{result}");
     assert_eq!(store["identityKeys"][0]["name"], "id");
     assert_eq!(store["identityKeys"][0]["type"], "int");
-    // `title` is a required string field; `code` keeps its ErrorCode spelling;
-    // `tags` is a keyed leaf; `byTitle` an index.
     let members = book["members"].as_array().unwrap();
-    assert!(
-        members
-            .iter()
-            .any(|m| m["name"] == "title" && m["kind"] == "field" && m["type"] == "string")
-    );
+    assert!(members.iter().any(|m| m["name"] == "title"
+        && m["catalogId"].is_string()
+        && m["kind"] == "field"
+        && m["type"] == "string"));
     assert!(members.iter().any(|m| {
         m["name"] == "code"
+            && m["catalogId"].is_string()
             && m["kind"] == "field"
             && m["type"] == "ErrorCode"
             && m["errorCode"] == true
@@ -591,18 +597,10 @@ fn resource_schema_shapes_the_book_resource() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|i| i["name"] == "byTitle")
+            .any(|i| i["name"] == "byTitle" && i["catalogId"].is_string())
     );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "development helper",
-        &[
-            "catalog-bound resource/store/member identity",
-            "presence/default facts",
-            "typed protocol DTOs",
-        ],
-    );
+    assert_production_contract(&result, "resource schema DTO");
+    assert_eq!(result["contract"]["basis"], "Marrow resource schema DTO");
 }
 
 #[test]
@@ -624,19 +622,11 @@ resource Book
     let result = resource_schema(&file, "Book");
     assert_eq!(result["resources"], json!([]), "{result}");
     assert_eq!(
-        result["diagnostics"][0]["code"], "mcp.resourceSchema.identity",
+        result["diagnostics"][0]["code"], "resource.schema.identity",
         "{result}"
     );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "development helper",
-        &[
-            "catalog-bound resource/store/member identity",
-            "presence/default facts",
-            "typed protocol DTOs",
-        ],
-    );
+    assert_production_contract(&result, "resource schema DTO");
+    assert_eq!(result["contract"]["basis"], "Marrow resource schema DTO");
 }
 
 #[test]

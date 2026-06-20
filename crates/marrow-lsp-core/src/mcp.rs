@@ -23,6 +23,9 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use marrow_check::{CheckedProgram, type_at};
+use marrow_json::resource_schema::{
+    RESOURCE_SCHEMA_PROFILE_VERSION, resource_schema_for_name as marrow_resource_schema_for_name,
+};
 use marrow_json::surface::{
     SURFACE_OPERATION_PROFILE_VERSION, SURFACE_ROUTE_PROFILE_VERSION, SurfaceAbiJson,
     SurfaceOperationRequestJson, SurfaceRouteManifestJson, execute_project_surface_operation,
@@ -34,7 +37,6 @@ use marrow_run::{
     ProjectSurfaceReadSession, ProjectSurfaceSession, RunOutput, RuntimeError, SessionEntry,
     StoreStamp, Value, run_entry_with_host,
 };
-use marrow_schema::{IndexSchema, KeyDef, Node, NodeKind, ResourceSchema, StoreSchema, Type};
 use marrow_store::tree::TreeStore;
 use serde_json::{Map, Value as Json, json};
 
@@ -44,7 +46,7 @@ use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
 use crate::positions::Position;
 use crate::store::LiveStore;
-use crate::types::{render_schema_leaf_type, render_type};
+use crate::types::render_type;
 use crate::workspace::Workspace;
 
 /// A clamp on the saved bytes a `run`/test captures into its result. Output is a
@@ -55,11 +57,6 @@ const RUN_VALUE_NODE_CAP: usize = 256;
 const RUN_VALUE_STRING_CAP: usize = 8 * 1024;
 
 pub const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
-pub const RESOURCE_SCHEMA_MISSING_FACTS: &[&str] = &[
-    "catalog-bound resource/store/member identity",
-    "presence/default facts",
-    "typed protocol DTOs",
-];
 pub const SAVED_DATA_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-root identity",
     "versioned source/store generation",
@@ -118,7 +115,9 @@ fn completion_contract() -> Json {
 }
 
 fn resource_schema_contract() -> Json {
-    presentation_contract("development helper", RESOURCE_SCHEMA_MISSING_FACTS)
+    let mut contract = production_contract("resource schema DTO");
+    contract["basis"] = json!("Marrow resource schema DTO");
+    contract
 }
 
 fn surface_routes_contract(scope: SurfaceRouteScope) -> Json {
@@ -355,56 +354,39 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     with_contract(json!({ "items": items }), contract)
 }
 
-/// `mw_resource_schema`: a JSON projection of one unambiguous named resource schema. The
-/// shape renders current checked schema facts for inspection only: resource name,
-/// stores, identity-key declarations, indexes, and member tree. It is not a typed
-/// saved-path, durable data DTO, or paged catalog API.
+/// `mw_resource_schema`: Marrow's canonical JSON DTO for one resource schema.
 pub fn resource_schema(file: &Path, name: &str) -> Json {
     let contract = resource_schema_contract();
     let workspace = match load_project(file, None) {
         Ok((workspace, _)) => workspace,
-        Err(error) => return with_contract(json!({ "resources": [], "error": error }), contract),
+        Err(error) => {
+            return with_contract(
+                json!({
+                    "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
+                    "resources": [],
+                    "diagnostics": [],
+                    "error": error,
+                }),
+                contract,
+            );
+        }
     };
     let Some(program) = workspace.program() else {
-        return with_contract(json!({ "resources": [] }), contract);
-    };
-    let matches: Vec<(&ResourceSchema, Vec<&StoreSchema>)> = program
-        .modules
-        .iter()
-        .flat_map(|module| {
-            module
-                .resources
-                .iter()
-                .filter(|resource| resource.name == name)
-                .map(move |resource| {
-                    let stores = module
-                        .stores
-                        .iter()
-                        .filter(|store| store.resource == resource.name)
-                        .collect();
-                    (resource, stores)
-                })
-        })
-        .collect();
-
-    if matches.len() > 1 {
         return with_contract(
             json!({
+                "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
                 "resources": [],
                 "diagnostics": [{
-                    "code": "mcp.resourceSchema.identity",
-                    "message": "resource schema lookup is ambiguous until Marrow exposes catalog-bound resource identity facts"
+                    "code": "resource.schema.missing",
+                    "message": "no checked program is available for resource schema lookup"
                 }],
             }),
             contract,
         );
-    }
-
-    let resources: Vec<Json> = matches
-        .into_iter()
-        .map(|(resource, stores)| schema_to_json(resource, stores.into_iter()))
-        .collect();
-    with_contract(json!({ "resources": resources }), contract)
+    };
+    let result = serde_json::to_value(marrow_resource_schema_for_name(program, name))
+        .expect("Marrow resource schema DTO serializes");
+    with_contract(result, contract)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,74 +543,6 @@ fn store_stamp_json(stamp: StoreStamp) -> Json {
         "store_uid": stamp.store_uid,
         "catalog_epoch": stamp.catalog_epoch,
         "commit_id": stamp.commit_id,
-    })
-}
-
-/// Project one resource schema to JSON: name, stores, and member tree. The member
-/// tree is recursive because groups carry nested members.
-fn schema_to_json<'a>(
-    resource: &ResourceSchema,
-    stores: impl Iterator<Item = &'a StoreSchema>,
-) -> Json {
-    json!({
-        "name": resource.name,
-        "docs": resource.docs,
-        "stores": stores.map(store_to_json).collect::<Vec<_>>(),
-        "members": resource.members.iter().map(node_to_json).collect::<Vec<_>>(),
-    })
-}
-
-fn store_to_json(store: &StoreSchema) -> Json {
-    json!({
-        "root": store.root,
-        "resource": store.resource,
-        "docs": store.docs,
-        "identityKeys": store.identity_keys.iter().map(key_def_to_json).collect::<Vec<_>>(),
-        "indexes": store.indexes.iter().map(index_to_json).collect::<Vec<_>>(),
-    })
-}
-
-fn key_def_to_json(key: &KeyDef) -> Json {
-    json!({ "name": key.name, "type": type_name(&key.ty) })
-}
-
-/// Project one member node. A field is `{ kind: "field", type, required }`; a keyed
-/// leaf is `{ kind: "leaf", type, keyParams }`; a group is `{ kind: "group",
-/// keyParams, members }` with its nested members projected recursively.
-fn node_to_json(node: &Node) -> Json {
-    match &node.kind {
-        NodeKind::Slot { ty, required, .. } if node.key_params.is_empty() => json!({
-            "name": node.name,
-            "kind": "field",
-            "type": render_schema_leaf_type(node, ty),
-            "required": required,
-            "errorCode": node.is_error_code(),
-            "docs": node.docs,
-        }),
-        NodeKind::Slot { ty, .. } => json!({
-            "name": node.name,
-            "kind": "leaf",
-            "type": render_schema_leaf_type(node, ty),
-            "keyParams": node.key_params.iter().map(key_def_to_json).collect::<Vec<_>>(),
-            "errorCode": node.is_error_code(),
-            "docs": node.docs,
-        }),
-        NodeKind::Group => json!({
-            "name": node.name,
-            "kind": "group",
-            "keyParams": node.key_params.iter().map(key_def_to_json).collect::<Vec<_>>(),
-            "members": node.members.iter().map(node_to_json).collect::<Vec<_>>(),
-            "docs": node.docs,
-        }),
-    }
-}
-
-fn index_to_json(index: &IndexSchema) -> Json {
-    json!({
-        "name": index.name,
-        "args": index.args,
-        "unique": index.unique,
-        "docs": index.docs,
     })
 }
 
@@ -1302,11 +1216,6 @@ fn merge(mut base: Json, extra: Json) -> Json {
         }
     }
     base
-}
-
-/// The `.mw` spelling of a schema type, for the resource-schema projection.
-fn type_name(ty: &Type) -> String {
-    ty.to_string()
 }
 
 /// The lowercase name of a completion item kind, so the agent reads `variable`,
