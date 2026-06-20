@@ -153,6 +153,28 @@ fn write_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
+fn write_repeated_call_fixture(dir: &Path) -> std::path::PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  fn hit()\n\
+                  \x20   print(\"hit\")\n\
+                  \n\
+                  pub fn main()\n\
+                  \x20   hit()\n\
+                  \x20   hit()\n\
+                  \x20   print(\"done\")\n";
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"memory\" } }",
+    )
+    .unwrap();
+    file
+}
+
 #[cfg(unix)]
 fn write_symlink_source_root_fixture(dir: &Path) -> std::path::PathBuf {
     let real_src = dir.join("real_src");
@@ -605,7 +627,7 @@ fn unsupported_commands_do_not_parse_request_arguments() {
 }
 
 #[test]
-fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
+fn prelaunch_breakpoint_inputs_return_distinct_blocked_contracts() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
     let mut client = Client::spawn();
@@ -638,14 +660,29 @@ fn breakpoint_expression_inputs_return_distinct_blocked_contracts() {
         "canonical stop-point facts",
     );
 
-    for (index, line) in [(1, 7), (2, 8), (3, 9)] {
+    let condition = &breakpoints[1];
+    assert_eq!(condition["verified"], false, "{response}");
+    assert_eq!(condition["line"], 7, "{response}");
+    assert_breakpoint_marrow_contract(
+        condition,
+        "dap.breakpoint.expressionBlocked",
+        "canonical stop-point and breakpoint expression facts",
+    );
+    assert!(
+        condition.get("condition").is_none()
+            && condition.get("hitCondition").is_none()
+            && condition.get("logMessage").is_none(),
+        "blocked breakpoint response must not echo or retain expression inputs: {condition}"
+    );
+
+    for (index, line) in [(2, 8), (3, 9)] {
         let breakpoint = &breakpoints[index];
         assert_eq!(breakpoint["verified"], false, "{response}");
         assert_eq!(breakpoint["line"], line, "{response}");
         assert_breakpoint_marrow_contract(
             breakpoint,
-            "dap.breakpoint.expressionBlocked",
-            "canonical stop-point and breakpoint expression facts",
+            "dap.breakpoint.unverified",
+            "canonical stop-point facts",
         );
         assert!(
             breakpoint.get("condition").is_none()
@@ -2103,6 +2140,203 @@ fn false_conditional_breakpoint_verifies_but_does_not_stop() {
 }
 
 #[test]
+fn hit_condition_stops_on_the_requested_encounter() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_repeated_call_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 4, "hitCondition": "2" }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 4);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 4);
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(client.response_for(cont)["success"], true);
+    client.event("terminated");
+}
+
+#[test]
+fn logpoint_emits_output_without_stopping() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6, "logMessage": "title changed" }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let output = client.event("output");
+    assert_eq!(output["body"]["category"], "console", "{output}");
+    assert_eq!(output["body"]["output"], "title changed\n", "{output}");
+    client.event("terminated");
+}
+
+#[test]
+fn logpoint_expression_interpolation_is_rejected_and_unarmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6, "logMessage": "title {title}" }],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoint = &response["body"]["breakpoints"][0];
+    assert_eq!(breakpoint["verified"], false, "{response}");
+    assert_eq!(breakpoint["line"], 6, "{response}");
+    assert_breakpoint_contract(
+        breakpoint,
+        "dap.breakpoint.logMessageInvalid",
+        "invalid-params",
+        None,
+    );
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn malformed_hit_conditions_are_rejected_and_unarmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [
+                { "line": 6, "hitCondition": "0" },
+                { "line": 6, "hitCondition": "-1" },
+                { "line": 6, "hitCondition": "+1" },
+                { "line": 6, "hitCondition": " 1 " },
+                { "line": 6, "hitCondition": "   " },
+            ],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 5, "{response}");
+    for breakpoint in breakpoints {
+        assert_eq!(breakpoint["verified"], false, "{response}");
+        assert_eq!(breakpoint["line"], 6, "{response}");
+        assert_breakpoint_contract(
+            breakpoint,
+            "dap.breakpoint.hitConditionInvalid",
+            "invalid-params",
+            None,
+        );
+    }
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn empty_logpoint_messages_are_rejected_and_unarmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6, "logMessage": "" }],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoint = &response["body"]["breakpoints"][0];
+    assert_eq!(breakpoint["verified"], false, "{response}");
+    assert_eq!(breakpoint["line"], 6, "{response}");
+    assert_breakpoint_contract(
+        breakpoint,
+        "dap.breakpoint.logMessageInvalid",
+        "invalid-params",
+        None,
+    );
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
 fn invalid_conditional_breakpoints_are_not_armed() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
@@ -2187,15 +2421,23 @@ fn non_string_breakpoint_expression_fields_are_rejected_and_unarmed() {
         None,
     );
 
-    for breakpoint in &breakpoints[1..] {
-        assert_eq!(breakpoint["verified"], false, "{response}");
-        assert_eq!(breakpoint["line"], 6, "{response}");
-        assert_breakpoint_marrow_contract(
-            breakpoint,
-            "dap.breakpoint.expressionBlocked",
-            "canonical stop-point and breakpoint expression facts",
-        );
-    }
+    assert_eq!(breakpoints[1]["verified"], false, "{response}");
+    assert_eq!(breakpoints[1]["line"], 6, "{response}");
+    assert_breakpoint_contract(
+        &breakpoints[1],
+        "dap.breakpoint.hitConditionInvalid",
+        "invalid-params",
+        None,
+    );
+
+    assert_eq!(breakpoints[2]["verified"], false, "{response}");
+    assert_eq!(breakpoints[2]["line"], 6, "{response}");
+    assert_breakpoint_contract(
+        &breakpoints[2],
+        "dap.breakpoint.logMessageInvalid",
+        "invalid-params",
+        None,
+    );
 
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
@@ -2613,12 +2855,14 @@ fn hover_evaluate_is_blocked_until_canonical_facts_exist_initialize_capability()
         response["body"]["supportsConditionalBreakpoints"], true,
         "conditional breakpoints are now backed by checked Marrow debug expressions: {response}"
     );
-    for capability in ["supportsHitConditionalBreakpoints", "supportsLogPoints"] {
-        assert_ne!(
-            response["body"][capability], true,
-            "{capability} must not be advertised until Marrow exposes canonical breakpoint facts: {response}"
-        );
-    }
+    assert_eq!(
+        response["body"]["supportsHitConditionalBreakpoints"], true,
+        "hit conditions are DAP hit-count bookkeeping over Marrow stop-point facts: {response}"
+    );
+    assert_eq!(
+        response["body"]["supportsLogPoints"], true,
+        "static logpoints are DAP output over Marrow stop-point facts: {response}"
+    );
 }
 
 #[test]

@@ -74,43 +74,95 @@ pub struct ArmedBreakpoints {
 }
 
 impl ArmedBreakpoints {
-    pub fn insert(&mut self, file: PathBuf, line: u32, condition: Option<CheckedDebugExpression>) {
+    pub fn insert(&mut self, file: PathBuf, breakpoint: ArmedBreakpoint) {
         let breakpoints = self.breakpoints_by_file.entry(file).or_default();
-        let breakpoint = ArmedBreakpoint { line, condition };
         if !breakpoints.contains(&breakpoint) {
             breakpoints.push(breakpoint);
         }
     }
 
-    fn should_stop(&self, frame: &Frame<'_, '_>, line: u32) -> bool {
+    fn evaluate(&mut self, frame: &Frame<'_, '_>, line: u32) -> BreakpointAction {
         frame
             .file()
-            .and_then(|file| self.breakpoints_by_file.get(file))
-            .is_some_and(|breakpoints| {
+            .and_then(|file| self.breakpoints_by_file.get_mut(file))
+            .map(|breakpoints| {
                 breakpoints
-                    .iter()
-                    .any(|breakpoint| breakpoint.matches(frame, line))
+                    .iter_mut()
+                    .filter_map(|breakpoint| breakpoint.evaluate(frame, line))
+                    .fold(BreakpointAction::default(), BreakpointAction::merge)
             })
+            .unwrap_or_default()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ArmedBreakpoint {
+pub struct ArmedBreakpoint {
     line: u32,
     condition: Option<CheckedDebugExpression>,
+    hit_target: Option<u64>,
+    log_message: Option<String>,
+    hits: u64,
 }
 
 impl ArmedBreakpoint {
-    fn matches(&self, frame: &Frame<'_, '_>, line: u32) -> bool {
-        if self.line != line {
-            return false;
+    pub fn new(
+        line: u32,
+        condition: Option<CheckedDebugExpression>,
+        hit_target: Option<u64>,
+        log_message: Option<String>,
+    ) -> Self {
+        Self {
+            line,
+            condition,
+            hit_target,
+            log_message,
+            hits: 0,
         }
-        let Some(condition) = &self.condition else {
-            return true;
-        };
-        frame
-            .evaluate_debug_expression(condition)
-            .is_ok_and(|value| value == DebugValue::from_value(Value::Bool(true)))
+    }
+}
+
+impl ArmedBreakpoint {
+    fn evaluate(&mut self, frame: &Frame<'_, '_>, line: u32) -> Option<BreakpointAction> {
+        if self.line != line {
+            return None;
+        }
+        if let Some(condition) = &self.condition
+            && !frame
+                .evaluate_debug_expression(condition)
+                .is_ok_and(|value| value == DebugValue::from_value(Value::Bool(true)))
+        {
+            return None;
+        }
+        self.hits = self.hits.saturating_add(1);
+        if self.hit_target.is_some_and(|target| self.hits != target) {
+            return None;
+        }
+        Some(match &self.log_message {
+            Some(message) => BreakpointAction {
+                outputs: vec![message.clone()],
+                stop: false,
+            },
+            None => BreakpointAction {
+                outputs: Vec::new(),
+                stop: true,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct BreakpointAction {
+    outputs: Vec<String>,
+    stop: bool,
+}
+
+impl BreakpointAction {
+    fn merge(mut self, next: Self) -> Self {
+        self.outputs.extend(next.outputs);
+        Self {
+            outputs: self.outputs,
+            stop: self.stop || next.stop,
+        }
     }
 }
 
@@ -170,6 +222,8 @@ pub enum Control {
 pub enum RunEvent {
     /// The run parked at a stop; the protocol thread should emit `stopped`.
     Stopped(StopInfo),
+    /// A logpoint emitted console text and let the run continue.
+    Output(String),
     /// The answer to the most recent [`Query`].
     Answer(QueryResult),
 }
@@ -297,11 +351,17 @@ impl StepHook for Debugger {
         frame: Frame<'_, '_>,
     ) -> Result<(), RuntimeError> {
         let depth = frame.depth();
+        let breakpoint = self.breakpoints.evaluate(&frame, span.line);
+        for output in breakpoint.outputs {
+            if self.events.send(RunEvent::Output(output)).is_err() {
+                return Err(terminated());
+            }
+        }
         let reason = if self.is_entry_stop() {
             Some(StopReason::Entry)
         } else if let Some(reason) = step::decide(self.mode, depth) {
             Some(reason)
-        } else if self.breakpoints.should_stop(&frame, span.line) {
+        } else if breakpoint.stop {
             Some(StopReason::Breakpoint)
         } else {
             None

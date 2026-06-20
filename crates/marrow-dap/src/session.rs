@@ -17,7 +17,9 @@ use marrow_run::{DebugValue, EntryArgument, EntryInvocation};
 use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
 
-use crate::debugger::{ArmedBreakpoints, Control, Query, QueryResult, RunEvent, StopInfo};
+use crate::debugger::{
+    ArmedBreakpoint, ArmedBreakpoints, Control, Query, QueryResult, RunEvent, StopInfo,
+};
 use crate::protocol::write_message;
 use crate::step::Resume;
 use crate::variables::{ChildCounts, ChildPage, VariablesFilter};
@@ -48,8 +50,11 @@ const RAW_DATA_INSPECTION_BLOCKED: &str =
     "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
 const BREAKPOINT_VERIFICATION_BLOCKED: &str =
     "blocked-on-marrow: DAP breakpoint verification needs canonical stop-point facts from Marrow";
-const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP breakpoint expression inputs need launch-time Marrow stop-point/debug-expression facts; hit-condition and logpoint inputs are not supported";
+const BREAKPOINT_EXPRESSION_BLOCKED: &str = "blocked-on-marrow: DAP conditional breakpoint inputs need launch-time Marrow stop-point/debug-expression facts";
 const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expression";
+const BREAKPOINT_HIT_CONDITION_INVALID: &str = "hitCondition must be a positive integer string";
+const BREAKPOINT_LOG_MESSAGE_INVALID: &str =
+    "logMessage must be a static string without expression interpolation";
 const BREAKPOINT_SOURCE_INVALID: &str = "missing or invalid breakpoint source";
 const BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: &str =
     "DAP sourceReference breakpoint sources are not supported";
@@ -88,6 +93,10 @@ const ERROR_BREAKPOINT_EXPRESSION_BLOCKED: DapError = DapError::blocked(
 );
 const ERROR_BREAKPOINT_CONDITION_INVALID: DapError =
     DapError::new("dap.breakpoint.conditionInvalid", STATUS_INVALID_PARAMS);
+const ERROR_BREAKPOINT_HIT_CONDITION_INVALID: DapError =
+    DapError::new("dap.breakpoint.hitConditionInvalid", STATUS_INVALID_PARAMS);
+const ERROR_BREAKPOINT_LOG_MESSAGE_INVALID: DapError =
+    DapError::new("dap.breakpoint.logMessageInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_SOURCE_INVALID: DapError =
     DapError::new("dap.breakpoint.sourceInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: DapError = DapError::new(
@@ -194,10 +203,23 @@ impl BreakpointBlock {
 
 #[derive(Clone)]
 enum BreakpointRequest {
-    Plain,
-    Condition(String),
+    Valid(BreakpointSpec),
     InvalidCondition,
-    Blocked(BreakpointBlock),
+    InvalidHitCondition,
+    InvalidLogMessage,
+}
+
+#[derive(Clone, Default)]
+struct BreakpointSpec {
+    condition: Option<String>,
+    hit_target: Option<u64>,
+    log_message: Option<String>,
+}
+
+impl BreakpointSpec {
+    fn needs_expression_facts(&self) -> bool {
+        self.condition.is_some()
+    }
 }
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
@@ -544,6 +566,8 @@ impl<W: Write> Session<W> {
                 "supportsConfigurationDoneRequest": true,
                 "supportsTerminateRequest": true,
                 "supportsConditionalBreakpoints": true,
+                "supportsHitConditionalBreakpoints": true,
+                "supportsLogPoints": true,
                 "supportsEvaluateForHovers": false,
             }),
         );
@@ -684,14 +708,29 @@ impl<W: Write> Session<W> {
             }
             None => {
                 let block = match request {
-                    BreakpointRequest::Blocked(block) => *block,
-                    BreakpointRequest::Condition(_) => BreakpointBlock::Expression,
-                    BreakpointRequest::Plain => BreakpointBlock::StopPoint,
+                    BreakpointRequest::Valid(spec) if spec.needs_expression_facts() => {
+                        BreakpointBlock::Expression
+                    }
+                    BreakpointRequest::Valid(_) => BreakpointBlock::StopPoint,
                     BreakpointRequest::InvalidCondition => {
                         return unverified_breakpoint(
                             line,
                             BREAKPOINT_CONDITION_INVALID,
                             ERROR_BREAKPOINT_CONDITION_INVALID,
+                        );
+                    }
+                    BreakpointRequest::InvalidHitCondition => {
+                        return unverified_breakpoint(
+                            line,
+                            BREAKPOINT_HIT_CONDITION_INVALID,
+                            ERROR_BREAKPOINT_HIT_CONDITION_INVALID,
+                        );
+                    }
+                    BreakpointRequest::InvalidLogMessage => {
+                        return unverified_breakpoint(
+                            line,
+                            BREAKPOINT_LOG_MESSAGE_INVALID,
+                            ERROR_BREAKPOINT_LOG_MESSAGE_INVALID,
                         );
                     }
                 };
@@ -715,22 +754,37 @@ impl<W: Write> Session<W> {
             );
         };
         match request {
-            BreakpointRequest::Plain => json!({ "verified": true, "line": line }),
-            BreakpointRequest::Blocked(block) => {
-                unverified_breakpoint(line, block.message(), block.contract())
-            }
+            BreakpointRequest::Valid(spec) => match self.checked_breakpoint_spec(&stops[0], spec) {
+                Ok(_) => json!({ "verified": true, "line": line }),
+                Err(error) => unverified_breakpoint(line, &error.message, error.contract),
+            },
             BreakpointRequest::InvalidCondition => unverified_breakpoint(
                 line,
                 BREAKPOINT_CONDITION_INVALID,
                 ERROR_BREAKPOINT_CONDITION_INVALID,
             ),
-            BreakpointRequest::Condition(condition) => {
-                match self.checked_condition(&stops[0], condition) {
-                    Ok(_) => json!({ "verified": true, "line": line }),
-                    Err(error) => unverified_breakpoint(line, &error.message, error.contract),
-                }
-            }
+            BreakpointRequest::InvalidHitCondition => unverified_breakpoint(
+                line,
+                BREAKPOINT_HIT_CONDITION_INVALID,
+                ERROR_BREAKPOINT_HIT_CONDITION_INVALID,
+            ),
+            BreakpointRequest::InvalidLogMessage => unverified_breakpoint(
+                line,
+                BREAKPOINT_LOG_MESSAGE_INVALID,
+                ERROR_BREAKPOINT_LOG_MESSAGE_INVALID,
+            ),
         }
+    }
+
+    fn checked_breakpoint_spec(
+        &self,
+        stop: &RuntimeStop,
+        spec: &BreakpointSpec,
+    ) -> Result<Option<CheckedDebugExpression>, DapInputError> {
+        spec.condition
+            .as_deref()
+            .map(|condition| self.checked_condition(stop, condition))
+            .transpose()
     }
 
     fn checked_condition(
@@ -775,19 +829,24 @@ impl<W: Write> Session<W> {
                     continue;
                 };
                 match request {
-                    BreakpointRequest::Plain => {
+                    BreakpointRequest::Valid(spec) => {
                         for stop in stops {
-                            armed.insert(stop.file.clone(), *line, None);
-                        }
-                    }
-                    BreakpointRequest::Condition(condition) => {
-                        for stop in stops {
-                            if let Ok(condition) = self.checked_condition(stop, condition) {
-                                armed.insert(stop.file.clone(), *line, Some(condition));
+                            if let Ok(condition) = self.checked_breakpoint_spec(stop, spec) {
+                                armed.insert(
+                                    stop.file.clone(),
+                                    ArmedBreakpoint::new(
+                                        *line,
+                                        condition,
+                                        spec.hit_target,
+                                        spec.log_message.clone(),
+                                    ),
+                                );
                             }
                         }
                     }
-                    BreakpointRequest::InvalidCondition | BreakpointRequest::Blocked(_) => {}
+                    BreakpointRequest::InvalidCondition
+                    | BreakpointRequest::InvalidHitCondition
+                    | BreakpointRequest::InvalidLogMessage => {}
                 }
             }
         }
@@ -1214,6 +1273,7 @@ impl<W: Write> Session<W> {
             Ok(RunEvent::Answer(answer)) => Some(answer),
             // A stop event cannot arrive mid-query (the run is parked), and any
             // other outcome means the run-thread is gone.
+            Ok(RunEvent::Output(_)) => None,
             _ => None,
         }
     }
@@ -1257,6 +1317,12 @@ impl<W: Write> Session<W> {
                         }),
                     );
                     return;
+                }
+                Ok(RunEvent::Output(output)) => {
+                    self.event(
+                        "output",
+                        json!({ "category": "console", "output": logpoint_output(output) }),
+                    );
                 }
                 // An Answer here would be a protocol-thread bug (we only recv
                 // answers inside `query`); ignore and keep pumping.
@@ -1371,6 +1437,13 @@ fn variable_json(
 
 fn variables_body(variables: Vec<Json>) -> Json {
     json!({ "variables": variables })
+}
+
+fn logpoint_output(mut output: String) -> String {
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
 
 fn debug_admin_presentation_hint() -> Json {
@@ -1608,22 +1681,47 @@ fn requested_breakpoint(point: &Json) -> RequestedBreakpoint {
 }
 
 fn breakpoint_request(point: &Json) -> BreakpointRequest {
-    for field in ["hitCondition", "logMessage"] {
-        match point.get(field) {
-            Some(Json::String(value)) if !value.trim().is_empty() => {
-                return BreakpointRequest::Blocked(BreakpointBlock::Expression);
-            }
-            Some(Json::Null) | None | Some(Json::String(_)) => {}
-            Some(_) => return BreakpointRequest::Blocked(BreakpointBlock::Expression),
-        }
-    }
-    match point.get("condition") {
+    let condition = match point.get("condition") {
         Some(Json::String(condition)) if !condition.trim().is_empty() => {
-            BreakpointRequest::Condition(condition.to_string())
+            Some(condition.to_string())
         }
-        Some(Json::Null) | None | Some(Json::String(_)) => BreakpointRequest::Plain,
-        Some(_) => BreakpointRequest::InvalidCondition,
+        Some(Json::Null) | None | Some(Json::String(_)) => None,
+        Some(_) => return BreakpointRequest::InvalidCondition,
+    };
+    let hit_target = match point.get("hitCondition") {
+        Some(Json::String(hit)) => match parse_hit_condition(hit) {
+            Some(target) => Some(target),
+            None => return BreakpointRequest::InvalidHitCondition,
+        },
+        Some(Json::Null) | None => None,
+        Some(_) => return BreakpointRequest::InvalidHitCondition,
+    };
+    let log_message = match point.get("logMessage") {
+        Some(Json::String(message)) => match parse_log_message(message) {
+            Some(message) => Some(message),
+            None => return BreakpointRequest::InvalidLogMessage,
+        },
+        Some(Json::Null) | None => None,
+        Some(_) => return BreakpointRequest::InvalidLogMessage,
+    };
+    BreakpointRequest::Valid(BreakpointSpec {
+        condition,
+        hit_target,
+        log_message,
+    })
+}
+
+fn parse_hit_condition(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
     }
+    let target = value.parse::<u64>().ok()?;
+    (target > 0).then_some(target)
+}
+
+fn parse_log_message(value: &str) -> Option<String> {
+    (!value.is_empty() && !value.chars().any(|ch| matches!(ch, '{' | '}')))
+        .then(|| value.to_string())
 }
 
 fn parse_project(arguments: &Json) -> Result<&str, DapInputError> {
