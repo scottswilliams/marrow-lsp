@@ -25,9 +25,8 @@ Rust binaries. No parsing or position math runs in TypeScript.
   project's `defaultEntry`, or set `entry` and typed `args` in `launch.json`. Marrow admits
   the args; `int`, `date`, and `bytes` use exact string forms. F5 remains useful for launch,
   stop-on-entry, stepping, verified plain-line and conditional breakpoints, exact hit-count
-  breakpoints, static logpoints, watch/REPL/hover expression evaluation, variables, and the
-  Durable Data scope. Logpoint expression interpolation remains blocked until Marrow exposes the
-  canonical facts behind that surface.
+  breakpoints, logpoints with Marrow-checked template expressions, watch/REPL/hover expression
+  evaluation, variables, and the Durable Data scope.
 
 ## Requirements
 

@@ -23,9 +23,8 @@ Initial release.
   debuggee state, or served programs.
 - F5 debugging via the `marrow-dap` adapter, with explicit `entry`, Marrow-admitted typed `args`
   where `int`, `date`, and `bytes` use exact string forms, stop-on-entry, statement stepping,
-  verified plain-line and conditional breakpoints, exact hit-count breakpoints, static logpoints,
-  watch/REPL/hover expression evaluation, variables, and the Durable Data scope. Logpoint
-  expression interpolation remains blocked until Marrow exposes the canonical facts behind that
-  surface.
+  verified plain-line and conditional breakpoints, exact hit-count breakpoints, logpoints with
+  Marrow-checked template expressions, watch/REPL/hover expression evaluation, variables, and the
+  Durable Data scope.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
   debug adapter (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`).

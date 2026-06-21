@@ -2459,7 +2459,7 @@ fn logpoint_emits_output_without_stopping() {
 }
 
 #[test]
-fn logpoint_expression_interpolation_is_rejected_and_unarmed() {
+fn logpoint_expression_interpolation_evaluates_against_frame_data() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
 
@@ -2479,6 +2479,79 @@ fn logpoint_expression_interpolation_is_rejected_and_unarmed() {
         json!({
             "source": { "path": file.display().to_string() },
             "breakpoints": [{ "line": 6, "logMessage": "title {title}" }],
+        }),
+    );
+    let response = client.response_for(set);
+    assert_verified_breakpoint(&response["body"]["breakpoints"][0], 6);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let output = client.event("output");
+    assert_eq!(output["body"]["category"], "console", "{output}");
+    assert_eq!(output["body"]["output"], "title Dune\n", "{output}");
+    client.event("terminated");
+}
+
+#[test]
+fn invalid_logpoint_expression_is_not_armed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6, "logMessage": "title {missing}" }],
+        }),
+    );
+    let response = client.response_for(set);
+    let breakpoint = &response["body"]["breakpoints"][0];
+    assert_eq!(breakpoint["verified"], false, "{response}");
+    assert_eq!(breakpoint["line"], 6, "{response}");
+    assert_breakpoint_contract(
+        breakpoint,
+        "dap.breakpoint.logMessageInvalid",
+        "invalid-params",
+        None,
+    );
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    assert_terminates_without_stopping(&mut client);
+}
+
+#[test]
+fn malformed_logpoint_template_is_not_armed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": false,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6, "logMessage": "bad } {title}" }],
         }),
     );
     let response = client.response_for(set);
@@ -3339,7 +3412,7 @@ fn initialize_advertises_stopped_frame_hover_evaluate() {
     );
     assert_eq!(
         response["body"]["supportsLogPoints"], true,
-        "static logpoints are DAP output over Marrow stop-point facts: {response}"
+        "logpoint template expressions are checked and evaluated through Marrow debug-expression facts: {response}"
     );
 }
 

@@ -20,7 +20,8 @@ use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
 
 use crate::debugger::{
-    ArmedBreakpoint, ArmedBreakpoints, Control, Query, QueryResult, RunEvent, StopInfo,
+    ArmedBreakpoint, ArmedBreakpoints, CheckedLogMessage, Control, LogMessagePart,
+    ParsedLogMessage, Query, QueryResult, RunEvent, StopInfo,
 };
 use crate::protocol::write_message;
 use crate::step::Resume;
@@ -46,8 +47,7 @@ const BREAKPOINT_CONFIGURATION_NOT_READY: &str =
     "breakpoint verification requires launch configuration";
 const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expression";
 const BREAKPOINT_HIT_CONDITION_INVALID: &str = "hitCondition must be a positive integer string";
-const BREAKPOINT_LOG_MESSAGE_INVALID: &str =
-    "logMessage must be a static string without expression interpolation";
+const BREAKPOINT_LOG_MESSAGE_INVALID: &str = "invalid logMessage expression";
 const BREAKPOINT_SOURCE_INVALID: &str = "missing or invalid breakpoint source";
 const BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: &str =
     "DAP sourceReference breakpoint sources are not supported";
@@ -168,7 +168,12 @@ enum BreakpointRequest {
 struct BreakpointSpec {
     condition: Option<String>,
     hit_target: Option<u64>,
-    log_message: Option<String>,
+    log_message: Option<ParsedLogMessage>,
+}
+
+struct CheckedBreakpointSpec {
+    condition: Option<CheckedDebugExpression>,
+    log_message: Option<CheckedLogMessage>,
 }
 
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
@@ -738,11 +743,21 @@ impl<W: Write> Session<W> {
         &self,
         stop: &RuntimeStop,
         spec: &BreakpointSpec,
-    ) -> Result<Option<CheckedDebugExpression>, DapInputError> {
-        spec.condition
+    ) -> Result<CheckedBreakpointSpec, DapInputError> {
+        let condition = spec
+            .condition
             .as_deref()
             .map(|condition| self.checked_condition(stop, condition))
-            .transpose()
+            .transpose()?;
+        let log_message = spec
+            .log_message
+            .as_ref()
+            .map(|message| self.checked_log_message(stop, message))
+            .transpose()?;
+        Ok(CheckedBreakpointSpec {
+            condition,
+            log_message,
+        })
     }
 
     fn checked_condition(
@@ -773,6 +788,39 @@ impl<W: Write> Session<W> {
         Ok(expression)
     }
 
+    fn checked_log_message(
+        &self,
+        stop: &RuntimeStop,
+        template: &ParsedLogMessage,
+    ) -> Result<CheckedLogMessage, DapInputError> {
+        let mut parts = Vec::with_capacity(template.parts().len());
+        for part in template.parts() {
+            match part {
+                LogMessagePart::Literal(value) => {
+                    parts.push(LogMessagePart::Literal(value.clone()));
+                }
+                LogMessagePart::Expression(source) => {
+                    let Some(analysis) = &self.analysis else {
+                        return Err(DapInputError::new(
+                            BREAKPOINT_CONFIGURATION_NOT_READY,
+                            ERROR_BREAKPOINT_UNVERIFIED,
+                        ));
+                    };
+                    let expression = analysis
+                        .checked_debug_expression(&stop.file, stop.span, source)
+                        .map_err(|diagnostics| {
+                            DapInputError::new(
+                                diagnostic_message(BREAKPOINT_LOG_MESSAGE_INVALID, &diagnostics),
+                                ERROR_BREAKPOINT_LOG_MESSAGE_INVALID,
+                            )
+                        })?;
+                    parts.push(LogMessagePart::Expression(Box::new(expression)));
+                }
+            }
+        }
+        Ok(CheckedLogMessage::new(parts))
+    }
+
     fn armed_breakpoints(&self) -> ArmedBreakpoints {
         let mut armed = ArmedBreakpoints::default();
         let Some(stop_points) = &self.stop_points else {
@@ -789,14 +837,14 @@ impl<W: Write> Session<W> {
                 match request {
                     BreakpointRequest::Valid(spec) => {
                         for stop in stops {
-                            if let Ok(condition) = self.checked_breakpoint_spec(stop, spec) {
+                            if let Ok(checked) = self.checked_breakpoint_spec(stop, spec) {
                                 armed.insert(
                                     stop.file.clone(),
                                     ArmedBreakpoint::new(
                                         *line,
-                                        condition,
+                                        checked.condition,
                                         spec.hit_target,
-                                        spec.log_message.clone(),
+                                        checked.log_message,
                                     ),
                                 );
                             }
@@ -1796,9 +1844,41 @@ fn parse_hit_condition(value: &str) -> Option<u64> {
     (target > 0).then_some(target)
 }
 
-fn parse_log_message(value: &str) -> Option<String> {
-    (!value.is_empty() && !value.chars().any(|ch| matches!(ch, '{' | '}')))
-        .then(|| value.to_string())
+fn parse_log_message(value: &str) -> Option<ParsedLogMessage> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut rest = value;
+    loop {
+        let Some(open) = rest.find('{') else {
+            if rest.contains('}') {
+                return None;
+            }
+            if !rest.is_empty() {
+                parts.push(LogMessagePart::Literal(rest.to_string()));
+            }
+            return Some(ParsedLogMessage::new(parts));
+        };
+        if open > 0 {
+            let literal = &rest[..open];
+            if literal.contains('}') {
+                return None;
+            }
+            parts.push(LogMessagePart::Literal(literal.to_string()));
+        }
+        let after_open = &rest[open + 1..];
+        let close = after_open.find('}')?;
+        let expression = after_open[..close].trim();
+        if expression.is_empty() {
+            return None;
+        }
+        parts.push(LogMessagePart::Expression(expression.to_string()));
+        rest = &after_open[close + 1..];
+        if rest.starts_with('}') {
+            return None;
+        }
+    }
 }
 
 fn parse_project(arguments: &Json) -> Result<&str, DapInputError> {
@@ -1929,6 +2009,45 @@ mod tests {
             terminating: false,
         });
         (session, seen_rx)
+    }
+
+    #[test]
+    fn log_message_parser_splits_literals_and_expressions() {
+        let template = parse_log_message("title { title } id {id}").expect("template");
+        assert_eq!(template.parts().len(), 4);
+        assert!(matches!(
+            &template.parts()[0],
+            LogMessagePart::Literal(value) if value == "title "
+        ));
+        assert!(matches!(
+            &template.parts()[1],
+            LogMessagePart::Expression(value) if value == "title"
+        ));
+        assert!(matches!(
+            &template.parts()[2],
+            LogMessagePart::Literal(value) if value == " id "
+        ));
+        assert!(matches!(
+            &template.parts()[3],
+            LogMessagePart::Expression(value) if value == "id"
+        ));
+    }
+
+    #[test]
+    fn log_message_parser_rejects_empty_and_unmatched_braces() {
+        for message in [
+            "",
+            "title {}",
+            "title { }",
+            "title {name",
+            "title name}",
+            "bad } {title}",
+        ] {
+            assert!(
+                parse_log_message(message).is_none(),
+                "message should be rejected: {message:?}"
+            );
+        }
     }
 
     #[test]

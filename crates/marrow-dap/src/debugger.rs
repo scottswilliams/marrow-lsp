@@ -121,7 +121,7 @@ pub struct ArmedBreakpoint {
     line: u32,
     condition: Option<CheckedDebugExpression>,
     hit_target: Option<u64>,
-    log_message: Option<String>,
+    log_message: Option<CheckedLogMessage>,
     hits: u64,
 }
 
@@ -130,7 +130,7 @@ impl ArmedBreakpoint {
         line: u32,
         condition: Option<CheckedDebugExpression>,
         hit_target: Option<u64>,
-        log_message: Option<String>,
+        log_message: Option<CheckedLogMessage>,
     ) -> Self {
         Self {
             line,
@@ -160,7 +160,7 @@ impl ArmedBreakpoint {
         }
         Some(match &self.log_message {
             Some(message) => BreakpointAction {
-                outputs: vec![message.clone()],
+                outputs: vec![message.render(frame)],
                 stop: false,
             },
             None => BreakpointAction {
@@ -169,6 +169,51 @@ impl ArmedBreakpoint {
             },
         })
     }
+}
+
+pub type ParsedLogMessage = LogMessage<String>;
+pub type CheckedLogMessage = LogMessage<Box<CheckedDebugExpression>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogMessage<Expression> {
+    parts: Vec<LogMessagePart<Expression>>,
+}
+
+impl<Expression> LogMessage<Expression> {
+    pub fn new(parts: Vec<LogMessagePart<Expression>>) -> Self {
+        Self { parts }
+    }
+
+    pub(crate) fn parts(&self) -> &[LogMessagePart<Expression>] {
+        &self.parts
+    }
+}
+
+impl LogMessage<Box<CheckedDebugExpression>> {
+    fn render(&self, frame: &Frame<'_, '_>) -> String {
+        let mut output = String::new();
+        for part in &self.parts {
+            match part {
+                LogMessagePart::Literal(value) => output.push_str(value),
+                LogMessagePart::Expression(expression) => {
+                    match frame.evaluate_debug_expression(expression.as_ref()) {
+                        Ok(value) => output.push_str(&value.preview()),
+                        Err(error) => {
+                            let error = RuntimeErrorDetail::from(error);
+                            output.push_str(&format!("<{}: {}>", error.code, error.message));
+                        }
+                    }
+                }
+            }
+        }
+        output
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogMessagePart<Expression> {
+    Literal(String),
+    Expression(Expression),
 }
 
 #[derive(Debug, Clone, Default)]
