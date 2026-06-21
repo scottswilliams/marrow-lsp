@@ -1,17 +1,17 @@
 use std::path::Path;
 
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedConst, CheckedFacts, CheckedFunction,
-    CheckedParam, DirectEffectFacts, FunctionFact, MarrowType, SymbolKind, SymbolRef, UseSiteKind,
+    AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedFacts, MarrowType, SymbolKind,
+    SymbolRef, UseSiteKind,
     tooling::{
-        self, CallableSignature, CallableSignatureKind, SavedPlaceHoverFact, SourceSymbolDocs,
-        StoreRootHoverFact, saved_place_hover_fact_at, source_symbol_docs_at,
-        store_root_hover_fact_at,
+        self, CallableSignature, CallableSignatureKind, SavedPlaceHoverFact,
+        SourceCallableHoverFact, StoreRootHoverFact, saved_place_hover_fact_at,
+        source_callable_hover_fact_at, source_symbol_docs_at, store_root_hover_fact_at,
     },
     type_at,
 };
 use marrow_schema::{EnumSchema, ResourceSchema};
-use marrow_syntax::{FunctionDecl, Keyword, Token, TokenKind, lex_source};
+use marrow_syntax::{Keyword, Token, TokenKind, lex_source};
 
 use crate::callables::render_callable_signature;
 use crate::language_facts;
@@ -21,18 +21,9 @@ use super::tokens;
 
 pub(super) enum HoverFact<'a> {
     CanonicalLibraryText(String),
-    Function {
-        checked: &'a CheckedFunction,
-        parsed: &'a FunctionDecl,
-        effects: Option<DirectEffects<'a>>,
-    },
-    Parameter {
-        checked: &'a CheckedParam,
-        docs: &'a [String],
-    },
-    ModuleConst {
-        checked: &'a CheckedConst,
-        docs: &'a [String],
+    SourceCallable {
+        fact: SourceCallableHoverFact,
+        checked_facts: &'a CheckedFacts,
     },
     StoreRoot(StoreRootHoverFact),
     Resource {
@@ -52,11 +43,6 @@ pub(super) enum HoverFact<'a> {
     },
 }
 
-pub(super) struct DirectEffects<'a> {
-    pub(super) facts: &'a CheckedFacts,
-    pub(super) effects: &'a DirectEffectFacts,
-}
-
 pub(super) fn collect<'a>(
     snapshot: &'a AnalysisSnapshot,
     index: &'a BindingIndex,
@@ -69,14 +55,11 @@ pub(super) fn collect<'a>(
     if let Some(value) = operator_text(snapshot, file, offset) {
         return Some(HoverFact::CanonicalLibraryText(value));
     }
-    if let Some(fact) = function_fact(snapshot, index, file, offset) {
-        return Some(fact);
-    }
-    if let Some(fact) = parameter_fact(snapshot, index, file, offset) {
-        return Some(fact);
-    }
-    if let Some(fact) = module_const_fact(snapshot, index, file, offset) {
-        return Some(fact);
+    if let Some(fact) = source_callable_hover_fact_at(snapshot, index, file, offset) {
+        return Some(HoverFact::SourceCallable {
+            fact,
+            checked_facts: &snapshot.program.facts,
+        });
     }
     if blocked_module_prefix_hover(snapshot, index, file, offset) {
         return None;
@@ -94,7 +77,7 @@ pub(super) fn collect<'a>(
         return Some(HoverFact::SavedPlace(fact));
     }
 
-    let docs = symbol_docs_at_hover_target(snapshot, index, file, offset).map(|docs| docs.lines);
+    let docs = source_symbol_docs_at(snapshot, index, file, offset).map(|docs| docs.lines);
     checked_type_at(snapshot, file, offset).map(|ty| HoverFact::Type { ty, docs })
 }
 
@@ -130,117 +113,6 @@ fn blocked_module_prefix_hover(
         return false;
     }
     true
-}
-
-fn function_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let symbol = index.definition(file, offset)?;
-    if symbol.kind != SymbolKind::Function
-        || !source::is_function_hover_target(snapshot, index, file, offset, &symbol)
-    {
-        return None;
-    }
-
-    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let parsed = source::parsed_function_at(&parsed_file.parsed.file, symbol.span)?;
-    let checked = checked_function_for_parsed(snapshot, &symbol, &parsed_file.parsed.file, parsed)?;
-    let effects = function_fact_for_symbol(snapshot, &symbol, checked).map(|fact| DirectEffects {
-        facts: &snapshot.program.facts,
-        effects: &fact.direct_effects,
-    });
-    Some(HoverFact::Function {
-        checked,
-        parsed,
-        effects,
-    })
-}
-
-fn parameter_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let symbol = index.definition(file, offset)?;
-    if symbol.kind != SymbolKind::Param {
-        return None;
-    }
-
-    let parameter = index.parameter_definition(&symbol)?;
-    let function_fact = snapshot.program.facts.function(parameter.function);
-    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let parsed_function = source::parsed_function_at(&parsed_file.parsed.file, function_fact.span)?;
-    let name = parameter_use_name(snapshot, file, offset, parsed_function)?;
-    let checked_function = checked_function_for_fact(snapshot, function_fact)?;
-    let checked = checked_function.params.get(parameter.index)?;
-    if checked.name != name {
-        return None;
-    }
-    let parsed_param = parsed_function.params.get(parameter.index)?;
-
-    Some(HoverFact::Parameter {
-        checked,
-        docs: &parsed_param.docs,
-    })
-}
-
-fn parameter_use_name<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    function: &FunctionDecl,
-) -> Option<&'a str> {
-    if !source::span_covers(function.body.span, offset) {
-        return None;
-    }
-    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-    let tokens = lex_source(&analyzed.source).tokens;
-    let (index, token) = tokens.iter().enumerate().find(|(_, token)| {
-        token.kind == TokenKind::Identifier && source::span_covers(token.span, offset)
-    })?;
-    let (previous, next) = tokens::significant_neighbors(&tokens, index);
-    if previous.is_some_and(|kind| {
-        matches!(
-            kind,
-            TokenKind::DoubleColon | TokenKind::Dot | TokenKind::QuestionDot
-        )
-    }) || next.is_some_and(|kind| kind == TokenKind::Colon)
-    {
-        return None;
-    }
-    Some(token.text(&analyzed.source))
-}
-
-fn module_const_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let symbol = index.definition(file, offset)?;
-    if symbol.kind != SymbolKind::ModuleConst || symbol.file != file {
-        return None;
-    }
-
-    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let parsed_const = source::parsed_const_at(&parsed_file.parsed.file, symbol.span)?;
-    if !source::offset_is_on_declaration_name(
-        &parsed_file.source,
-        symbol.span,
-        &parsed_const.name,
-        offset,
-    ) {
-        return None;
-    }
-    let checked = checked_const_at(snapshot, &symbol)?;
-    Some(HoverFact::ModuleConst {
-        checked,
-        docs: &parsed_const.docs,
-    })
 }
 
 fn enum_annotation_fact<'a>(
@@ -287,21 +159,6 @@ fn rich_symbol_fact<'a>(
         }
         _ => None,
     }
-}
-
-fn symbol_docs_at_hover_target(
-    snapshot: &AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<SourceSymbolDocs> {
-    let symbol = index.definition(file, offset)?;
-    if symbol.kind == SymbolKind::Function
-        && !source::is_function_hover_target(snapshot, index, file, offset, &symbol)
-    {
-        return None;
-    }
-    source_symbol_docs_at(snapshot, index, file, offset)
 }
 
 fn default_library_call_text(
@@ -473,85 +330,6 @@ fn blocked_enum_type_symbol_hover(
         return false;
     };
     segments.len() > 1 || symbol.file != file
-}
-
-fn checked_function_for_parsed<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    symbol: &SymbolRef,
-    source_file: &marrow_syntax::SourceFile,
-    parsed_function: &FunctionDecl,
-) -> Option<&'a CheckedFunction> {
-    let function_index = source_file
-        .declarations
-        .iter()
-        .filter_map(|declaration| match declaration {
-            marrow_syntax::Declaration::Function(function) => Some(function),
-            _ => None,
-        })
-        .position(|function| function.span == parsed_function.span)?;
-    snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == symbol.file)?
-        .functions
-        .get(function_index)
-}
-
-fn checked_function_for_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    fact: &FunctionFact,
-) -> Option<&'a CheckedFunction> {
-    let module_fact = snapshot
-        .program
-        .facts
-        .modules()
-        .iter()
-        .find(|module| module.id == fact.module)?;
-    snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == module_fact.source_file)?
-        .functions
-        .get(fact.source_index as usize)
-}
-
-fn checked_const_at<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    symbol: &SymbolRef,
-) -> Option<&'a CheckedConst> {
-    snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == symbol.file)?
-        .constants
-        .iter()
-        .find(|constant| source::span_contains_span(constant.span, symbol.span))
-}
-
-fn function_fact_for_symbol<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    symbol: &SymbolRef,
-    checked_function: &CheckedFunction,
-) -> Option<&'a FunctionFact> {
-    let module = snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == symbol.file)?;
-    let module_fact = snapshot
-        .program
-        .facts
-        .modules()
-        .iter()
-        .find(|fact| fact.name == module.name && fact.source_file == module.source_file)?;
-    snapshot.program.facts.functions().iter().find(|fact| {
-        fact.module == module_fact.id
-            && fact.name == checked_function.name
-            && fact.span == checked_function.span
-    })
 }
 
 fn resource_schema_for_symbol<'a>(

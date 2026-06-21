@@ -2,8 +2,7 @@ use std::path::Path;
 
 use marrow_check::{AnalysisSnapshot, BindingIndex, SymbolKind, SymbolRef};
 use marrow_syntax::{
-    Declaration, EnumDecl, EnumMember, FunctionDecl, Keyword, ResourceDecl, SourceSpan, TokenKind,
-    lex_source,
+    Declaration, EnumDecl, EnumMember, ResourceDecl, SourceSpan, TokenKind, lex_source,
 };
 
 pub(super) fn is_named_symbol_reference(
@@ -16,7 +15,7 @@ pub(super) fn is_named_symbol_reference(
     index.references(symbol).iter().any(|reference| {
         reference.kind == symbol.kind
             && reference.file == file
-            && reference.span != symbol.span
+            && (reference.file != symbol.file || reference.span != symbol.span)
             && span_covers(reference.span, offset)
             && offset_is_on_qualified_name(snapshot, file, reference.span, offset)
     })
@@ -119,37 +118,6 @@ fn declaration_identifier_span(
         .map(|token| (token.span.start_byte, token.span.end_byte))
 }
 
-pub(super) fn is_function_hover_target(
-    snapshot: &AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    index.references(symbol).iter().any(|reference| {
-        reference.kind == SymbolKind::Function
-            && reference.file == file
-            && reference.span != symbol.span
-            && span_covers(reference.span, offset)
-            && offset_is_on_last_identifier(snapshot, file, reference.span, offset)
-    }) || is_function_declaration_name(snapshot, file, offset, symbol)
-}
-
-fn offset_is_on_last_identifier(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    span: SourceSpan,
-    offset: usize,
-) -> bool {
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return false;
-    };
-    let Some((start, end)) = last_identifier_span(span, &analyzed.source) else {
-        return false;
-    };
-    start <= offset && offset <= end
-}
-
 fn offset_is_on_qualified_name(
     snapshot: &AnalysisSnapshot,
     file: &Path,
@@ -163,76 +131,6 @@ fn offset_is_on_qualified_name(
         return false;
     };
     start <= offset && offset <= end
-}
-
-fn is_function_declaration_name(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    if symbol.file != file {
-        return false;
-    }
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == symbol.file) else {
-        return false;
-    };
-    let Some(function) = parsed_function_at(&analyzed.parsed.file, symbol.span) else {
-        return false;
-    };
-    let Some((start, end)) = name_span(&function.name, function.span, &analyzed.source) else {
-        return false;
-    };
-    start <= offset && offset <= end
-}
-
-pub(super) fn parsed_function_at(
-    source: &marrow_syntax::SourceFile,
-    span: SourceSpan,
-) -> Option<&FunctionDecl> {
-    source
-        .declarations
-        .iter()
-        .find_map(|declaration| match declaration {
-            Declaration::Function(function) if span_contains_span(function.span, span) => {
-                Some(function)
-            }
-            _ => None,
-        })
-}
-
-pub(super) fn parsed_const_at(
-    source: &marrow_syntax::SourceFile,
-    span: SourceSpan,
-) -> Option<&marrow_syntax::ConstDecl> {
-    source
-        .declarations
-        .iter()
-        .find_map(|declaration| match declaration {
-            Declaration::Const(constant) if span_contains_span(constant.span, span) => {
-                Some(constant)
-            }
-            _ => None,
-        })
-}
-
-fn name_span(name: &str, span: SourceSpan, source: &str) -> Option<(usize, usize)> {
-    let lexed = lex_source(source);
-    let mut after_fn = false;
-    for token in lexed.tokens {
-        if !span_covers(span, token.span.start_byte) || !span_covers(span, token.span.end_byte) {
-            continue;
-        }
-        match token.kind {
-            TokenKind::Keyword(Keyword::Fn) => after_fn = true,
-            TokenKind::Identifier if after_fn && token.text(source) == name => {
-                return Some((token.span.start_byte, token.span.end_byte));
-            }
-            TokenKind::Newline if after_fn => return None,
-            _ => {}
-        }
-    }
-    None
 }
 
 fn qualified_identifier_span(span: SourceSpan, source: &str) -> Option<(usize, usize)> {
@@ -249,20 +147,6 @@ fn qualified_identifier_span(span: SourceSpan, source: &str) -> Option<(usize, u
         }
     }
     Some((start?, end?))
-}
-
-fn last_identifier_span(span: SourceSpan, source: &str) -> Option<(usize, usize)> {
-    let lexed = lex_source(source);
-    let mut found = None;
-    for token in lexed.tokens {
-        if token.kind == TokenKind::Identifier
-            && span_covers(span, token.span.start_byte)
-            && span_covers(span, token.span.end_byte)
-        {
-            found = Some((token.span.start_byte, token.span.end_byte));
-        }
-    }
-    found
 }
 
 pub(super) fn span_covers(span: SourceSpan, offset: usize) -> bool {

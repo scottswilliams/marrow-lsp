@@ -1305,6 +1305,38 @@ fn hover_does_not_own_source_symbol_doc_traversal() {
 }
 
 #[test]
+fn hover_does_not_own_source_callable_target_traversal() {
+    let source_helpers = include_str!("source.rs");
+    for obsolete in [
+        "fn is_function_hover_target",
+        "fn parsed_function_at",
+        "fn parsed_const_at",
+    ] {
+        assert!(
+            !source_helpers.contains(obsolete),
+            "source callable hover should consume Marrow source callable hover facts, not own `{obsolete}`"
+        );
+    }
+
+    let fact_helpers = include_str!("facts.rs");
+    for obsolete in [
+        "fn function_fact",
+        "fn parameter_fact",
+        "fn parameter_use_name",
+        "fn module_const_fact",
+        "fn checked_function_for_parsed",
+        "fn checked_function_for_fact",
+        "fn checked_const_at",
+        "fn function_fact_for_symbol",
+    ] {
+        assert!(
+            !fact_helpers.contains(obsolete),
+            "source callable hover should consume Marrow source callable hover facts, not own `{obsolete}`"
+        );
+    }
+}
+
+#[test]
 fn hover_does_not_own_saved_place_target_traversal() {
     let source = include_str!("source.rs");
     for obsolete in [
@@ -1342,7 +1374,7 @@ pub fn n(): int
     return 1
 ";
     let (snapshot, file) = analyze(source);
-    let offset = offset_of(source, "n():") + 1;
+    let offset = offset_of(source, "n():");
 
     let hover = hover(&snapshot, &file, offset).expect("a hover at the function declaration");
     let HoverContents::Markup(markup) = hover.contents else {
@@ -1610,6 +1642,75 @@ pub fn make()
     );
     assert!(
         value.contains("Books from state."),
+        "qualified resource constructor should include docs: {value}"
+    );
+    assert!(
+        value.contains("required title: string"),
+        "qualified resource constructor should include members: {value}"
+    );
+}
+
+#[test]
+fn hover_over_aligned_cross_file_qualified_resource_constructor_leaf_is_rich() {
+    let state_base = "\
+module shelf::state
+
+;; Books from state.
+resource Book
+    required title: string
+";
+    let app_source = "\
+module shelf::app
+use shelf::state
+pub fn make()
+  state::Book(title: \"x\")
+";
+    let leaf = offset_of(app_source, "state::Book(title") + "state::".len();
+    let declaration = offset_of(state_base, "resource Book") + "resource ".len();
+    let padding = "x".repeat(
+        leaf.checked_sub(declaration)
+            .expect("call leaf is after declaration name in this fixture"),
+    );
+    let docs = format!("Books from state.{padding}");
+    let state_source = format!(
+        "\
+module shelf::state
+
+;; {docs}
+resource Book
+    required title: string
+"
+    );
+    assert_eq!(
+        offset_of(&state_source, "resource Book") + "resource ".len(),
+        leaf
+    );
+
+    let (snapshot, file) = analyze_files(
+        &[
+            ("shelf/state.mw", state_source.as_str()),
+            ("shelf/app.mw", app_source),
+        ],
+        "shelf/app.mw",
+    );
+    let index = index_for(&snapshot);
+    let qualifier = offset_of(app_source, "state::Book(title");
+    let qualifier_hover = hover_value_at(&snapshot, &index, &file, qualifier + 1);
+    assert!(
+        !qualifier_hover
+            .as_deref()
+            .is_some_and(|value| value.starts_with("```marrow\nresource Book\n```")),
+        "module qualifier should not pretend to be the resource: {qualifier_hover:?}"
+    );
+
+    let value =
+        hover_value_at(&snapshot, &index, &file, leaf).expect("resource hover on aligned leaf");
+    assert!(
+        value.starts_with("```marrow\nresource Book\n```"),
+        "qualified resource constructor leaf should show resource hover: {value}"
+    );
+    assert!(
+        value.contains(&docs),
         "qualified resource constructor should include docs: {value}"
     );
     assert!(

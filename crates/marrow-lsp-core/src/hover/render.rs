@@ -1,14 +1,11 @@
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::tooling::{
-    SavedPlaceHoverFact, SavedPlaceHoverKeyParam, StoreRootHoverFact, StoreRootHoverMember,
+    SavedPlaceHoverFact, SavedPlaceHoverKeyParam, SourceCallableFunctionFact,
+    SourceCallableHoverFact, SourceCallableParamFact, StoreRootHoverFact, StoreRootHoverMember,
     StoreRootHoverPathSegment,
 };
-use marrow_check::{
-    CheckedConst, CheckedFacts, CheckedFunction, CheckedParam, DirectEffectFacts, HostEffect,
-    MarrowType, SavedPlaceEffect,
-};
+use marrow_check::{CheckedFacts, DirectEffectFacts, HostEffect, MarrowType, SavedPlaceEffect};
 use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, stdlib};
-use marrow_syntax::FunctionDecl;
 
 use crate::types::{render_schema_leaf_type, render_type};
 
@@ -17,13 +14,10 @@ use super::facts::HoverFact;
 pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
     markdown_hover(match fact {
         HoverFact::CanonicalLibraryText(text) => default_library_hover_markdown(&text),
-        HoverFact::Function {
-            checked,
-            parsed,
-            effects,
-        } => function_hover(checked, parsed, effects),
-        HoverFact::Parameter { checked, docs } => parameter_hover(checked, docs),
-        HoverFact::ModuleConst { checked, docs } => module_const_hover(checked, docs),
+        HoverFact::SourceCallable {
+            fact,
+            checked_facts,
+        } => source_callable_hover(&fact, checked_facts),
         HoverFact::StoreRoot(fact) => store_hover(&fact),
         HoverFact::Resource { schema } => resource_hover(schema),
         HoverFact::Enum { schema } => enum_hover(schema),
@@ -53,25 +47,31 @@ fn markdown_hover(value: String) -> Hover {
     }
 }
 
-fn function_hover(
-    checked: &CheckedFunction,
-    parsed: &FunctionDecl,
-    effects: Option<super::facts::DirectEffects<'_>>,
-) -> String {
-    let mut value = marrow_code_block(&function_signature(checked));
-    append_docs(&mut value, join_docs(&parsed.docs));
-    append_docs(&mut value, parameter_docs(parsed));
-    if let Some(effects) = effects
-        && let Some(markdown) = direct_effects_markdown(effects.facts, effects.effects)
+fn source_callable_hover(fact: &SourceCallableHoverFact, checked_facts: &CheckedFacts) -> String {
+    match fact {
+        SourceCallableHoverFact::Function(function) => function_hover(function, checked_facts),
+        SourceCallableHoverFact::Parameter(param) => parameter_hover(param),
+        SourceCallableHoverFact::ModuleConst { name, ty, docs } => {
+            module_const_hover(name, ty.as_ref(), docs)
+        }
+    }
+}
+
+fn function_hover(function: &SourceCallableFunctionFact, checked_facts: &CheckedFacts) -> String {
+    let mut value = marrow_code_block(&function_signature(function));
+    append_docs(&mut value, join_docs(&function.docs));
+    append_docs(&mut value, parameter_docs(&function.params));
+    if let Some(effects) = &function.direct_effects
+        && let Some(markdown) = direct_effects_markdown(checked_facts, effects)
     {
         append_docs(&mut value, Some(markdown));
     }
     value
 }
 
-fn parameter_hover(checked: &CheckedParam, docs: &[String]) -> String {
-    let mut value = marrow_code_block(&parameter_signature(checked));
-    if let Some(docs) = join_docs(docs) {
+fn parameter_hover(param: &SourceCallableParamFact) -> String {
+    let mut value = marrow_code_block(&parameter_signature(param));
+    if let Some(docs) = join_docs(&param.docs) {
         value.push_str("\n\n");
         value.push_str("**Parameter**\n");
         value.push_str(&docs);
@@ -79,8 +79,8 @@ fn parameter_hover(checked: &CheckedParam, docs: &[String]) -> String {
     value
 }
 
-fn module_const_hover(checked: &CheckedConst, docs: &[String]) -> String {
-    let mut value = marrow_code_block(&module_const_signature(checked));
+fn module_const_hover(name: &str, ty: Option<&MarrowType>, docs: &[String]) -> String {
+    let mut value = marrow_code_block(&module_const_signature(name, ty));
     append_docs(&mut value, join_docs(docs));
     value
 }
@@ -275,7 +275,7 @@ fn marrow_code_block(code: &str) -> String {
     format!("```marrow\n{code}\n```")
 }
 
-fn function_signature(function: &CheckedFunction) -> String {
+fn function_signature(function: &SourceCallableFunctionFact) -> String {
     let params = function
         .params
         .iter()
@@ -288,20 +288,19 @@ fn function_signature(function: &CheckedFunction) -> String {
     }
 }
 
-fn parameter_signature(param: &CheckedParam) -> String {
+fn parameter_signature(param: &SourceCallableParamFact) -> String {
     format!("{}: {}", param.name, render_type(&param.ty))
 }
 
-fn module_const_signature(constant: &CheckedConst) -> String {
-    match &constant.ty {
-        Some(ty) => format!("const {}: {}", constant.name, render_type(ty)),
-        None => format!("const {}", constant.name),
+fn module_const_signature(name: &str, ty: Option<&MarrowType>) -> String {
+    match ty {
+        Some(ty) => format!("const {}: {}", name, render_type(ty)),
+        None => format!("const {}", name),
     }
 }
 
-fn parameter_docs(function: &FunctionDecl) -> Option<String> {
-    let docs = function
-        .params
+fn parameter_docs(params: &[SourceCallableParamFact]) -> Option<String> {
+    let docs = params
         .iter()
         .filter_map(|param| {
             let docs = join_docs(&param.docs)?;
