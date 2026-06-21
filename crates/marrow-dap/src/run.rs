@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
-use marrow_check::AnalysisIdentity;
+use marrow_check::AnalysisGeneration;
 use marrow_run::{
     DebugValue, EntryInvocation, Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry,
     SourceAnalysisAdmission, SystemNondeterminism,
@@ -41,7 +41,7 @@ pub struct RunHandle {
 struct RunRequest {
     project_dir: std::path::PathBuf,
     entry: Option<String>,
-    analysis_identity: AnalysisIdentity,
+    analysis_generation: AnalysisGeneration,
     source_analysis_admission: Option<SourceAnalysisAdmission>,
     invocation: EntryInvocation,
     stop_on_entry: bool,
@@ -53,7 +53,7 @@ struct RunRequest {
 pub fn spawn(
     project_dir: std::path::PathBuf,
     entry: Option<String>,
-    analysis_identity: AnalysisIdentity,
+    analysis_generation: AnalysisGeneration,
     source_analysis_admission: Option<SourceAnalysisAdmission>,
     invocation: EntryInvocation,
     stop_on_entry: bool,
@@ -65,7 +65,7 @@ pub fn spawn(
     let request = RunRequest {
         project_dir,
         entry,
-        analysis_identity,
+        analysis_generation,
         source_analysis_admission,
         invocation,
         stop_on_entry,
@@ -98,7 +98,7 @@ fn run_on_thread(
     let RunRequest {
         project_dir,
         entry,
-        analysis_identity,
+        analysis_generation,
         source_analysis_admission,
         invocation,
         stop_on_entry,
@@ -108,7 +108,7 @@ fn run_on_thread(
     let launch = match crate::project::prepare_admitted(
         &project_dir,
         entry.as_deref(),
-        &analysis_identity,
+        &analysis_generation,
         source_analysis_admission.as_ref(),
         invocation,
     ) {

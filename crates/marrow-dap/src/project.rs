@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use marrow_check::{AnalysisIdentity, AnalysisSnapshot, CheckReport, ProjectIoError};
+use marrow_check::{AnalysisGeneration, AnalysisSnapshot, CheckReport, ProjectIoError};
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation,
     ProjectOpen, ProjectSession, ProjectSessionError, ProjectSurfaceReadSession, RuntimeError,
@@ -26,7 +26,7 @@ const READ_ADMISSION_FACTS: &str = "read-only debug store admission facts";
 /// A loaded project ready to debug through Marrow's protocol invocation.
 pub struct Launch {
     pub session: ProjectSession,
-    pub analysis_identity: AnalysisIdentity,
+    pub analysis_generation: AnalysisGeneration,
     pub analysis_snapshot: AnalysisSnapshot,
     pub source_analysis_admission: Option<SourceAnalysisAdmission>,
     pub invocation: EntryInvocation,
@@ -127,6 +127,7 @@ pub fn prepare(
 ) -> Result<Launch, LaunchError> {
     let (session, descriptor) = prepare_descriptor(project_dir, entry, None)?;
     let analysis_snapshot = session.source_analysis_snapshot().clone();
+    let analysis_generation = analysis_snapshot.generation();
     let source_analysis_admission = session
         .source_analysis_admission()
         .map_err(from_session_error)?;
@@ -138,7 +139,7 @@ pub fn prepare(
         .map_err(|error| LaunchError::EntryArgs(runtime_error_message(error)))?;
 
     Ok(Launch {
-        analysis_identity: session.source_analysis_identity().clone(),
+        analysis_generation,
         analysis_snapshot,
         source_analysis_admission,
         session,
@@ -149,17 +150,18 @@ pub fn prepare(
 pub fn prepare_admitted(
     project_dir: &Path,
     entry: Option<&str>,
-    analysis_identity: &AnalysisIdentity,
+    analysis_generation: &AnalysisGeneration,
     source_analysis_admission: Option<&SourceAnalysisAdmission>,
     invocation: EntryInvocation,
 ) -> Result<Launch, LaunchError> {
     let (session, descriptor) = prepare_descriptor(project_dir, entry, source_analysis_admission)?;
-    if session.source_analysis_identity() != analysis_identity {
+    if session.source_analysis_snapshot().generation() != *analysis_generation {
         return Err(LaunchError::AnalysisChanged(
             "source analysis changed between launch and configurationDone".to_string(),
         ));
     }
     let analysis_snapshot = session.source_analysis_snapshot().clone();
+    let analysis_generation = analysis_snapshot.generation();
     let current_admission = session
         .source_analysis_admission()
         .map_err(from_session_error)?;
@@ -170,7 +172,7 @@ pub fn prepare_admitted(
         .map_err(|error| LaunchError::EntryArgs(runtime_error_message(error)))?;
 
     Ok(Launch {
-        analysis_identity: session.source_analysis_identity().clone(),
+        analysis_generation,
         analysis_snapshot,
         source_analysis_admission: current_admission,
         session,

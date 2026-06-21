@@ -379,6 +379,24 @@ fn seed_native_store(dir: &Path) {
     );
 }
 
+fn commit_proposed_catalog_lock(dir: &Path) {
+    let config = marrow_check::load_config(dir).expect("project config");
+    let (_report, program) = marrow_check::check_project(dir, &config).expect("check project");
+    let proposal = program
+        .catalog
+        .proposal
+        .as_ref()
+        .expect("native resource analysis should propose catalog identity")
+        .clone();
+    let source_digest = program.source_digest();
+    marrow_check::project_store_lock(dir, &proposal, &source_digest).expect("project lock");
+
+    assert!(
+        dir.join(CATALOG_FILE_NAME).exists(),
+        "project lock should be committed"
+    );
+}
+
 fn corrupt_catalog_utf8_with_empty_native_store(dir: &Path) {
     let data_dir = dir.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -1345,19 +1363,41 @@ fn configuration_done_rejects_source_changed_after_launch() {
     .unwrap();
 
     let done = client.request("configurationDone", json!({}));
-    assert_eq!(client.response_for(done)["success"], true);
-    let output = client.event("output");
-    assert_eq!(output["body"]["category"], "stderr", "{output}");
-    let text = output["body"]["output"].as_str().unwrap_or_default();
-    assert!(
-        text.contains("changed between launch and configurationDone"),
-        "configurationDone should reject a run whose admitted launch identity drifted: {output}"
+    assert_response_marrow_error(
+        &client.response_for(done),
+        "dap.launchAnalysis.changed",
+        "invalid-state",
+        None,
     );
-    assert!(
-        !text.contains("configurationDone-version"),
-        "the changed program must not run after launch identity drift: {output}"
+}
+
+#[test]
+fn configuration_done_rejects_catalog_generation_changed_after_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    write_native_identity_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+        }),
     );
-    client.event("terminated");
+    assert_launch_success(&client.response_for(launch));
+
+    commit_proposed_catalog_lock(dir.path());
+
+    let done = client.request("configurationDone", json!({}));
+    assert_response_marrow_error(
+        &client.response_for(done),
+        "dap.launchAnalysis.changed",
+        "invalid-state",
+        None,
+    );
 }
 
 #[test]

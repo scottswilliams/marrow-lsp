@@ -219,7 +219,7 @@ pub struct Session<W: Write> {
 struct PendingLaunch {
     project_dir: PathBuf,
     entry: Option<String>,
-    analysis_identity: marrow_check::AnalysisIdentity,
+    analysis_generation: marrow_check::AnalysisGeneration,
     source_analysis_admission: Option<SourceAnalysisAdmission>,
     invocation: EntryInvocation,
     stop_on_entry: bool,
@@ -590,7 +590,7 @@ impl<W: Write> Session<W> {
                 self.pending = Some(PendingLaunch {
                     project_dir,
                     entry: entry.map(str::to_string),
-                    analysis_identity: launch.analysis_identity,
+                    analysis_generation: launch.analysis_generation,
                     source_analysis_admission: launch.source_analysis_admission,
                     invocation: launch.invocation,
                     stop_on_entry,
@@ -880,11 +880,22 @@ impl<W: Write> Session<W> {
             );
             return;
         };
+        if let Err(error) = crate::project::prepare_admitted(
+            &pending.project_dir,
+            pending.entry.as_deref(),
+            &pending.analysis_generation,
+            pending.source_analysis_admission.as_ref(),
+            pending.invocation.clone(),
+        ) {
+            let contract = DapError::from_launch_error(&error);
+            self.respond_error(request, error.to_string(), contract);
+            return;
+        }
         let breakpoints = self.armed_breakpoints();
         match crate::run::spawn(
             pending.project_dir,
             pending.entry,
-            pending.analysis_identity,
+            pending.analysis_generation,
             pending.source_analysis_admission,
             pending.invocation,
             pending.stop_on_entry,
