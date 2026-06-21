@@ -26,7 +26,7 @@ pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
         HoverFact::EnumMember { schema, ordinal } => enum_member_hover(schema, ordinal),
         HoverFact::ResourceMember { member } => resource_member_markdown(member),
         HoverFact::Index { index } => index_markdown(index),
-        HoverFact::Type { ty, docs } => type_hover(&ty, docs),
+        HoverFact::Type { ty, docs } => type_hover(&ty, docs.as_deref()),
     })
 }
 

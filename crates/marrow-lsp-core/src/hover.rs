@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use lsp_types::Hover;
+use marrow_check::tooling::source_symbol_docs_at;
 use marrow_check::{AnalysisSnapshot, BindingIndex, build_binding_index};
 
 mod facts;
@@ -42,7 +43,7 @@ pub fn symbol_docs(
     file: &Path,
     offset: usize,
 ) -> Option<String> {
-    render::join_docs(facts::symbol_docs_lines(snapshot, index, file, offset)?)
+    render::join_docs(&source_symbol_docs_at(snapshot, index, file, offset)?.lines)
 }
 
 #[cfg(test)]

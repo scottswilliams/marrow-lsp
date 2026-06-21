@@ -364,76 +364,6 @@ pub(super) fn span_contains_span(outer: SourceSpan, inner: SourceSpan) -> bool {
     span_covers(outer, inner.start_byte) && span_covers(outer, inner.end_byte)
 }
 
-pub(super) fn declaration_docs<'a>(
-    source: &'a marrow_syntax::SourceFile,
-    symbol: &SymbolRef,
-) -> Option<&'a [String]> {
-    match symbol.kind {
-        SymbolKind::Function => {
-            source
-                .declarations
-                .iter()
-                .find_map(|declaration| match declaration {
-                    Declaration::Function(function)
-                        if span_contains_span(function.span, symbol.span) =>
-                    {
-                        Some(function.docs.as_slice())
-                    }
-                    _ => None,
-                })
-        }
-        SymbolKind::ModuleConst => {
-            source
-                .declarations
-                .iter()
-                .find_map(|declaration| match declaration {
-                    Declaration::Const(constant)
-                        if span_contains_span(constant.span, symbol.span) =>
-                    {
-                        Some(constant.docs.as_slice())
-                    }
-                    _ => None,
-                })
-        }
-        SymbolKind::Resource => {
-            resource_at(source, symbol.span).map(|resource| resource.docs.as_slice())
-        }
-        SymbolKind::Enum => enum_at(source, symbol.span).map(|enum_decl| enum_decl.docs.as_slice()),
-        SymbolKind::EnumMember => {
-            source
-                .declarations
-                .iter()
-                .find_map(|declaration| match declaration {
-                    Declaration::Enum(enum_decl) => {
-                        enum_member_docs(&enum_decl.members, symbol.span)
-                    }
-                    _ => None,
-                })
-        }
-        SymbolKind::Field | SymbolKind::Layer => {
-            source
-                .declarations
-                .iter()
-                .find_map(|declaration| match declaration {
-                    Declaration::Resource(resource) => member_docs(&resource.members, symbol.span),
-                    _ => None,
-                })
-        }
-        SymbolKind::Index => source
-            .declarations
-            .iter()
-            .find_map(|declaration| match declaration {
-                Declaration::Store(store) => store
-                    .indexes
-                    .iter()
-                    .find(|index| span_contains_span(index.span, symbol.span))
-                    .map(|index| index.docs.as_slice()),
-                _ => None,
-            }),
-        SymbolKind::Local | SymbolKind::Param | SymbolKind::ModuleRef => None,
-    }
-}
-
 pub(super) fn resource_at(
     source: &marrow_syntax::SourceFile,
     span: SourceSpan,
@@ -459,18 +389,6 @@ pub(super) fn enum_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> O
             }
             _ => None,
         })
-}
-
-fn enum_member_docs(members: &[EnumMember], span: SourceSpan) -> Option<&[String]> {
-    for member in members {
-        if span_contains_span(member.span, span) {
-            return Some(&member.docs);
-        }
-        if let Some(docs) = enum_member_docs(&member.members, span) {
-            return Some(docs);
-        }
-    }
-    None
 }
 
 fn enum_member_at(source: &marrow_syntax::SourceFile, span: SourceSpan) -> Option<&EnumMember> {
@@ -572,26 +490,6 @@ fn resource_member_name(member: &ResourceMember) -> &str {
         ResourceMember::Field(field) => &field.name,
         ResourceMember::Group(group) => &group.name,
     }
-}
-
-fn member_docs(members: &[ResourceMember], span: SourceSpan) -> Option<&[String]> {
-    for member in members {
-        match member {
-            ResourceMember::Field(field) if span_contains_span(field.span, span) => {
-                return Some(&field.docs);
-            }
-            ResourceMember::Group(group) if span_contains_span(group.span, span) => {
-                return Some(&group.docs);
-            }
-            ResourceMember::Group(group) => {
-                if let Some(docs) = member_docs(&group.members, span) {
-                    return Some(docs);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 pub(super) fn enum_member_path_at(

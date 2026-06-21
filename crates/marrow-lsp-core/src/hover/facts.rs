@@ -3,7 +3,9 @@ use std::path::Path;
 use marrow_check::{
     AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedConst, CheckedFacts, CheckedFunction,
     CheckedParam, DirectEffectFacts, FunctionFact, MarrowType, SymbolKind, SymbolRef, UseSiteKind,
-    tooling::{self, CallableSignature, CallableSignatureKind},
+    tooling::{
+        self, CallableSignature, CallableSignatureKind, SourceSymbolDocs, source_symbol_docs_at,
+    },
     type_at,
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema};
@@ -54,7 +56,7 @@ pub(super) enum HoverFact<'a> {
     },
     Type {
         ty: MarrowType,
-        docs: Option<&'a [String]>,
+        docs: Option<Vec<String>>,
     },
 }
 
@@ -100,7 +102,7 @@ pub(super) fn collect<'a>(
         return Some(fact);
     }
 
-    let docs = symbol_docs_at_hover_target(snapshot, index, file, offset);
+    let docs = symbol_docs_at_hover_target(snapshot, index, file, offset).map(|docs| docs.lines);
     checked_type_at(snapshot, file, offset).map(|ty| HoverFact::Type { ty, docs })
 }
 
@@ -111,17 +113,6 @@ pub(super) fn checked_type_at(
 ) -> Option<MarrowType> {
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     type_at(&snapshot.program, file, &analyzed.parsed, offset)
-}
-
-pub(super) fn symbol_docs_lines<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<&'a [String]> {
-    let symbol = index.definition(file, offset)?;
-    let analyzed = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    source::declaration_docs(&analyzed.parsed.file, &symbol)
 }
 
 fn blocked_module_prefix_hover(
@@ -346,19 +337,19 @@ fn resource_member_fact<'a>(
     }
 }
 
-fn symbol_docs_at_hover_target<'a>(
-    snapshot: &'a AnalysisSnapshot,
+fn symbol_docs_at_hover_target(
+    snapshot: &AnalysisSnapshot,
     index: &BindingIndex,
     file: &Path,
     offset: usize,
-) -> Option<&'a [String]> {
+) -> Option<SourceSymbolDocs> {
     let symbol = index.definition(file, offset)?;
     if symbol.kind == SymbolKind::Function
         && !source::is_function_hover_target(snapshot, index, file, offset, &symbol)
     {
         return None;
     }
-    symbol_docs_lines(snapshot, index, file, offset)
+    source_symbol_docs_at(snapshot, index, file, offset)
 }
 
 fn default_library_call_text(

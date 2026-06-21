@@ -1290,6 +1290,21 @@ fn hover_has_no_local_intrinsic_callable_model() {
 }
 
 #[test]
+fn hover_does_not_own_source_symbol_doc_traversal() {
+    let source = include_str!("source.rs");
+    for obsolete in [
+        "fn declaration_docs",
+        "fn enum_member_docs",
+        "fn member_docs",
+    ] {
+        assert!(
+            !source.contains(obsolete),
+            "hover docs should consume Marrow source-symbol doc facts, not own `{obsolete}`"
+        );
+    }
+}
+
+#[test]
 fn hover_over_a_single_letter_function_declaration_name_ignores_the_fn_keyword() {
     let source = "\
 module a
