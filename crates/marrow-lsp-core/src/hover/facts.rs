@@ -4,14 +4,13 @@ use marrow_check::{
     AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedConst, CheckedFacts, CheckedFunction,
     CheckedParam, DirectEffectFacts, FunctionFact, MarrowType, SymbolKind, SymbolRef, UseSiteKind,
     tooling::{
-        self, CallableSignature, CallableSignatureKind, SourceSymbolDocs, source_symbol_docs_at,
+        self, CallableSignature, CallableSignatureKind, SavedPlaceHoverFact, SourceSymbolDocs,
+        saved_place_hover_fact_at, source_symbol_docs_at,
     },
     type_at,
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema};
-use marrow_syntax::{
-    FunctionDecl, IndexDecl, Keyword, ResourceMember, Token, TokenKind, lex_source,
-};
+use marrow_syntax::{FunctionDecl, Keyword, Token, TokenKind, lex_source};
 
 use crate::callables::render_callable_signature;
 use crate::language_facts;
@@ -48,12 +47,7 @@ pub(super) enum HoverFact<'a> {
         schema: &'a EnumSchema,
         ordinal: usize,
     },
-    ResourceMember {
-        member: &'a ResourceMember,
-    },
-    Index {
-        index: &'a IndexDecl,
-    },
+    SavedPlace(SavedPlaceHoverFact),
     Type {
         ty: MarrowType,
         docs: Option<Vec<String>>,
@@ -98,8 +92,8 @@ pub(super) fn collect<'a>(
     if let Some(fact) = rich_symbol_fact(snapshot, index, file, offset) {
         return Some(fact);
     }
-    if let Some(fact) = resource_member_fact(snapshot, index, file, offset) {
-        return Some(fact);
+    if let Some(fact) = saved_place_hover_fact_at(snapshot, index, file, offset) {
+        return Some(HoverFact::SavedPlace(fact));
     }
 
     let docs = symbol_docs_at_hover_target(snapshot, index, file, offset).map(|docs| docs.lines);
@@ -309,31 +303,6 @@ fn rich_symbol_fact<'a>(
             Some(HoverFact::EnumMember { schema, ordinal })
         }
         _ => None,
-    }
-}
-
-fn resource_member_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let symbol = index.definition(file, offset)?;
-    if !matches!(
-        symbol.kind,
-        SymbolKind::Field | SymbolKind::Layer | SymbolKind::Index
-    ) || !source::is_resource_member_hover_target(snapshot, index, file, offset, &symbol)
-    {
-        return None;
-    }
-
-    let parsed_file = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    if symbol.kind == SymbolKind::Index {
-        let index = source::store_index_at(&parsed_file.parsed.file, symbol.span)?;
-        Some(HoverFact::Index { index })
-    } else {
-        let member = source::resource_member_at(&parsed_file.parsed.file, symbol.span)?;
-        Some(HoverFact::ResourceMember { member })
     }
 }
 

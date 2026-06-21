@@ -1,10 +1,11 @@
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
+use marrow_check::tooling::{SavedPlaceHoverFact, SavedPlaceHoverKeyParam};
 use marrow_check::{
     CheckedConst, CheckedFacts, CheckedFunction, CheckedParam, DirectEffectFacts, HostEffect,
     MarrowType, SavedPlaceEffect,
 };
 use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema, stdlib};
-use marrow_syntax::{FunctionDecl, IndexDecl, KeyParam, ResourceMember};
+use marrow_syntax::FunctionDecl;
 
 use crate::types::{render_schema_leaf_type, render_type};
 
@@ -24,8 +25,7 @@ pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
         HoverFact::Resource { schema } => resource_hover(schema),
         HoverFact::Enum { schema } => enum_hover(schema),
         HoverFact::EnumMember { schema, ordinal } => enum_member_hover(schema, ordinal),
-        HoverFact::ResourceMember { member } => resource_member_markdown(member),
-        HoverFact::Index { index } => index_markdown(index),
+        HoverFact::SavedPlace(fact) => saved_place_markdown(&fact),
         HoverFact::Type { ty, docs } => type_hover(&ty, docs.as_deref()),
     })
 }
@@ -145,15 +145,10 @@ fn enum_member_hover(schema: &EnumSchema, ordinal: usize) -> String {
     value
 }
 
-fn resource_member_markdown(member: &ResourceMember) -> String {
-    let mut value = marrow_code_block(&resource_member_signature(member));
-    append_docs(&mut value, join_docs(resource_member_docs(member)));
-    value
-}
-
-fn index_markdown(index: &IndexDecl) -> String {
-    let mut value = marrow_code_block(&index_signature(index));
-    append_docs(&mut value, join_docs(&index.docs));
+fn saved_place_markdown(fact: &SavedPlaceHoverFact) -> String {
+    let (signature, docs) = saved_place_signature_and_docs(fact);
+    let mut value = marrow_code_block(&signature);
+    append_docs(&mut value, join_docs(docs));
     value
 }
 
@@ -456,36 +451,45 @@ fn append_section(value: &mut String, section: Option<String>) {
     }
 }
 
-fn resource_member_signature(member: &ResourceMember) -> String {
-    match member {
-        ResourceMember::Field(field) => {
-            let required = if field.required { "required " } else { "" };
-            format!(
-                "{required}{}{}: {}",
-                field.name,
-                syntax_key_params(&field.keys),
-                field.ty
+fn saved_place_signature_and_docs(fact: &SavedPlaceHoverFact) -> (String, &[String]) {
+    match fact {
+        SavedPlaceHoverFact::Field {
+            name,
+            key_params,
+            ty,
+            required,
+            docs,
+        } => {
+            let required = if *required { "required " } else { "" };
+            (
+                format!(
+                    "{required}{name}{}: {ty}",
+                    saved_place_key_params(key_params)
+                ),
+                docs,
             )
         }
-        ResourceMember::Group(group) => {
-            format!("{}{}", group.name, syntax_key_params(&group.keys))
+        SavedPlaceHoverFact::Layer {
+            name,
+            key_params,
+            docs,
+        } => (
+            format!("{name}{}", saved_place_key_params(key_params)),
+            docs,
+        ),
+        SavedPlaceHoverFact::Index {
+            name,
+            args,
+            unique,
+            docs,
+        } => {
+            let unique = if *unique { " unique" } else { "" };
+            (format!("index {name}({}){unique}", args.join(", ")), docs)
         }
     }
 }
 
-fn index_signature(index: &IndexDecl) -> String {
-    let unique = if index.unique { " unique" } else { "" };
-    format!("index {}({}){unique}", index.name, index.args.join(", "))
-}
-
-fn resource_member_docs(member: &ResourceMember) -> &[String] {
-    match member {
-        ResourceMember::Field(field) => &field.docs,
-        ResourceMember::Group(group) => &group.docs,
-    }
-}
-
-fn syntax_key_params(keys: &[KeyParam]) -> String {
+fn saved_place_key_params(keys: &[SavedPlaceHoverKeyParam]) -> String {
     if keys.is_empty() {
         String::new()
     } else {

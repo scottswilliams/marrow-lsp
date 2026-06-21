@@ -2,8 +2,8 @@ use std::path::Path;
 
 use marrow_check::{AnalysisSnapshot, BindingIndex, SymbolKind, SymbolRef};
 use marrow_syntax::{
-    Declaration, EnumDecl, EnumMember, FunctionDecl, IndexDecl, Keyword, ResourceDecl,
-    ResourceMember, SourceSpan, StoreDecl, TokenKind, lex_source,
+    Declaration, EnumDecl, EnumMember, FunctionDecl, Keyword, ResourceDecl, SourceSpan, StoreDecl,
+    TokenKind, lex_source,
 };
 
 pub(super) fn is_named_symbol_reference(
@@ -88,78 +88,6 @@ fn is_enum_member_declaration_name(
         return false;
     };
     offset_is_on_declaration_name(&analyzed.source, symbol.span, &member.name, offset)
-}
-
-pub(super) fn is_resource_member_hover_target(
-    snapshot: &AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    is_saved_member_declaration_name(snapshot, file, offset, symbol)
-        || index.references(symbol).iter().any(|reference| {
-            reference.file == file
-                && reference.span != symbol.span
-                && span_covers(reference.span, offset)
-                && offset_is_on_last_identifier(snapshot, file, reference.span, offset)
-        })
-}
-
-fn is_saved_member_declaration_name(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    match symbol.kind {
-        SymbolKind::Field | SymbolKind::Layer => {
-            is_resource_member_declaration_name(snapshot, file, offset, symbol)
-        }
-        SymbolKind::Index => is_index_declaration_name(snapshot, file, offset, symbol),
-        _ => false,
-    }
-}
-
-fn is_resource_member_declaration_name(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    if symbol.file != file {
-        return false;
-    }
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == symbol.file) else {
-        return false;
-    };
-    let Some(member) = resource_member_at(&analyzed.parsed.file, symbol.span) else {
-        return false;
-    };
-    offset_is_on_declaration_name(
-        &analyzed.source,
-        symbol.span,
-        resource_member_name(member),
-        offset,
-    )
-}
-
-fn is_index_declaration_name(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    if symbol.file != file {
-        return false;
-    }
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == symbol.file) else {
-        return false;
-    };
-    let Some(index) = store_index_at(&analyzed.parsed.file, symbol.span) else {
-        return false;
-    };
-    offset_is_on_declaration_name(&analyzed.source, symbol.span, &index.name, offset)
 }
 
 pub(super) fn offset_is_on_declaration_name(
@@ -415,41 +343,6 @@ fn enum_member_in(members: &[EnumMember], span: SourceSpan) -> Option<&EnumMembe
     None
 }
 
-pub(super) fn resource_member_at(
-    source: &marrow_syntax::SourceFile,
-    span: SourceSpan,
-) -> Option<&ResourceMember> {
-    for declaration in &source.declarations {
-        let Declaration::Resource(resource) = declaration else {
-            continue;
-        };
-        if let Some(member) = resource_member_in(&resource.members, span) {
-            return Some(member);
-        }
-    }
-    None
-}
-
-fn resource_member_in(members: &[ResourceMember], span: SourceSpan) -> Option<&ResourceMember> {
-    for member in members {
-        match member {
-            ResourceMember::Field(field) if span_contains_span(field.span, span) => {
-                return Some(member);
-            }
-            ResourceMember::Group(group) if span_contains_span(group.span, span) => {
-                return Some(member);
-            }
-            ResourceMember::Group(group) => {
-                if let Some(member) = resource_member_in(&group.members, span) {
-                    return Some(member);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 pub(super) fn store_root_at<'a>(
     source: &'a marrow_syntax::SourceFile,
     text: &str,
@@ -467,29 +360,6 @@ pub(super) fn store_root_at<'a>(
         }
     }
     None
-}
-
-pub(super) fn store_index_at(
-    source: &marrow_syntax::SourceFile,
-    span: SourceSpan,
-) -> Option<&IndexDecl> {
-    source
-        .declarations
-        .iter()
-        .find_map(|declaration| match declaration {
-            Declaration::Store(store) => store
-                .indexes
-                .iter()
-                .find(|index| span_contains_span(index.span, span)),
-            _ => None,
-        })
-}
-
-fn resource_member_name(member: &ResourceMember) -> &str {
-    match member {
-        ResourceMember::Field(field) => &field.name,
-        ResourceMember::Group(group) => &group.name,
-    }
 }
 
 pub(super) fn enum_member_path_at(

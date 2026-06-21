@@ -1305,6 +1305,24 @@ fn hover_does_not_own_source_symbol_doc_traversal() {
 }
 
 #[test]
+fn hover_does_not_own_saved_place_target_traversal() {
+    let source = include_str!("source.rs");
+    for obsolete in [
+        "is_resource_member_hover_target",
+        "is_saved_member_declaration_name",
+        "is_resource_member_declaration_name",
+        "is_index_declaration_name",
+        "resource_member_at",
+        "store_index_at",
+    ] {
+        assert!(
+            !source.contains(obsolete),
+            "saved member/index hover should consume Marrow saved-place hover facts, not own `{obsolete}`"
+        );
+    }
+}
+
+#[test]
 fn hover_over_a_single_letter_function_declaration_name_ignores_the_fn_keyword() {
     let source = "\
 module a
