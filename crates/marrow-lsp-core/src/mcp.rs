@@ -64,7 +64,6 @@ pub const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
 ];
 pub const DATA_READ_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
-    "bounded presence facts",
     "watch/refresh facts",
     "integrity and repair facts",
     "serve/attach data boundaries",

@@ -864,7 +864,7 @@ mod tests {
                         DATA_READ_MISSING_FACTS,
                     ),
                 }),
-                "data value preview helper (presentation-only: catalog-bound saved-place identity +4): 42",
+                "data value preview helper (presentation-only: catalog-bound saved-place identity +3): 42",
             ),
             (
                 "mw_surface_read",

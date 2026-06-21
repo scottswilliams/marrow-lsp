@@ -1497,7 +1497,6 @@ fn data_tools_refuse_when_not_enabled() {
         "data value preview helper",
         &[
             "catalog-bound saved-place identity",
-            "bounded presence facts",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1677,7 +1676,6 @@ fn data_read_returns_bounded_value_preview_when_enabled() {
         "data value preview helper",
         &[
             "catalog-bound saved-place identity",
-            "bounded presence facts",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",

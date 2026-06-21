@@ -372,7 +372,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_read",
-            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview and versioned data generation DTO under store_snapshot for one typed saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path, clamps `preview_limit`, and reads nothing when data access is disabled. Presence detection remains Marrow-owned presentation behavior, not a bounded production read contract. Missing catalog-bound saved-place identity, watch/refresh facts, integrity and repair facts, bounded presence facts, and serve/attach data boundaries; not a stable production data API.",
+            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview and versioned data generation DTO under store_snapshot for one typed saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path, clamps `preview_limit`, uses Marrow-owned bounded read presence, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -383,7 +383,7 @@ pub fn tools() -> Json {
                 "boundedness": {
                     "valuePreview": "limit-clamped"
                 },
-                "presenceDetection": "Marrow-owned presentation helper; not a bounded production read contract",
+                "presenceDetection": "Marrow-owned bounded read presence",
                 "pathSurface": {
                     "segments": "typed-saved-data-path",
                     "savedPathString": "absent",
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(data_read["boundedness"]["valuePreview"], "limit-clamped");
         assert_eq!(
             data_read["presenceDetection"],
-            "Marrow-owned presentation helper; not a bounded production read contract"
+            "Marrow-owned bounded read presence"
         );
         assert_eq!(
             data_read["pathSurface"]["segments"],
