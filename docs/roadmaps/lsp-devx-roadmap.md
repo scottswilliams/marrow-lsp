@@ -165,8 +165,9 @@ Expected outcomes:
   module-path identity facts remain blocked instead of reconstructed locally.
 - Resource names, roots, identities, fields, layers, indexes, and identity keys jump to the
   canonical declaration span.
-- Module path segments jump to module declarations or imported module files only after Marrow
-  exposes canonical module-path facts.
+- Exact project module-prefix definition jumps consume Marrow source module-path definition facts
+  after BindingIndex declines the cursor; aliases, leaves, and unavailable namespace-only prefixes
+  remain owned by their canonical facts or return no definition.
 - Builtins either jump nowhere by design with hover documentation, or jump to canonical docs if the
   project later exposes doc locations.
 - Existing saved-data rename refusals remain intact and are expanded to any newly indexed

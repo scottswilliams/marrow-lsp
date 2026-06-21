@@ -38,10 +38,10 @@ Before any release claim, run the full bar from a clean checkout:
 
 ```sh
 git diff --check
-CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/<lane> cargo fmt --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --all -- --check
-CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/<lane> cargo build --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --workspace --all-features
-CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/<lane> cargo test --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --workspace --all-features
-CARGO_TARGET_DIR=/Users/scottwilliams/Dev/.cargo-targets/<lane> cargo clippy --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/tmp/codex-marrow-targets/<lane> cargo fmt --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --all -- --check
+CARGO_TARGET_DIR=/tmp/codex-marrow-targets/<lane> cargo build --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --workspace --all-features
+CARGO_TARGET_DIR=/tmp/codex-marrow-targets/<lane> cargo test --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --workspace --all-features
+CARGO_TARGET_DIR=/tmp/codex-marrow-targets/<lane> cargo clippy --manifest-path /Users/scottwilliams/Dev/<worktree>/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 ! rg -n '\bunsafe\b' crates editors/vscode/src
 npm --prefix editors/vscode ci
 npm --prefix editors/vscode run check
@@ -49,8 +49,10 @@ npm --prefix editors/vscode run compile
 npm --prefix editors/vscode audit --audit-level=moderate
 ```
 
-Every command must use an explicit outside-repository `CARGO_TARGET_DIR`. A
-clean hosted workflow cannot replace these local gates.
+Every Cargo command must use an explicit outside-repository `CARGO_TARGET_DIR`.
+Do not share target directories across concurrent lanes, and delete the lane
+target directory immediately after the relevant gate. A clean hosted workflow
+cannot replace these local gates.
 
 ## Graduation Work
 
