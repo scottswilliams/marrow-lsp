@@ -2,15 +2,33 @@ use lsp_types::{
     Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, SignatureHelp,
     SignatureInformation,
 };
+use marrow_check::tooling::{
+    CallableArgumentStyle, CallableValueShape, SourceSignatureHelpCallable,
+    SourceSignatureHelpFact, SourceSignatureHelpParameter,
+};
 
-use super::signatures::{Parameter, Signature};
+use crate::callables::render_callable_shape;
+use crate::types::render_type;
 
-pub(super) fn help(
-    signature: Signature,
-    active: usize,
-    named_argument: Option<String>,
-) -> SignatureHelp {
-    let active = active_parameter(&signature.params, active, named_argument.as_deref());
+struct Signature {
+    label: String,
+    documentation: Option<String>,
+    params: Vec<Parameter>,
+}
+
+struct Parameter {
+    name: Option<String>,
+    label: String,
+    documentation: Option<String>,
+}
+
+pub(super) fn help(fact: SourceSignatureHelpFact) -> SignatureHelp {
+    let signature = render_signature(fact.callable);
+    let active = active_parameter(
+        &signature.params,
+        fact.active_argument,
+        fact.named_argument.as_deref(),
+    );
     SignatureHelp {
         signatures: vec![SignatureInformation {
             label: signature.label,
@@ -29,6 +47,149 @@ pub(super) fn help(
         }],
         active_signature: Some(0),
         active_parameter: active,
+    }
+}
+
+fn render_signature(callable: SourceSignatureHelpCallable) -> Signature {
+    match callable {
+        SourceSignatureHelpCallable::Intrinsic {
+            path,
+            argument_style,
+            docs,
+            params,
+            return_shape,
+        } => render_intrinsic(path, argument_style, docs, params, return_shape),
+        SourceSignatureHelpCallable::ResourceConstructor {
+            name,
+            docs,
+            params,
+            return_type: _,
+        } => {
+            let params = params
+                .into_iter()
+                .map(render_typed_parameter)
+                .collect::<Vec<_>>();
+            Signature {
+                label: format!("{}({}): {}", name, joined_param_labels(&params), name),
+                documentation: join_docs(&docs),
+                params,
+            }
+        }
+        SourceSignatureHelpCallable::Function {
+            name,
+            docs,
+            params,
+            return_type,
+        } => {
+            let params = params
+                .into_iter()
+                .map(render_typed_parameter)
+                .collect::<Vec<_>>();
+            let params_label = joined_param_labels(&params);
+            let label = match return_type {
+                Some(ty) => format!("{}({}): {}", name, params_label, render_type(&ty)),
+                None => format!("{}({})", name, params_label),
+            };
+            Signature {
+                label,
+                documentation: join_docs(&docs),
+                params,
+            }
+        }
+    }
+}
+
+fn render_intrinsic(
+    path: Vec<String>,
+    argument_style: CallableArgumentStyle,
+    docs: Vec<String>,
+    params: Vec<SourceSignatureHelpParameter>,
+    return_shape: Option<CallableValueShape>,
+) -> Signature {
+    let params = params
+        .into_iter()
+        .map(|param| render_intrinsic_parameter(param, argument_style))
+        .collect::<Vec<_>>();
+    let path = path.join("::");
+    let label = match return_shape.as_ref().map(render_callable_shape) {
+        Some(return_shape) => format!(
+            "{}({}): {}",
+            path,
+            joined_param_labels(&params),
+            return_shape
+        ),
+        None => format!("{}({})", path, joined_param_labels(&params)),
+    };
+    Signature {
+        label,
+        documentation: join_docs(&docs),
+        params,
+    }
+}
+
+fn render_intrinsic_parameter(
+    param: SourceSignatureHelpParameter,
+    style: CallableArgumentStyle,
+) -> Parameter {
+    let label = match style {
+        CallableArgumentStyle::Positional => {
+            let label = match param.shape {
+                Some(CallableValueShape::SavedRoot) if param.label == "root" => "^root".to_string(),
+                _ => param.label,
+            };
+            if param.repeat {
+                format!("{label}...")
+            } else {
+                label
+            }
+        }
+        CallableArgumentStyle::NamedFields => {
+            let shape = param
+                .shape
+                .as_ref()
+                .map(render_callable_shape)
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("{}: {}", param.label, shape)
+        }
+    };
+    Parameter {
+        name: param.name,
+        label,
+        documentation: join_docs(&param.docs),
+    }
+}
+
+fn render_typed_parameter(param: SourceSignatureHelpParameter) -> Parameter {
+    let label = match param.ty {
+        Some(ty) => format!("{}: {}", param.label, render_type(&ty)),
+        None => param.label,
+    };
+    Parameter {
+        name: param.name,
+        label,
+        documentation: join_docs(&param.docs),
+    }
+}
+
+fn joined_param_labels(params: &[Parameter]) -> String {
+    params
+        .iter()
+        .map(|param| param.label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn join_docs(lines: &[String]) -> Option<String> {
+    let joined = lines
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let joined = joined.trim();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.to_string())
     }
 }
 
