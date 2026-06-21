@@ -120,10 +120,14 @@ fn child_from_debug(name: String, value: DebugValue) -> Child {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marrow_run::Value;
+    use marrow_run::{Sequence, Value};
 
     fn debug_value(value: Value) -> DebugValue {
         DebugValue::from_value(value)
+    }
+
+    fn sequence(values: Vec<Value>) -> Value {
+        Value::Sequence(Sequence::dense(values))
     }
 
     #[test]
@@ -136,10 +140,7 @@ mod tests {
 
     #[test]
     fn a_sequence_expands_to_indexed_elements() {
-        let seq = debug_value(Value::Sequence(vec![
-            Value::Int(10),
-            Value::Str("hi".into()),
-        ]));
+        let seq = debug_value(sequence(vec![Value::Int(10), Value::Str("hi".into())]));
         assert!(is_expandable(&seq));
         let kids = children(&seq, ChildPage::default(), VariablesFilter::All);
         assert_eq!(kids.len(), 2);
@@ -153,7 +154,7 @@ mod tests {
     fn a_resource_expands_to_named_fields_and_nested_ones_re_expand() {
         let resource = debug_value(Value::Resource(vec![
             ("title".into(), Value::Str("Dune".into())),
-            ("tags".into(), Value::Sequence(vec![Value::Int(1)])),
+            ("tags".into(), sequence(vec![Value::Int(1)])),
         ]));
         let kids = children(&resource, ChildPage::default(), VariablesFilter::All);
         assert_eq!(kids[0].name, "title");
@@ -167,7 +168,7 @@ mod tests {
 
     #[test]
     fn a_child_page_bounds_sequence_expansion() {
-        let seq = debug_value(Value::Sequence((0..5).map(Value::Int).collect()));
+        let seq = debug_value(sequence((0..5).map(Value::Int).collect()));
         let kids = children(&seq, ChildPage::new(1, 2), VariablesFilter::All);
         let names: Vec<&str> = kids.iter().map(|kid| kid.name.as_str()).collect();
 
@@ -176,7 +177,7 @@ mod tests {
 
     #[test]
     fn an_omitted_count_returns_all_captured_children_from_start() {
-        let seq = debug_value(Value::Sequence((0..5).map(Value::Int).collect()));
+        let seq = debug_value(sequence((0..5).map(Value::Int).collect()));
         let kids = children(&seq, ChildPage::requested(1, None), VariablesFilter::All);
         let names: Vec<&str> = kids.iter().map(|kid| kid.name.as_str()).collect();
 
@@ -185,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_zero_count_returns_all_captured_children_from_start() {
-        let seq = debug_value(Value::Sequence((0..5).map(Value::Int).collect()));
+        let seq = debug_value(sequence((0..5).map(Value::Int).collect()));
         let kids = children(&seq, ChildPage::requested(1, Some(0)), VariablesFilter::All);
         let names: Vec<&str> = kids.iter().map(|kid| kid.name.as_str()).collect();
 
@@ -194,7 +195,7 @@ mod tests {
 
     #[test]
     fn filters_keep_named_and_indexed_children_separate() {
-        let seq = debug_value(Value::Sequence(vec![Value::Int(1)]));
+        let seq = debug_value(sequence(vec![Value::Int(1)]));
         assert!(children(&seq, ChildPage::default(), VariablesFilter::Named).is_empty());
         assert_eq!(
             children(&seq, ChildPage::default(), VariablesFilter::Indexed)[0].name,

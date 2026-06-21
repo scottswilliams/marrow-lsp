@@ -434,7 +434,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor, accepts typed `args`, and returns Marrow entry footprint, cost-shape, analysis-identity, and store-open-mode facts. `mode: \"test\"` runs the project's test session, each test over its own fresh store, and does not accept args.",
+            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor, accepts typed `args`, and returns Marrow's run result/error DTO plus entry footprint, cost-shape, analysis-identity, and store-open-mode facts. `mode: \"test\"` runs the project's test session, each test over its own fresh store, and does not accept args.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -444,6 +444,7 @@ pub fn tools() -> Json {
                 "host": "locked-down",
                 "realStore": "never-touched",
                 "catalogState": "not-mutated",
+                "runResult": "Marrow run result/error DTOs",
                 "runFacts": "Marrow entry descriptor, analysis identity, footprint, cost shape, and store open mode",
                 "typedInputs": {
                     "args": "typed run protocol DTOs",
@@ -923,6 +924,7 @@ mod tests {
         assert_eq!(run["host"], "locked-down");
         assert_eq!(run["realStore"], "never-touched");
         assert_eq!(run["catalogState"], "not-mutated");
+        assert_eq!(run["runResult"], "Marrow run result/error DTOs");
         assert_eq!(
             run["runFacts"],
             "Marrow entry descriptor, analysis identity, footprint, cost shape, and store open mode"

@@ -334,8 +334,8 @@ fn missing_fact_summary(facts: &[Json]) -> Option<String> {
 }
 
 /// Summarize `mw_run`: test mode carries a `tests` array (pass/fail counts), run
-/// mode carries a `value`/`output`. Either mode degrades to its `diagnostics` when
-/// the program did not check or run.
+/// mode carries Marrow's typed run `result` plus captured `output`. Either mode
+/// degrades to its `diagnostics` when the program did not check or run.
 fn run_summary(result: &Json) -> String {
     // Diagnostics come first: a non-empty list means the program never produced a
     // value or a test outcome — it failed to check, or test discovery faulted,
@@ -364,15 +364,44 @@ fn run_summary(result: &Json) -> String {
             .count();
         return format!("{passed}/{total} tests passed");
     }
-    match result.get("value") {
-        Some(Json::Null) | None => {
+    match result.get("result").and_then(Json::as_object) {
+        Some(result) if result.get("kind").and_then(Json::as_str) == Some("value") => {
+            let value = result.get("value").unwrap_or(&Json::Null);
+            format!("value {}", clip(&run_return_summary(value)))
+        }
+        _ => {
             if has_output(result) {
                 "ran, no value (output captured)".to_string()
             } else {
                 "ran, no value".to_string()
             }
         }
-        Some(value) => format!("value {}", clip(&compact(value))),
+    }
+}
+
+fn run_return_summary(value: &Json) -> String {
+    let Some(kind) = value.get("kind").and_then(Json::as_str) else {
+        return compact(value);
+    };
+    match kind {
+        "int" | "bool" | "string" | "decimal" | "date" | "duration" | "instant" => value
+            .get("value")
+            .map(compact)
+            .unwrap_or_else(|| compact(value)),
+        "bytes" => value
+            .get("originalBytes")
+            .and_then(Json::as_u64)
+            .map(|bytes| format!("{bytes} bytes"))
+            .unwrap_or_else(|| compact(value)),
+        "sequence" => {
+            let count = value
+                .get("values")
+                .and_then(Json::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("{count} values")
+        }
+        _ => compact(value),
     }
 }
 
@@ -703,17 +732,21 @@ mod tests {
             ),
             (
                 "mw_run",
-                json!({ "value": 42, "output": "", "diagnostics": [] }),
+                json!({
+                    "result": { "kind": "value", "value": { "kind": "int", "value": 42 } },
+                    "output": "",
+                    "diagnostics": []
+                }),
                 "value 42",
             ),
             (
                 "mw_run",
-                json!({ "value": Json::Null, "output": "loud\n", "diagnostics": [] }),
+                json!({ "result": { "kind": "none" }, "output": "loud\n", "diagnostics": [] }),
                 "ran, no value (output captured)",
             ),
             (
                 "mw_run",
-                json!({ "value": Json::Null, "output": "", "diagnostics": [] }),
+                json!({ "result": { "kind": "none" }, "output": "", "diagnostics": [] }),
                 "ran, no value",
             ),
             (
@@ -850,7 +883,7 @@ mod tests {
             (
                 "mw_run",
                 json!({
-                    "value": 42,
+                    "result": { "kind": "value", "value": { "kind": "int", "value": 42 } },
                     "output": "",
                     "diagnostics": [],
                     "contract": contract(
@@ -859,7 +892,7 @@ mod tests {
                         RUN_MISSING_FACTS,
                     ),
                 }),
-                "sandboxed execution helper (presentation-only: stable public run-result DTOs +2): value 42",
+                "sandboxed execution helper (presentation-only: runtime generation facts +1): value 42",
             ),
         ];
         for (name, result, expected) in cases {

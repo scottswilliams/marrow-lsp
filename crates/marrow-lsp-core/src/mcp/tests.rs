@@ -1,7 +1,9 @@
 use super::*;
 
 use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
-use marrow_check::{check_project, check_project_against, project_store_lock, read_committed_lock};
+use marrow_check::{
+    CheckedProgram, check_project, check_project_against, project_store_lock, read_committed_lock,
+};
 use marrow_project::{CATALOG_FILE_NAME, parse_config};
 use marrow_store::key::SavedKey;
 use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
@@ -28,7 +30,6 @@ fn assert_contract(result: &Json, status: &str, description: &str, missing_facts
 }
 
 const RUN_EXPECTED_MISSING_FACTS: &[&str] = &[
-    "stable public run-result DTOs",
     "runtime generation facts",
     "serve/attach execution boundaries",
 ];
@@ -1030,65 +1031,23 @@ fn run_without_entry_reports_the_session_entry_error() {
 }
 
 #[test]
-fn run_value_json_summarizes_local_trees() {
-    assert_eq!(
-        value_to_json(Value::LocalTree(Vec::new())),
-        json!({ "tree": 0 })
-    );
-}
+fn run_missing_explicit_entry_uses_marrow_run_error_dto() {
+    let (_dir, file) = pure_project();
+    let result = run(&file, Some("shelf::books::missing"), &[], RunMode::Run);
 
-#[test]
-fn run_value_json_caps_large_sequences() {
-    let value = Value::Sequence((0..300).map(Value::Int).collect());
-    let rendered = value_to_json(value);
-    let items = rendered["sequence"]
-        .as_array()
-        .unwrap_or_else(|| panic!("large sequences render as a bounded summary: {rendered}"));
-
-    assert_eq!(rendered["truncated"], true, "{rendered}");
-    assert!(items.len() < 300, "{rendered}");
-}
-
-#[test]
-fn run_value_json_caps_large_strings() {
-    let rendered = value_to_json(Value::Str("x".repeat(20_000)));
-
-    assert_eq!(rendered["truncated"], true, "{rendered}");
+    let diagnostic = &result["diagnostics"][0];
+    assert_eq!(diagnostic["code"], "run.unknown_function", "{result}");
+    assert_ne!(diagnostic["code"], "mcp.run.entry", "{result}");
     assert!(
-        rendered["string"].as_str().unwrap().len() < 20_000,
-        "{rendered}"
+        diagnostic["kind"].is_string(),
+        "entry descriptor errors should use Marrow's run diagnostic DTO: {result}"
     );
-}
-
-#[test]
-fn run_value_json_caps_large_resources() {
-    let value = Value::Resource(
-        (0..300)
-            .map(|index| (format!("field{index}"), Value::Int(index)))
-            .collect(),
-    );
-    let rendered = value_to_json(value);
-    let fields = rendered["resource"]
-        .as_array()
-        .unwrap_or_else(|| panic!("large resources render as a bounded summary: {rendered}"));
-
-    assert_eq!(rendered["truncated"], true, "{rendered}");
-    assert!(fields.len() < 300, "{rendered}");
-}
-
-#[test]
-fn run_value_json_caps_large_resource_field_names() {
-    let rendered = value_to_json(Value::Resource(vec![("x".repeat(20_000), Value::Int(1))]));
-    let fields = rendered["resource"]
-        .as_array()
-        .unwrap_or_else(|| panic!("long resource names render as a bounded summary: {rendered}"));
-
-    assert_eq!(rendered["truncated"], true, "{rendered}");
-    assert_eq!(fields[0]["nameTruncated"], true, "{rendered}");
     assert!(
-        fields[0]["name"].as_str().unwrap().len() < 20_000,
-        "{rendered}"
+        diagnostic["source_span"].is_object(),
+        "entry descriptor errors should carry the Marrow run source-span field: {result}"
     );
+    assert_eq!(result["output"], "", "{result}");
+    assert_run_contract(&result);
 }
 
 #[test]
@@ -1143,14 +1102,6 @@ fn run_uses_fresh_memory_for_shelf_fixture_without_establishing_catalog_identity
 }
 
 #[test]
-fn output_truncation_preserves_utf8_boundaries() {
-    let output = "€".repeat(OUTPUT_CAP);
-    let truncated = truncate(output);
-
-    assert!(truncated.ends_with("…output truncated…"));
-}
-
-#[test]
 fn run_accepts_typed_string_arguments() {
     let (_dir, file) = pure_project();
     let result = run(
@@ -1164,7 +1115,53 @@ fn run_accepts_typed_string_arguments() {
     );
 
     assert_eq!(result["diagnostics"], json!([]), "{result}");
-    assert_eq!(result["value"], "hi Ada", "{result}");
+    assert!(
+        result.get("value").is_none(),
+        "mw_run must not expose the old local value field: {result}"
+    );
+    assert_eq!(result["result"]["kind"], "value", "{result}");
+    assert_eq!(
+        result["result"]["value"],
+        json!({
+            "kind": "string",
+            "value": "hi Ada",
+            "truncated": false,
+            "originalBytes": 6
+        }),
+        "{result}"
+    );
+}
+
+#[test]
+fn run_check_errors_use_marrow_run_envelope_diagnostics() {
+    let (_dir, file) = pure_project();
+    std::fs::write(
+        &file,
+        "\
+module shelf::books
+
+pub fn shout(): int
+    return \"not an int\"
+",
+    )
+    .unwrap();
+
+    let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
+
+    let diagnostic = &result["diagnostics"][0];
+    assert_eq!(result["output"], "", "{result}");
+    assert!(result.get("value").is_none(), "{result}");
+    assert!(
+        diagnostic["kind"].is_string(),
+        "check diagnostic should use Marrow's diagnostic DTO: {result}"
+    );
+    assert_eq!(diagnostic["severity"], "error", "{result}");
+    assert!(
+        diagnostic["source_span"]["file"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("books.mw")),
+        "diagnostic should carry Marrow source-span metadata: {result}"
+    );
 }
 
 #[test]
@@ -1281,7 +1278,7 @@ fn test_mode_does_not_inspect_the_real_store() {
     let mut unreadable = std::fs::metadata(&store_file)
         .expect("fixture seeds a native store")
         .permissions();
-    unreadable.set_mode(0);
+    unreadable.set_mode(0o0);
     std::fs::set_permissions(&store_file, unreadable).expect("make native store unreadable");
 
     let result = run(&file, None, &[], RunMode::Test);
@@ -1342,6 +1339,29 @@ fn run_test_mode_uses_project_session_test_cases() {
         assert!(
             !source.contains(forbidden),
             "mw_run test mode should go through ProjectOpen::test() instead of {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn run_uses_marrow_owned_run_dtos_instead_of_local_renderers() {
+    let source = include_str!("../mcp.rs");
+    for forbidden in [
+        "fn run_facts_json",
+        "fn run_output_json",
+        "fn runtime_error_json",
+        "fn project_invoke_error_json",
+        "fn project_session_error_json",
+        "fn value_to_json",
+        "struct ValueBudget",
+        "entry_descriptor_error_message",
+        "mcp.run.entry",
+        "RUN_VALUE_NODE_CAP",
+        "RUN_VALUE_STRING_CAP",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "mw_run must consume Marrow-owned run DTOs instead of local renderer {forbidden}"
         );
     }
 }

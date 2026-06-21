@@ -22,10 +22,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use marrow_check::{
-    CheckedFunctionRef, CheckedProgram, EntryCostShapeFact, EntryFootprintFact, EntryStoreOpenMode,
-    WorkShapeClass, type_at,
-};
+use marrow_check::type_at;
 use marrow_json::resource_schema::{
     RESOURCE_SCHEMA_PROFILE_VERSION, resource_schema_for_name as marrow_resource_schema_for_name,
 };
@@ -35,12 +32,11 @@ use marrow_json::surface::{
     execute_project_surface_operation, execute_project_surface_operation_read_only,
 };
 use marrow_run::{
-    EntryArgument, EntryDescriptor, EntryDescriptorError, EntryIdentity, EntryInvocation, Host,
-    ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError,
-    ProjectSurfaceReadSession, ProjectSurfaceSession, RunOutput, RuntimeError, SessionEntry,
-    StoreStamp, Value,
+    CheckedEntryCall, EntryArgument, EntryDescriptor, EntryInvocation, Host, ProjectInvokeError,
+    ProjectOpen, ProjectSession, ProjectSessionError, ProjectSurfaceReadSession,
+    ProjectSurfaceSession, SessionEntry, StoreStamp,
 };
-use serde_json::{Map, Value as Json, json};
+use serde_json::{Value as Json, json};
 
 use crate::completion::completion;
 use crate::data_explorer::{
@@ -52,13 +48,6 @@ use crate::positions::Position;
 use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
 use crate::workspace::Workspace;
-
-/// A clamp on the saved bytes a `run`/test captures into its result. Output is a
-/// program's own `print`/`write` stream; a runaway loop must not balloon the
-/// reply, so it is truncated with a marker once it crosses this.
-const OUTPUT_CAP: usize = 8 * 1024;
-const RUN_VALUE_NODE_CAP: usize = 256;
-const RUN_VALUE_STRING_CAP: usize = 8 * 1024;
 
 pub const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
 pub const SAVED_DATA_MISSING_FACTS: &[&str] = &[
@@ -90,7 +79,6 @@ pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "stable production integrity DTOs",
 ];
 pub const RUN_MISSING_FACTS: &[&str] = &[
-    "stable public run-result DTOs",
     "runtime generation facts",
     "serve/attach execution boundaries",
 ];
@@ -766,7 +754,7 @@ fn data_disabled(contract: Json) -> Json {
 /// How a `mw_run` request runs `entry`: as a normal entry, or as the project's
 /// test suite.
 pub enum RunMode {
-    /// Evaluate `entry` over a fresh store and report its value and output.
+    /// Evaluate `entry` over a fresh store and report Marrow's run envelope.
     Run,
     /// Discover and run the project's tests, each over its own fresh store.
     Test,
@@ -779,8 +767,8 @@ pub enum RunMode {
 /// locked-down [`Host`]: a fixed clock and a captured log only — no filesystem,
 /// no environment, no maintenance. Typed `args` are decoded from the wire and
 /// admitted by Marrow's entry descriptor for the current checked program. The
-/// result carries the returned `value`, the captured `output`, and any check
-/// `diagnostics`.
+/// result carries Marrow's typed run envelope, including the returned value when
+/// present, captured `output`, and diagnostics.
 ///
 /// **Test mode** opens Marrow's test project session, then invokes every
 /// discovered test case under the same locked host. Marrow gives each test its
@@ -802,32 +790,10 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
         return run_args_error("mw_run test mode does not accept entry args");
     }
 
-    let (workspace, root) = match load_project_for_run(file) {
-        Ok(loaded) => loaded,
+    let root = match load_project_for_run(file) {
+        Ok(root) => root,
         Err(error) => return json!({ "diagnostics": [{ "message": error }], "output": "" }),
     };
-    let snapshot = workspace.latest().expect("recompute stored a snapshot");
-
-    // Surface check errors rather than running stale or broken code: a program
-    // with errors should not be executed, and the diagnostics are the answer.
-    let diagnostics: Vec<Json> = snapshot
-        .report
-        .diagnostics
-        .iter()
-        .filter(|d| d.severity == marrow_syntax::Severity::Error)
-        .map(|d| {
-            json!({
-                "code": d.code,
-                "message": d.message,
-                "file": d.file.display().to_string(),
-                "line": d.span.line,
-                "character": d.span.column,
-            })
-        })
-        .collect();
-    if !diagnostics.is_empty() {
-        return json!({ "diagnostics": diagnostics, "output": "" });
-    }
 
     match mode {
         RunMode::Run => run_entry(&root, entry, args),
@@ -845,18 +811,18 @@ fn run_args_error(message: &str) -> Json {
     })
 }
 
-/// Load `file`'s project for a run: the checked workspace and project root.
-fn load_project_for_run(file: &Path) -> Result<(Workspace, PathBuf), String> {
+/// Load `file`'s project far enough to find the root Marrow will run.
+fn load_project_for_run(file: &Path) -> Result<PathBuf, String> {
     let (workspace, _) = load_project(file, None)?;
     let project = workspace
         .project()
         .ok_or_else(|| "no project resolved for the file".to_string())?;
-    let root = project.root.clone();
-    Ok((workspace, root))
+    Ok(project.root.clone())
 }
 
 /// Evaluate one `entry` through Marrow's fresh-memory session under the locked
-/// host, returning `{ value?, output, diagnostics: [] }` or a fault envelope.
+/// host, returning Marrow's run envelope DTO plus entry run facts when entry
+/// admission succeeds.
 fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json {
     let mut open = ProjectOpen::run().with_fresh_memory_store();
     if let Some(entry) = entry {
@@ -864,140 +830,54 @@ fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json
     }
     let session = match ProjectSession::open(root, open) {
         Ok(session) => session,
-        Err(error) => return project_session_error_json(&error, String::new()),
+        Err(error) => {
+            return run_envelope_to_json(marrow_json::run_session_error_to_json(
+                &error,
+                String::new(),
+            ));
+        }
     };
     let Some(entry) = session.run_entry() else {
-        return project_session_error_json(&ProjectSessionError::NoEntry, String::new());
+        return run_envelope_to_json(marrow_json::run_session_error_to_json(
+            &ProjectSessionError::NoEntry,
+            String::new(),
+        ));
     };
     let descriptor = match EntryDescriptor::resolve(session.runtime_program(), entry) {
         Ok(descriptor) => descriptor,
-        Err(error) => return entry_descriptor_error_json(error, String::new()),
+        Err(_) => return entry_descriptor_error_json(&session, entry),
     };
-    let run_facts = run_facts_json(&session, &descriptor);
+    let run_facts = entry_run_facts_json(&session);
     let invocation = EntryInvocation {
         identity: descriptor.identity.clone(),
         arguments: args,
     };
     let host = locked_host();
     let mut output = String::new();
-    match session.invoke(SessionEntry::protocol(invocation, &host, &mut output)) {
-        Ok(result) => merge(
-            run_output_json(result, output),
-            json!({ "runFacts": run_facts }),
-        ),
-        Err(error) => merge(
-            project_invoke_error_json(&error, output),
-            json!({ "runFacts": run_facts }),
-        ),
-    }
+    let result = match session.invoke(SessionEntry::protocol(invocation, &host, &mut output)) {
+        Ok(result) => {
+            let output_for_error = output.clone();
+            match marrow_json::run_output_to_json(&result, output) {
+                Ok(envelope) => run_envelope_to_json(envelope),
+                Err(error) => run_envelope_to_json(marrow_json::run_error_to_json(
+                    session.runtime_program(),
+                    &ProjectInvokeError::Runtime(error),
+                    output_for_error,
+                )),
+            }
+        }
+        Err(error) => run_envelope_to_json(marrow_json::run_error_to_json(
+            session.runtime_program(),
+            &error,
+            output,
+        )),
+    };
+    with_run_facts(result, run_facts)
 }
 
-fn run_facts_json(session: &ProjectSession, descriptor: &EntryDescriptor) -> Json {
-    let program = session.program();
-    let entry = descriptor.identity.canonical_name.as_str();
-    let footprint = program
-        .entry_footprints()
-        .into_iter()
-        .find(|footprint| footprint.entry == entry);
-    let cost_shape = program
-        .entry_cost_shapes()
-        .into_iter()
-        .find(|shape| shape.entry == entry);
-    let store_open_mode = footprint
-        .as_ref()
-        .and_then(|footprint| function_ref_for_entry(program, footprint))
-        .and_then(|function_ref| program.entry_store_open_mode(function_ref));
-
-    json!({
-        "analysis": {
-            "sourceIdentity": session.source_analysis_identity().as_str(),
-        },
-        "entry": entry_identity_json(&descriptor.identity),
-        "storeOpenMode": store_open_mode.map(store_open_mode_name),
-        "footprint": footprint.as_ref().map(|footprint| entry_footprint_json(program, footprint)),
-        "costShape": cost_shape.as_ref().map(entry_cost_shape_json),
-    })
-}
-
-fn entry_identity_json(identity: &EntryIdentity) -> Json {
-    json!({
-        "requestedName": identity.requested_name,
-        "canonicalName": identity.canonical_name,
-        "entryTag": identity.entry_tag,
-        "acceptedCatalogEpoch": identity.accepted_catalog_epoch,
-        "sourceDigest": identity.source_digest,
-        "readOnlyContextDigest": identity.read_only_context_digest,
-    })
-}
-
-fn entry_footprint_json(program: &CheckedProgram, footprint: &EntryFootprintFact) -> Json {
-    json!({
-        "entry": footprint.entry,
-        "writeEffectsReachable": footprint.write_effects_reachable,
-        "storesRead": store_paths(program, &footprint.stores_read),
-        "storesWritten": store_paths(program, &footprint.stores_written),
-        "indexesTouched": store_index_paths(program, &footprint.indexes_touched),
-        "workShape": work_shape_name(footprint.work_shape),
-    })
-}
-
-fn entry_cost_shape_json(shape: &EntryCostShapeFact) -> Json {
-    json!({
-        "entry": shape.entry,
-        "workShape": work_shape_name(shape.work_shape),
-        "pointReads": shape.point_reads,
-        "rangeScans": shape.range_scans,
-        "writes": shape.writes,
-        "indexEntryTouches": shape.index_entry_touches,
-        "commitPoints": shape.commit_points,
-    })
-}
-
-fn function_ref_for_entry(
-    program: &CheckedProgram,
-    footprint: &EntryFootprintFact,
-) -> Option<CheckedFunctionRef> {
-    let fact = program
-        .facts
-        .functions()
-        .get(footprint.function.0 as usize)?;
-    Some(CheckedFunctionRef {
-        module: fact.module.0,
-        function: fact.source_index,
-        presence: fact.return_presence,
-    })
-}
-
-fn store_paths(program: &CheckedProgram, stores: &[marrow_check::StoreId]) -> Vec<String> {
-    stores
-        .iter()
-        .filter_map(|store| program.store_structural_path(*store))
-        .collect()
-}
-
-fn store_index_paths(
-    program: &CheckedProgram,
-    indexes: &[marrow_check::StoreIndexId],
-) -> Vec<String> {
-    indexes
-        .iter()
-        .filter_map(|index| program.store_index_structural_path(*index))
-        .collect()
-}
-
-fn work_shape_name(shape: WorkShapeClass) -> &'static str {
-    match shape {
-        WorkShapeClass::ComputeOnly => "compute_only",
-        WorkShapeClass::ReadOnly => "read_only",
-        WorkShapeClass::WritesSavedData => "writes_saved_data",
-    }
-}
-
-fn store_open_mode_name(mode: EntryStoreOpenMode) -> &'static str {
-    match mode {
-        EntryStoreOpenMode::ReadOnly => "read_only",
-        EntryStoreOpenMode::WriteCapable => "write_capable",
-    }
+fn entry_run_facts_json(session: &ProjectSession) -> Option<Json> {
+    marrow_json::entry_run_facts_to_json(session)
+        .map(|facts| serde_json::to_value(facts).expect("Marrow run facts DTO serializes"))
 }
 
 /// Discover and run the project's tests through Marrow's test project session,
@@ -1007,7 +887,10 @@ fn run_tests(root: &Path) -> Json {
         Ok(session) => session,
         Err(error) => {
             return merge(
-                project_session_error_json(&error, String::new()),
+                run_envelope_to_json(marrow_json::run_session_error_to_json(
+                    &error,
+                    String::new(),
+                )),
                 json!({ "tests": [] }),
             );
         }
@@ -1054,264 +937,29 @@ fn locked_host() -> Host {
         .with_log_sink(std::rc::Rc::new(RefCell::new(String::new())))
 }
 
-/// A successful run's JSON: its returned value (when it returned one) and the
-/// captured `print`/`write` output, truncated at [`OUTPUT_CAP`].
-fn run_output_json(result: RunOutput, output: String) -> Json {
-    let RunOutput { value } = result;
-    json!({
-        "value": value.map(value_to_json),
-        "output": truncate(output),
-        "diagnostics": [],
-    })
+fn run_envelope_to_json(envelope: marrow_json::RunEnvelopeJson) -> Json {
+    serde_json::to_value(envelope).expect("Marrow run envelope DTO serializes")
 }
 
-/// A runtime fault's JSON: its stable `run.*` code, message, and source position.
-/// A fault is reported in the result envelope (not as a transport error) so an
-/// agent reads the same shape whether the run succeeded or faulted.
-fn runtime_error_json(error: &RuntimeError, output: String) -> Json {
-    json!({
-        "diagnostics": [{
-            "code": error.code(),
-            "message": error.message,
-            "line": error.span.line,
-            "character": error.span.column,
-        }],
-        "output": truncate(output),
-    })
+fn with_run_facts(mut result: Json, facts: Option<Json>) -> Json {
+    if let (Some(object), Some(facts)) = (result.as_object_mut(), facts) {
+        object.insert("runFacts".to_string(), facts);
+    }
+    result
 }
 
-fn entry_descriptor_error_json(error: EntryDescriptorError, output: String) -> Json {
-    json!({
-        "diagnostics": [{
-            "code": "mcp.run.entry",
-            "message": entry_descriptor_error_message(error),
-        }],
-        "output": truncate(output),
-    })
-}
-
-fn entry_descriptor_error_message(error: EntryDescriptorError) -> &'static str {
-    match error {
-        EntryDescriptorError::Ambiguous => "entry selector is ambiguous",
-        EntryDescriptorError::Private => "entry selector resolves to a private function",
-        EntryDescriptorError::Missing => "entry selector does not resolve to a public function",
+fn entry_descriptor_error_json(session: &ProjectSession, entry: &str) -> Json {
+    match CheckedEntryCall::from_text_args(session.runtime_program(), entry, &[]) {
+        Err(error) => run_envelope_to_json(marrow_json::run_error_to_json(
+            session.runtime_program(),
+            &ProjectInvokeError::Runtime(error),
+            String::new(),
+        )),
+        Ok(_) => run_envelope_to_json(marrow_json::run_session_error_to_json(
+            &ProjectSessionError::NoEntry,
+            String::new(),
+        )),
     }
-}
-
-fn project_invoke_error_json(error: &ProjectInvokeError, output: String) -> Json {
-    match error {
-        ProjectInvokeError::Runtime(error) => runtime_error_json(error, output),
-        ProjectInvokeError::Session(error) => project_session_error_json(error, output),
-    }
-}
-
-fn project_session_error_json(error: &ProjectSessionError, output: String) -> Json {
-    if let ProjectSessionError::Check { report } = error {
-        let diagnostics: Vec<Json> = report
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == marrow_syntax::Severity::Error)
-            .map(|diagnostic| {
-                json!({
-                    "code": diagnostic.code,
-                    "message": diagnostic.message,
-                    "file": diagnostic.file.display().to_string(),
-                    "line": diagnostic.span.line,
-                    "character": diagnostic.span.column,
-                })
-            })
-            .collect();
-        return json!({
-            "diagnostics": diagnostics,
-            "output": truncate(output),
-        });
-    }
-    json!({
-        "diagnostics": [{
-            "code": error.code(),
-            "message": error.message(),
-        }],
-        "output": truncate(output),
-    })
-}
-
-/// Truncate captured output to the cap with a marker, so a runaway program cannot
-/// balloon the reply.
-fn truncate(mut output: String) -> String {
-    if output.len() > OUTPUT_CAP {
-        let mut end = OUTPUT_CAP;
-        while !output.is_char_boundary(end) {
-            end -= 1;
-        }
-        output.truncate(end);
-        output.push_str("\n…output truncated…");
-    }
-    output
-}
-
-/// A runtime [`Value`] as JSON for a run's returned value. Scalars keep their
-/// JSON forms; structural values stay inspectable while sharing a small node
-/// budget, so a presentation-only run cannot return an unbounded JSON tree.
-fn value_to_json(value: Value) -> Json {
-    let mut budget = ValueBudget::new(RUN_VALUE_NODE_CAP);
-    value_to_json_bounded(value, &mut budget)
-}
-
-struct ValueBudget {
-    remaining: usize,
-}
-
-impl ValueBudget {
-    fn new(limit: usize) -> Self {
-        Self { remaining: limit }
-    }
-
-    fn take(&mut self) -> bool {
-        if self.remaining == 0 {
-            return false;
-        }
-        self.remaining -= 1;
-        true
-    }
-}
-
-fn value_to_json_bounded(value: Value, budget: &mut ValueBudget) -> Json {
-    if !budget.take() {
-        return json!({ "truncated": true });
-    }
-    match value {
-        Value::Int(value) => json!(value),
-        Value::Bool(value) => json!(value),
-        Value::Str(value) => string_value_to_json(value),
-        Value::Decimal(value) => json!(value.to_text()),
-        Value::Date(days) => json!({ "date": days }),
-        Value::Instant(nanos) => json!({ "instant": nanos.to_string() }),
-        Value::Duration(nanos) => json!({ "duration": nanos.to_string() }),
-        Value::Enum(value) => {
-            json!({ "enum": { "id": value.enum_id().0, "member": value.member_id().0 } })
-        }
-        Value::Bytes(bytes) => json!({ "bytes": bytes.len() }),
-        Value::Sequence(items) => sequence_to_json(items, budget),
-        Value::LocalTree(entries) => json!({ "tree": entries.len() }),
-        Value::Resource(fields) => resource_to_json(fields, budget),
-        Value::Identity(identity) => identity_to_json(identity),
-    }
-}
-
-struct BoundedString {
-    value: String,
-    truncated: bool,
-    original_bytes: usize,
-}
-
-fn bounded_string(mut value: String) -> BoundedString {
-    let original_bytes = value.len();
-    let mut truncated = false;
-    if original_bytes > RUN_VALUE_STRING_CAP {
-        let mut end = RUN_VALUE_STRING_CAP;
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        value.truncate(end);
-        value.push('…');
-        truncated = true;
-    }
-    BoundedString {
-        value,
-        truncated,
-        original_bytes,
-    }
-}
-
-fn string_value_to_json(value: String) -> Json {
-    let value = bounded_string(value);
-    if !value.truncated {
-        return json!(value.value);
-    }
-    json!({
-        "string": value.value,
-        "truncated": true,
-        "originalBytes": value.original_bytes,
-    })
-}
-
-fn sequence_to_json(items: Vec<Value>, budget: &mut ValueBudget) -> Json {
-    let total = items.len();
-    let mut omitted = 0;
-    let mut rendered = Vec::new();
-
-    for item in items {
-        if budget.remaining == 0 {
-            omitted += 1;
-            continue;
-        }
-        rendered.push(value_to_json_bounded(item, budget));
-    }
-
-    if omitted == 0 {
-        Json::Array(rendered)
-    } else {
-        json!({
-            "sequence": rendered,
-            "truncated": true,
-            "omitted": omitted,
-            "total": total,
-        })
-    }
-}
-
-fn resource_to_json(fields: Vec<(String, Value)>, budget: &mut ValueBudget) -> Json {
-    let total = fields.len();
-    let mut omitted = 0;
-    let mut field_names_truncated = false;
-    let mut object = Map::new();
-    let mut entries = Vec::new();
-
-    for (name, value) in fields {
-        if budget.remaining == 0 {
-            omitted += 1;
-            continue;
-        }
-        let name = bounded_string(name);
-        field_names_truncated |= name.truncated;
-        let value = value_to_json_bounded(value, budget);
-        object.insert(name.value.clone(), value.clone());
-        let mut entry = json!({
-            "name": name.value,
-            "value": value,
-        });
-        if name.truncated {
-            entry["nameTruncated"] = json!(true);
-            entry["nameOriginalBytes"] = json!(name.original_bytes);
-        }
-        entries.push(entry);
-    }
-
-    if omitted == 0 && !field_names_truncated {
-        Json::Object(object)
-    } else {
-        json!({
-            "resource": entries,
-            "truncated": true,
-            "omitted": omitted,
-            "total": total,
-        })
-    }
-}
-
-fn identity_to_json(identity: marrow_run::IdentityValue) -> Json {
-    let root = bounded_string(identity.root().to_string());
-    let mut value = json!({
-        "identity": {
-            "root": root.value,
-            "keyCount": identity.keys().len(),
-        }
-    });
-    if root.truncated {
-        value["identity"]["rootTruncated"] = json!(true);
-        value["identity"]["rootOriginalBytes"] = json!(root.original_bytes);
-    }
-    value
 }
 
 /// Merge the fields of `extra` into `base` (a small object union for assembling a

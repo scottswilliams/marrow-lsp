@@ -393,7 +393,8 @@ fn mw_run_executes_over_a_sandboxed_store() {
     );
     let response = wait_for(&mut stdout, 2, Duration::from_secs(10));
     assert_eq!(
-        response["result"]["structuredContent"]["value"], 42,
+        response["result"]["structuredContent"]["result"]["value"],
+        json!({ "kind": "int", "value": 42 }),
         "answer() over a fresh store returns 42, got {response}"
     );
     assert_eq!(
