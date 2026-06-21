@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::Path};
 
 use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
+use marrow_check::tooling::source_module_path_definition_fact_at;
 use marrow_check::{BindingIndex, RenameAction, RenameSafety, SymbolRef};
 
 use super::{
@@ -54,8 +55,10 @@ pub fn definition(
     if saved_roots::root_syntax_at(snapshot, file, offset) {
         return None;
     }
-    let symbol = index.definition(file, offset)?;
-    symbol_location(&symbol, indices)
+    if let Some(symbol) = index.definition(file, offset) {
+        return symbol_location(&symbol, indices);
+    }
+    source_module_path_definition_location(snapshot, index, indices, file, offset)
 }
 
 /// Every reference to the symbol at byte `offset` in `file`, as LSP locations.
@@ -169,4 +172,20 @@ fn symbol_location(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<Locat
         None => line_index.range(symbol.span.start_byte, symbol.span.end_byte),
     };
     Some(Location { uri: url, range })
+}
+
+fn source_module_path_definition_location(
+    snapshot: &marrow_check::AnalysisSnapshot,
+    index: &BindingIndex,
+    indices: &impl FileIndex,
+    file: &Path,
+    offset: usize,
+) -> Option<Location> {
+    let fact = source_module_path_definition_fact_at(snapshot, index, file, offset)?;
+    let line_index = indices.index_for(&fact.source_file)?;
+    let uri = Url::from_file_path(&fact.source_file).ok()?;
+    Some(Location {
+        uri,
+        range: line_index.range(fact.span.start_byte, fact.span.end_byte),
+    })
 }

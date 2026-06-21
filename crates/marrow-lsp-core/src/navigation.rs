@@ -4,8 +4,8 @@
 //! [`BindingIndex`](marrow_check::BindingIndex) plus canonical catalog spans for
 //! saved-data roots, members, and indexes. Imported module aliases and checked
 //! qualified leaves come from BindingIndex facts where Marrow emits them;
-//! remaining module prefixes stay unavailable until Marrow exposes durable prefix
-//! identity.
+//! remaining project module prefixes come from Marrow source module-path facts
+//! after BindingIndex has declined the cursor.
 
 mod catalog_uses;
 mod indices;

@@ -1025,7 +1025,7 @@ pub fn run(): instant
 }
 
 #[test]
-fn module_path_prefix_definition_blocks_project_std_namespace_module_without_canonical_fact() {
+fn module_path_prefix_definition_for_project_std_namespace_module_jumps_to_module_declaration() {
     let custom_source = "\
 module std::custom
 
@@ -1040,13 +1040,19 @@ pub fn run(): int
 ";
     let (snapshot, paths, indices) =
         analyze_files(&[("std/custom.mw", custom_source), ("app.mw", app_source)]);
+    let custom_file = &paths[0];
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
+    let custom_index = indices.0.get(custom_file).unwrap();
 
     let custom = offset_of(app_source, "std::custom::tick") + "std::".len();
+    let location = definition(&snapshot, &index, &indices, app_file, custom + 1)
+        .expect("project std namespace module prefix resolves through Marrow facts");
+
+    assert_eq!(location.uri, Url::from_file_path(custom_file).unwrap());
     assert_eq!(
-        definition(&snapshot, &index, &indices, app_file, custom + 1),
-        None
+        range_text(custom_source, custom_index, location.range),
+        "module std::custom"
     );
 }
 
@@ -1316,7 +1322,7 @@ pub fn run(): int
 }
 
 #[test]
-fn module_path_prefix_definition_repeated_leaf_is_blocked_without_canonical_fact() {
+fn module_path_prefix_definition_for_repeated_leaf_jumps_to_module_declaration() {
     let foo_source = "\
 module foo::foo
 
@@ -1331,18 +1337,30 @@ pub fn run(): string
 ";
     let (snapshot, paths, indices) =
         analyze_files(&[("foo/foo.mw", foo_source), ("app.mw", app_source)]);
+    let foo_file = &paths[0];
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
+    let foo_index = indices.0.get(foo_file).unwrap();
 
     let second_prefix = offset_of(app_source, "foo::foo::title") + "foo::".len();
+    let location = definition(&snapshot, &index, &indices, app_file, second_prefix + 1)
+        .expect("repeated project module prefix resolves through Marrow facts");
+
+    assert_eq!(location.uri, Url::from_file_path(foo_file).unwrap());
     assert_eq!(
-        definition(&snapshot, &index, &indices, app_file, second_prefix + 1),
+        range_text(foo_source, foo_index, location.range),
+        "module foo::foo"
+    );
+
+    let first_prefix = offset_of(app_source, "foo::foo::title");
+    assert_eq!(
+        definition(&snapshot, &index, &indices, app_file, first_prefix + 1),
         None
     );
 }
 
 #[test]
-fn module_path_namespace_only_prefix_in_fully_qualified_call_returns_none() {
+fn module_path_project_prefix_definition_requires_exact_cursor_module() {
     let books_source = "\
 module shelf::books
 
@@ -1359,8 +1377,20 @@ pub fn run(): string
         ("shelf/books.mw", books_source),
         ("shelf/app.mw", app_source),
     ]);
+    let books_file = &paths[0];
     let app_file = &paths[1];
     let index = build_binding_index(&snapshot);
+    let books_index = indices.0.get(books_file).unwrap();
+
+    let books = offset_of(app_source, "return shelf::books::titleOf") + "return shelf::".len();
+    let location = definition(&snapshot, &index, &indices, app_file, books + 1)
+        .expect("project module prefix resolves through Marrow facts");
+
+    assert_eq!(location.uri, Url::from_file_path(books_file).unwrap());
+    assert_eq!(
+        range_text(books_source, books_index, location.range),
+        "module shelf::books"
+    );
 
     let namespace = offset_of(app_source, "return shelf::books::titleOf") + "return ".len();
     let location = definition(&snapshot, &index, &indices, app_file, namespace + 1);
@@ -1372,7 +1402,7 @@ pub fn run(): string
 }
 
 #[test]
-fn module_path_prefix_definition_blocks_keyword_like_segments_without_binding_fact() {
+fn module_path_prefix_definition_returns_none_for_keyword_like_unparsed_import_alias() {
     let bytes_source = "\
 module shelf::bytes
 
