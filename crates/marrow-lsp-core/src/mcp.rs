@@ -22,7 +22,10 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use marrow_check::{CheckedProgram, type_at};
+use marrow_check::{
+    CheckedFunctionRef, CheckedProgram, EntryCostShapeFact, EntryFootprintFact, EntryStoreOpenMode,
+    WorkShapeClass, type_at,
+};
 use marrow_json::resource_schema::{
     RESOURCE_SCHEMA_PROFILE_VERSION, resource_schema_for_name as marrow_resource_schema_for_name,
 };
@@ -32,12 +35,11 @@ use marrow_json::surface::{
     execute_project_surface_operation, execute_project_surface_operation_read_only,
 };
 use marrow_run::{
-    CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation, Host,
+    EntryArgument, EntryDescriptor, EntryDescriptorError, EntryIdentity, EntryInvocation, Host,
     ProjectInvokeError, ProjectOpen, ProjectSession, ProjectSessionError,
     ProjectSurfaceReadSession, ProjectSurfaceSession, RunOutput, RuntimeError, SessionEntry,
-    StoreStamp, Value, run_entry_with_host,
+    StoreStamp, Value,
 };
-use marrow_store::tree::TreeStore;
 use serde_json::{Map, Value as Json, json};
 
 use crate::completion::completion;
@@ -88,10 +90,9 @@ pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "stable production integrity DTOs",
 ];
 pub const RUN_MISSING_FACTS: &[&str] = &[
-    "transitive effect facts",
-    "durable-scope facts",
-    "transaction facts",
+    "stable public run-result DTOs",
     "runtime generation facts",
+    "serve/attach execution boundaries",
 ];
 
 fn production_contract(description: &str) -> Json {
@@ -781,10 +782,10 @@ pub enum RunMode {
 /// result carries the returned `value`, the captured `output`, and any check
 /// `diagnostics`.
 ///
-/// **Test mode** runs `check_tests` then, for every public zero-parameter test
-/// function, runs it over its *own* fresh [`TreeStore`] under the same locked
-/// host, reporting per-test pass/fail/error. `entry` is ignored; `args` are only
-/// accepted in run mode.
+/// **Test mode** opens Marrow's test project session, then invokes every
+/// discovered test case under the same locked host. Marrow gives each test its
+/// own fresh in-memory store. `entry` is ignored; `args` are only accepted in run
+/// mode.
 ///
 /// The project's real store is never opened in either mode, so an agent can run
 /// code with no risk to managed data.
@@ -801,7 +802,7 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
         return run_args_error("mw_run test mode does not accept entry args");
     }
 
-    let (workspace, root, config) = match load_project_for_run(file) {
+    let (workspace, root) = match load_project_for_run(file) {
         Ok(loaded) => loaded,
         Err(error) => return json!({ "diagnostics": [{ "message": error }], "output": "" }),
     };
@@ -830,7 +831,7 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
 
     match mode {
         RunMode::Run => run_entry(&root, entry, args),
-        RunMode::Test => run_tests(&root, &config, &snapshot.program),
+        RunMode::Test => run_tests(&root),
     }
 }
 
@@ -844,19 +845,14 @@ fn run_args_error(message: &str) -> Json {
     })
 }
 
-/// Load `file`'s project for a run: the checked workspace, the project root, and the
-/// parsed config. Distinct from [`load_project`] because test discovery and the
-/// snapshot both need the root and config, which the workspace holds.
-fn load_project_for_run(
-    file: &Path,
-) -> Result<(Workspace, PathBuf, marrow_project::ProjectConfig), String> {
+/// Load `file`'s project for a run: the checked workspace and project root.
+fn load_project_for_run(file: &Path) -> Result<(Workspace, PathBuf), String> {
     let (workspace, _) = load_project(file, None)?;
     let project = workspace
         .project()
         .ok_or_else(|| "no project resolved for the file".to_string())?;
     let root = project.root.clone();
-    let config = project.config.clone();
-    Ok((workspace, root, config))
+    Ok((workspace, root))
 }
 
 /// Evaluate one `entry` through Marrow's fresh-memory session under the locked
@@ -877,81 +873,165 @@ fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json
         Ok(descriptor) => descriptor,
         Err(error) => return entry_descriptor_error_json(error, String::new()),
     };
+    let run_facts = run_facts_json(&session, &descriptor);
     let invocation = EntryInvocation {
-        identity: descriptor.identity,
+        identity: descriptor.identity.clone(),
         arguments: args,
     };
     let host = locked_host();
     let mut output = String::new();
     match session.invoke(SessionEntry::protocol(invocation, &host, &mut output)) {
-        Ok(result) => run_output_json(result, output),
-        Err(error) => project_invoke_error_json(&error, output),
+        Ok(result) => merge(
+            run_output_json(result, output),
+            json!({ "runFacts": run_facts }),
+        ),
+        Err(error) => merge(
+            project_invoke_error_json(&error, output),
+            json!({ "runFacts": run_facts }),
+        ),
     }
 }
 
-/// Discover and run the project's tests, each over its own fresh [`TreeStore`] under
-/// the locked host, returning `{ output, diagnostics, tests: [...] }`. A test is a
-/// public zero-parameter function in a test file; a `std::assert::*` failure is a
-/// `failed` test, any other fault an `errored` test, mirroring `marrow test`.
-fn run_tests(
-    root: &Path,
-    config: &marrow_project::ProjectConfig,
+fn run_facts_json(session: &ProjectSession, descriptor: &EntryDescriptor) -> Json {
+    let program = session.program();
+    let entry = descriptor.identity.canonical_name.as_str();
+    let footprint = program
+        .entry_footprints()
+        .into_iter()
+        .find(|footprint| footprint.entry == entry);
+    let cost_shape = program
+        .entry_cost_shapes()
+        .into_iter()
+        .find(|shape| shape.entry == entry);
+    let store_open_mode = footprint
+        .as_ref()
+        .and_then(|footprint| function_ref_for_entry(program, footprint))
+        .and_then(|function_ref| program.entry_store_open_mode(function_ref));
+
+    json!({
+        "analysis": {
+            "sourceIdentity": session.source_analysis_identity().as_str(),
+        },
+        "entry": entry_identity_json(&descriptor.identity),
+        "storeOpenMode": store_open_mode.map(store_open_mode_name),
+        "footprint": footprint.as_ref().map(|footprint| entry_footprint_json(program, footprint)),
+        "costShape": cost_shape.as_ref().map(entry_cost_shape_json),
+    })
+}
+
+fn entry_identity_json(identity: &EntryIdentity) -> Json {
+    json!({
+        "requestedName": identity.requested_name,
+        "canonicalName": identity.canonical_name,
+        "entryTag": identity.entry_tag,
+        "acceptedCatalogEpoch": identity.accepted_catalog_epoch,
+        "sourceDigest": identity.source_digest,
+        "readOnlyContextDigest": identity.read_only_context_digest,
+    })
+}
+
+fn entry_footprint_json(program: &CheckedProgram, footprint: &EntryFootprintFact) -> Json {
+    json!({
+        "entry": footprint.entry,
+        "writeEffectsReachable": footprint.write_effects_reachable,
+        "storesRead": store_paths(program, &footprint.stores_read),
+        "storesWritten": store_paths(program, &footprint.stores_written),
+        "indexesTouched": store_index_paths(program, &footprint.indexes_touched),
+        "workShape": work_shape_name(footprint.work_shape),
+    })
+}
+
+fn entry_cost_shape_json(shape: &EntryCostShapeFact) -> Json {
+    json!({
+        "entry": shape.entry,
+        "workShape": work_shape_name(shape.work_shape),
+        "pointReads": shape.point_reads,
+        "rangeScans": shape.range_scans,
+        "writes": shape.writes,
+        "indexEntryTouches": shape.index_entry_touches,
+        "commitPoints": shape.commit_points,
+    })
+}
+
+fn function_ref_for_entry(
     program: &CheckedProgram,
-) -> Json {
-    let source_module_count = program.modules.len();
-    let (report, combined) = match marrow_check::check_tests_program(root, config, program.clone())
-    {
-        Ok(result) => result,
+    footprint: &EntryFootprintFact,
+) -> Option<CheckedFunctionRef> {
+    let fact = program
+        .facts
+        .functions()
+        .get(footprint.function.0 as usize)?;
+    Some(CheckedFunctionRef {
+        module: fact.module.0,
+        function: fact.source_index,
+        presence: fact.return_presence,
+    })
+}
+
+fn store_paths(program: &CheckedProgram, stores: &[marrow_check::StoreId]) -> Vec<String> {
+    stores
+        .iter()
+        .filter_map(|store| program.store_structural_path(*store))
+        .collect()
+}
+
+fn store_index_paths(
+    program: &CheckedProgram,
+    indexes: &[marrow_check::StoreIndexId],
+) -> Vec<String> {
+    indexes
+        .iter()
+        .filter_map(|index| program.store_index_structural_path(*index))
+        .collect()
+}
+
+fn work_shape_name(shape: WorkShapeClass) -> &'static str {
+    match shape {
+        WorkShapeClass::ComputeOnly => "compute_only",
+        WorkShapeClass::ReadOnly => "read_only",
+        WorkShapeClass::WritesSavedData => "writes_saved_data",
+    }
+}
+
+fn store_open_mode_name(mode: EntryStoreOpenMode) -> &'static str {
+    match mode {
+        EntryStoreOpenMode::ReadOnly => "read_only",
+        EntryStoreOpenMode::WriteCapable => "write_capable",
+    }
+}
+
+/// Discover and run the project's tests through Marrow's test project session,
+/// returning `{ output, diagnostics, tests: [...] }`.
+fn run_tests(root: &Path) -> Json {
+    let session = match ProjectSession::open(root, ProjectOpen::test()) {
+        Ok(session) => session,
         Err(error) => {
-            return json!({ "diagnostics": [{ "code": error.code, "message": error.message }], "output": "", "tests": [] });
+            return merge(
+                project_session_error_json(&error, String::new()),
+                json!({ "tests": [] }),
+            );
         }
     };
-    let check_errors: Vec<Json> = report
-        .diagnostics
-        .iter()
-        .filter(|d| d.severity == marrow_syntax::Severity::Error)
-        .map(|d| json!({ "code": d.code, "message": d.message }))
-        .collect();
-    if !check_errors.is_empty() {
-        return json!({ "diagnostics": check_errors, "output": "", "tests": [] });
-    }
-
-    let names: Vec<(String, PathBuf)> = combined.modules[source_module_count..]
-        .iter()
-        .flat_map(|module| {
-            module
-                .functions
-                .iter()
-                .filter(|f| f.public && f.params.is_empty())
-                .map(|f| {
-                    (
-                        format!("{}::{}", module.name, f.name),
-                        module.source_file.clone(),
-                    )
-                })
-        })
-        .collect();
-
-    let runtime = combined.runtime();
     let host = locked_host();
     let mut tests = Vec::new();
-    for (name, source_file) in &names {
-        // Every test gets its own brand-new in-memory store, so one test cannot see
-        // another's writes and none touches the project's real store.
-        let store = TreeStore::memory();
-        let entry = json!({ "name": name, "file": source_file.display().to_string() });
+    for case in session.test_cases() {
+        let entry = json!({ "name": case.name, "file": case.source_file.display().to_string() });
         let mut output = String::new();
-        let result = match CheckedEntryCall::new(&runtime, name, Vec::new())
-            .and_then(|call| run_entry_with_host(&store, &host, &call, &mut output))
-        {
+        let result = match session.invoke(SessionEntry::new(&case.name, &host, &mut output)) {
             Ok(_) => merge(entry, json!({ "outcome": "passed" })),
-            Err(error) if error.code() == marrow_run::RUN_ASSERT => merge(
+            Err(ProjectInvokeError::Runtime(error)) if error.code() == marrow_run::RUN_ASSERT => {
+                merge(
+                    entry,
+                    json!({ "outcome": "failed", "code": error.code(), "message": error.message, "line": error.span.line, "character": error.span.column }),
+                )
+            }
+            Err(ProjectInvokeError::Runtime(error)) => merge(
                 entry,
-                json!({ "outcome": "failed", "code": error.code(), "message": error.message, "line": error.span.line, "character": error.span.column }),
+                json!({ "outcome": "errored", "code": error.code(), "message": error.message, "line": error.span.line, "character": error.span.column }),
             ),
             Err(error) => merge(
                 entry,
-                json!({ "outcome": "errored", "code": error.code(), "message": error.message, "line": error.span.line, "character": error.span.column }),
+                json!({ "outcome": "errored", "code": error.code(), "message": error.message() }),
             ),
         };
         tests.push(result);
@@ -1026,6 +1106,26 @@ fn project_invoke_error_json(error: &ProjectInvokeError, output: String) -> Json
 }
 
 fn project_session_error_json(error: &ProjectSessionError, output: String) -> Json {
+    if let ProjectSessionError::Check { report } = error {
+        let diagnostics: Vec<Json> = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == marrow_syntax::Severity::Error)
+            .map(|diagnostic| {
+                json!({
+                    "code": diagnostic.code,
+                    "message": diagnostic.message,
+                    "file": diagnostic.file.display().to_string(),
+                    "line": diagnostic.span.line,
+                    "character": diagnostic.span.column,
+                })
+            })
+            .collect();
+        return json!({
+            "diagnostics": diagnostics,
+            "output": truncate(output),
+        });
+    }
     json!({
         "diagnostics": [{
             "code": error.code(),

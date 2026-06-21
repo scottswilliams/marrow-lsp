@@ -434,7 +434,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched and durable catalog state is not established. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor and accepts typed `args`. `mode: \"test\"` runs the project's test suite, each test over its own fresh store, and does not accept args.",
+            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor, accepts typed `args`, and returns Marrow entry footprint, cost-shape, analysis-identity, and store-open-mode facts. `mode: \"test\"` runs the project's test session, each test over its own fresh store, and does not accept args.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -443,7 +443,8 @@ pub fn tools() -> Json {
                 "sandbox": "fresh-in-memory-store",
                 "host": "locked-down",
                 "realStore": "never-touched",
-                "catalogState": "not-established",
+                "catalogState": "not-mutated",
+                "runFacts": "Marrow entry descriptor, analysis identity, footprint, cost shape, and store open mode",
                 "typedInputs": {
                     "args": "typed run protocol DTOs",
                     "entry": "current-session entry selector",
@@ -921,7 +922,11 @@ mod tests {
         assert_eq!(run["sandbox"], "fresh-in-memory-store");
         assert_eq!(run["host"], "locked-down");
         assert_eq!(run["realStore"], "never-touched");
-        assert_eq!(run["catalogState"], "not-established");
+        assert_eq!(run["catalogState"], "not-mutated");
+        assert_eq!(
+            run["runFacts"],
+            "Marrow entry descriptor, analysis identity, footprint, cost shape, and store open mode"
+        );
         assert_eq!(run["typedInputs"]["args"], "typed run protocol DTOs");
         assert_eq!(
             run["typedInputs"]["entry"],

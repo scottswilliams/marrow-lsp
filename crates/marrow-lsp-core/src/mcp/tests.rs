@@ -27,6 +27,21 @@ fn assert_contract(result: &Json, status: &str, description: &str, missing_facts
     assert_eq!(actual, missing_facts, "missing facts for {result}");
 }
 
+const RUN_EXPECTED_MISSING_FACTS: &[&str] = &[
+    "stable public run-result DTOs",
+    "runtime generation facts",
+    "serve/attach execution boundaries",
+];
+
+fn assert_run_contract(result: &Json) {
+    assert_contract(
+        result,
+        "presentation-only",
+        "sandboxed execution helper",
+        RUN_EXPECTED_MISSING_FACTS,
+    );
+}
+
 fn assert_production_contract(result: &Json, description: &str) {
     let contract = &result["contract"];
     assert_eq!(contract["status"], "ready", "contract status for {result}");
@@ -967,17 +982,7 @@ fn run_executes_a_pure_function_and_returns_its_value() {
         result["output"].as_str().unwrap().contains("loud"),
         "zero-argument run should execute: {result}"
     );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "sandboxed execution helper",
-        &[
-            "transitive effect facts",
-            "durable-scope facts",
-            "transaction facts",
-            "runtime generation facts",
-        ],
-    );
+    assert_run_contract(&result);
 }
 
 #[test]
@@ -994,17 +999,7 @@ fn run_rejects_malformed_typed_args_before_loading() {
         "malformed run args should fail before project loading: {result}"
     );
     assert_eq!(result["output"], "");
-    assert_contract(
-        &result,
-        "presentation-only",
-        "sandboxed execution helper",
-        &[
-            "transitive effect facts",
-            "durable-scope facts",
-            "transaction facts",
-            "runtime generation facts",
-        ],
-    );
+    assert_run_contract(&result);
 }
 
 #[test]
@@ -1031,17 +1026,7 @@ fn run_without_entry_reports_the_session_entry_error() {
         "missing entry should report the Marrow session error: {result}"
     );
     assert_eq!(result["output"], "");
-    assert_contract(
-        &result,
-        "presentation-only",
-        "sandboxed execution helper",
-        &[
-            "transitive effect facts",
-            "durable-scope facts",
-            "transaction facts",
-            "runtime generation facts",
-        ],
-    );
+    assert_run_contract(&result);
 }
 
 #[test]
@@ -1115,17 +1100,7 @@ fn run_entry_uses_canonical_descriptor_invocation() {
         result["output"].as_str().unwrap().contains("loud"),
         "a zero-argument explicit entry should still run, got {result}"
     );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "sandboxed execution helper",
-        &[
-            "transitive effect facts",
-            "durable-scope facts",
-            "transaction facts",
-            "runtime generation facts",
-        ],
-    );
+    assert_run_contract(&result);
 }
 
 #[test]
@@ -1232,6 +1207,94 @@ fn run_does_not_touch_the_real_store() {
 }
 
 #[test]
+fn run_reports_marrow_entry_footprint_and_open_mode_facts() {
+    let (_dir, file) = native_counter_project(1..=1);
+
+    let result = run(&file, Some("app::counter::show"), &[], RunMode::Run);
+
+    assert_eq!(result["diagnostics"], json!([]), "{result}");
+    let facts = &result["runFacts"];
+    assert!(
+        facts["analysis"]["sourceIdentity"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "runFacts should carry the Marrow analysis identity: {result}"
+    );
+    assert_eq!(facts["entry"]["requestedName"], "app::counter::show");
+    assert_eq!(facts["entry"]["canonicalName"], "app::counter::show");
+    assert!(
+        facts["entry"]["entryTag"]
+            .as_str()
+            .is_some_and(|tag| tag.starts_with("sha256:")),
+        "entry descriptor tag should come from Marrow: {result}"
+    );
+    assert!(
+        facts["entry"]["acceptedCatalogEpoch"].is_u64(),
+        "committed native fixture should carry accepted catalog identity: {result}"
+    );
+    assert!(
+        facts["entry"]["sourceDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "entry descriptor should carry the source digest: {result}"
+    );
+    assert!(
+        facts["entry"]["readOnlyContextDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "entry descriptor should carry the read-only context digest: {result}"
+    );
+    assert_eq!(facts["storeOpenMode"], "read_only", "{result}");
+    assert_eq!(facts["footprint"]["entry"], "app::counter::show");
+    assert_eq!(facts["footprint"]["workShape"], "read_only");
+    assert_eq!(facts["footprint"]["writeEffectsReachable"], false);
+    assert_eq!(
+        facts["footprint"]["storesRead"],
+        json!(["app::counter::^counter"])
+    );
+    assert_eq!(facts["footprint"]["storesWritten"], json!([]));
+    assert_eq!(facts["footprint"]["indexesTouched"], json!([]));
+    assert_eq!(facts["costShape"]["entry"], "app::counter::show");
+    assert_eq!(facts["costShape"]["workShape"], "read_only");
+    assert_eq!(facts["costShape"]["pointReads"], 1);
+    assert_eq!(facts["costShape"]["rangeScans"], 0);
+    assert_eq!(facts["costShape"]["writes"], 0);
+    assert_eq!(facts["costShape"]["indexEntryTouches"], 0);
+    assert_eq!(facts["costShape"]["commitPoints"], 0);
+    assert_run_contract(&result);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_mode_does_not_inspect_the_real_store() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, file) = native_counter_project(1..=1);
+    let tests_dir = dir.path().join("tests");
+    std::fs::create_dir_all(&tests_dir).unwrap();
+    std::fs::write(
+        tests_dir.join("smoke_test.mw"),
+        "pub fn smoke()\n    std::assert::isTrue(true)\n",
+    )
+    .unwrap();
+    let store_file = dir.path().join("data").join("marrow.redb");
+    let mut unreadable = std::fs::metadata(&store_file)
+        .expect("fixture seeds a native store")
+        .permissions();
+    unreadable.set_mode(0);
+    std::fs::set_permissions(&store_file, unreadable).expect("make native store unreadable");
+
+    let result = run(&file, None, &[], RunMode::Test);
+
+    assert_eq!(result["diagnostics"], json!([]), "{result}");
+    let tests = result["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 1, "{result}");
+    assert_eq!(tests[0]["name"], "tests::smoke_test::smoke");
+    assert_eq!(tests[0]["outcome"], "passed");
+    assert_run_contract(&result);
+}
+
+#[test]
 fn test_mode_runs_each_test_over_a_fresh_store() {
     let (dir, file) = pure_project();
     let tests_dir = dir.path().join("tests");
@@ -1265,17 +1328,22 @@ pub fn fails()
         fails["outcome"], "failed",
         "an assertion failure is a failed test: {fails}"
     );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "sandboxed execution helper",
-        &[
-            "transitive effect facts",
-            "durable-scope facts",
-            "transaction facts",
-            "runtime generation facts",
-        ],
-    );
+    assert_run_contract(&result);
+}
+
+#[test]
+fn run_test_mode_uses_project_session_test_cases() {
+    let source = include_str!("../mcp.rs");
+    for forbidden in [
+        "check_tests_program",
+        "CheckedEntryCall::new",
+        "run_entry_with_host",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "mw_run test mode should go through ProjectOpen::test() instead of {forbidden}"
+        );
+    }
 }
 
 #[test]
