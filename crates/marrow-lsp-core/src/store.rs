@@ -24,29 +24,8 @@ impl SavedDataSession {
     }
 
     pub fn matches_checked_program(&self, program: &CheckedProgram) -> bool {
-        let session_program = self.session.program();
-        session_program.source_digest() == program.source_digest()
-            && read_only_context_matches(session_program, program)
+        self.session.admits_checked_program(program)
     }
-}
-
-fn read_only_context_matches(session_program: &CheckedProgram, program: &CheckedProgram) -> bool {
-    if session_program.read_only_context_digest() == program.read_only_context_digest() {
-        return true;
-    }
-    if program.catalog.accepted_digest.is_some()
-        || session_program.catalog.accepted_digest.is_none()
-        || program.catalog.accepted_epoch != session_program.catalog.accepted_epoch
-        || program.catalog.accepted_entries != session_program.catalog.accepted_entries
-    {
-        return false;
-    }
-    // A lock-bound workspace snapshot carries the accepted entries and epoch but
-    // not the native store's accepted catalog digest. Fill only that missing
-    // digest, then use Marrow's own read-only context identity calculation.
-    let mut admitted = program.clone();
-    admitted.catalog.accepted_digest = session_program.catalog.accepted_digest.clone();
-    session_program.read_only_context_digest() == admitted.read_only_context_digest()
 }
 
 pub fn open_saved_data_session(project: &Project) -> Result<Option<SavedDataSession>, String> {
@@ -134,5 +113,27 @@ mod tests {
                 .is_empty(),
             "no current project means no saved-data watch target"
         );
+    }
+
+    #[test]
+    fn saved_data_session_admission_has_no_local_digest_stitching() {
+        let source = include_str!("store.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+        let forbidden = [
+            "read_only_context_matches",
+            "source_digest() ==",
+            "read_only_context_digest() ==",
+            ".catalog.accepted_digest",
+        ];
+
+        for fragment in forbidden {
+            assert!(
+                !production_source.contains(fragment),
+                "SavedDataSession must delegate admission to marrow-run instead of keeping `{fragment}` in store.rs"
+            );
+        }
     }
 }
