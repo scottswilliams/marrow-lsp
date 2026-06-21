@@ -18,25 +18,6 @@ fn next_significant_kind(tokens: &[Token], index: usize) -> Option<TokenKind> {
         .map(|token| token.kind)
 }
 
-pub(super) fn qualified_name_at_with_position(
-    source: &str,
-    offset: usize,
-) -> Option<(Vec<String>, usize)> {
-    let tokens = lex_source(source).tokens;
-    let (start, end, index) = qualified_name_token_bounds(&tokens, offset)?;
-    let mut segments = Vec::new();
-    let mut current_segment = None;
-    for (token_index, token) in tokens[start..=end].iter().enumerate() {
-        if token.kind == TokenKind::Identifier {
-            if start + token_index == index {
-                current_segment = Some(segments.len());
-            }
-            segments.push(token.text(source).to_string());
-        }
-    }
-    (!segments.is_empty()).then_some((segments, current_segment?))
-}
-
 pub(super) fn module_path_at_with_position(
     source: &str,
     offset: usize,
@@ -93,29 +74,6 @@ pub(super) fn path_segment_index_at(tokens: &[Token], offset: usize) -> Option<u
             && token.span.start_byte <= offset
             && offset <= token.span.end_byte
     })
-}
-
-fn qualified_name_token_bounds(tokens: &[Token], offset: usize) -> Option<(usize, usize, usize)> {
-    let index = tokens.iter().position(|token| {
-        token.kind == TokenKind::Identifier
-            && token.span.start_byte <= offset
-            && offset <= token.span.end_byte
-    })?;
-    let mut start = index;
-    while start >= 2
-        && tokens[start - 1].kind == TokenKind::DoubleColon
-        && tokens[start - 2].kind == TokenKind::Identifier
-    {
-        start -= 2;
-    }
-    let mut end = index;
-    while end + 2 < tokens.len()
-        && tokens[end + 1].kind == TokenKind::DoubleColon
-        && tokens[end + 2].kind == TokenKind::Identifier
-    {
-        end += 2;
-    }
-    Some((start, end, index))
 }
 
 pub(super) fn std_operation_call_for_segment(

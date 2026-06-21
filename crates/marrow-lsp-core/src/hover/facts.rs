@@ -1,22 +1,20 @@
 use std::path::Path;
 
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CatalogEntryKind, CheckedFacts, MarrowType, SymbolKind,
-    SymbolRef, UseSiteKind,
+    AnalysisSnapshot, BindingIndex, CheckedFacts, MarrowType, SymbolKind,
     tooling::{
         self, CallableSignature, CallableSignatureKind, SavedPlaceHoverFact,
-        SourceCallableHoverFact, StoreRootHoverFact, saved_place_hover_fact_at,
-        source_callable_hover_fact_at, source_symbol_docs_at, store_root_hover_fact_at,
+        SourceCallableHoverFact, SourceSchemaHoverFact, StoreRootHoverFact,
+        saved_place_hover_fact_at, source_callable_hover_fact_at, source_schema_hover_fact_at,
+        source_symbol_docs_at, store_root_hover_fact_at,
     },
     type_at,
 };
-use marrow_schema::{EnumSchema, ResourceSchema};
 use marrow_syntax::{Keyword, Token, TokenKind, lex_source};
 
 use crate::callables::render_callable_signature;
 use crate::language_facts;
 
-use super::source;
 use super::tokens;
 
 pub(super) enum HoverFact<'a> {
@@ -26,16 +24,7 @@ pub(super) enum HoverFact<'a> {
         checked_facts: &'a CheckedFacts,
     },
     StoreRoot(StoreRootHoverFact),
-    Resource {
-        schema: &'a ResourceSchema,
-    },
-    Enum {
-        schema: &'a EnumSchema,
-    },
-    EnumMember {
-        schema: &'a EnumSchema,
-        ordinal: usize,
-    },
+    SourceSchema(SourceSchemaHoverFact),
     SavedPlace(SavedPlaceHoverFact),
     Type {
         ty: MarrowType,
@@ -67,11 +56,8 @@ pub(super) fn collect<'a>(
     if let Some(fact) = store_root_hover_fact_at(snapshot, file, offset) {
         return Some(HoverFact::StoreRoot(fact));
     }
-    if let Some(fact) = enum_annotation_fact(snapshot, file, offset) {
-        return Some(fact);
-    }
-    if let Some(fact) = rich_symbol_fact(snapshot, index, file, offset) {
-        return Some(fact);
+    if let Some(fact) = source_schema_hover_fact_at(snapshot, index, file, offset) {
+        return Some(HoverFact::SourceSchema(fact));
     }
     if let Some(fact) = saved_place_hover_fact_at(snapshot, index, file, offset) {
         return Some(HoverFact::SavedPlace(fact));
@@ -113,52 +99,6 @@ fn blocked_module_prefix_hover(
         return false;
     }
     true
-}
-
-fn enum_annotation_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let site = snapshot
-        .use_sites()
-        .iter()
-        .filter(|site| site.kind == UseSiteKind::Enum)
-        .filter(|site| site.file == file && source::span_covers(site.span, offset))
-        .min_by_key(|site| site.span.end_byte.saturating_sub(site.span.start_byte))?;
-    let declaration = snapshot.catalog_declaration(&site.catalog_id)?;
-    if declaration.kind != CatalogEntryKind::Enum {
-        return None;
-    }
-    let schema = enum_schema_in_file(snapshot, &declaration.file, &declaration.name)?;
-    Some(HoverFact::Enum { schema })
-}
-
-fn rich_symbol_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let symbol = index.definition(file, offset)?;
-    if !is_rich_symbol_hover_target(snapshot, index, file, offset, &symbol) {
-        return None;
-    }
-    match symbol.kind {
-        SymbolKind::Resource => {
-            let schema = resource_schema_for_symbol(snapshot, &symbol)?;
-            Some(HoverFact::Resource { schema })
-        }
-        SymbolKind::Enum => {
-            let schema = enum_schema_for_symbol(snapshot, &symbol)?;
-            Some(HoverFact::Enum { schema })
-        }
-        SymbolKind::EnumMember => {
-            let (schema, ordinal) = enum_member_schema_for_symbol(snapshot, &symbol)?;
-            Some(HoverFact::EnumMember { schema, ordinal })
-        }
-        _ => None,
-    }
 }
 
 fn default_library_call_text(
@@ -286,102 +226,4 @@ fn operator_spelling(kind: TokenKind, text: &str) -> Option<&str> {
         | TokenKind::Percent => Some(text),
         _ => None,
     }
-}
-
-fn is_rich_symbol_hover_target(
-    snapshot: &AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    match symbol.kind {
-        SymbolKind::Resource => {
-            source::is_named_symbol_reference(snapshot, index, file, offset, symbol)
-                || source::is_symbol_declaration_name(snapshot, file, offset, symbol)
-        }
-        SymbolKind::Enum => {
-            !blocked_enum_type_symbol_hover(snapshot, file, offset, symbol)
-                && (source::is_named_symbol_reference(snapshot, index, file, offset, symbol)
-                    || source::is_symbol_declaration_name(snapshot, file, offset, symbol))
-        }
-        SymbolKind::EnumMember => {
-            source::is_named_symbol_reference(snapshot, index, file, offset, symbol)
-                || source::is_symbol_declaration_name(snapshot, file, offset, symbol)
-        }
-        _ => false,
-    }
-}
-
-fn blocked_enum_type_symbol_hover(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    symbol: &SymbolRef,
-) -> bool {
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return false;
-    };
-    if !crate::type_context::type_annotation_at(&analyzed.parsed.file, offset) {
-        return false;
-    }
-    let Some((segments, _)) = tokens::qualified_name_at_with_position(&analyzed.source, offset)
-    else {
-        return false;
-    };
-    segments.len() > 1 || symbol.file != file
-}
-
-fn resource_schema_for_symbol<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    symbol: &SymbolRef,
-) -> Option<&'a ResourceSchema> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let resource = source::resource_at(&analyzed.parsed.file, symbol.span)?;
-    snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == symbol.file)?
-        .resources
-        .iter()
-        .find(|schema| schema.name == resource.name)
-}
-
-fn enum_schema_for_symbol<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    symbol: &SymbolRef,
-) -> Option<&'a EnumSchema> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let enum_decl = source::enum_at(&analyzed.parsed.file, symbol.span)?;
-    enum_schema_in_file(snapshot, &symbol.file, &enum_decl.name)
-}
-
-fn enum_member_schema_for_symbol<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    symbol: &SymbolRef,
-) -> Option<(&'a EnumSchema, usize)> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == symbol.file)?;
-    let (enum_name, path) = source::enum_member_path_at(&analyzed.parsed.file, symbol.span)?;
-    let schema = enum_schema_in_file(snapshot, &symbol.file, &enum_name)?;
-    let path = path.iter().map(String::as_str).collect::<Vec<_>>();
-    let marrow_schema::MemberPathResolution::Found(ordinal) = schema.walk_member_path(&path) else {
-        return None;
-    };
-    Some((schema, ordinal))
-}
-
-fn enum_schema_in_file<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    name: &str,
-) -> Option<&'a EnumSchema> {
-    snapshot
-        .program
-        .modules
-        .iter()
-        .find(|module| module.source_file == file)?
-        .enums
-        .iter()
-        .find(|enum_schema| enum_schema.name == name)
 }

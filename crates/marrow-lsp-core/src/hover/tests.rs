@@ -1291,7 +1291,7 @@ fn hover_has_no_local_intrinsic_callable_model() {
 
 #[test]
 fn hover_does_not_own_source_symbol_doc_traversal() {
-    let source = include_str!("source.rs");
+    let source = hover_active_code();
     for obsolete in [
         "fn declaration_docs",
         "fn enum_member_docs",
@@ -1306,7 +1306,7 @@ fn hover_does_not_own_source_symbol_doc_traversal() {
 
 #[test]
 fn hover_does_not_own_source_callable_target_traversal() {
-    let source_helpers = include_str!("source.rs");
+    let source_helpers = hover_active_code();
     for obsolete in [
         "fn is_function_hover_target",
         "fn parsed_function_at",
@@ -1338,7 +1338,7 @@ fn hover_does_not_own_source_callable_target_traversal() {
 
 #[test]
 fn hover_does_not_own_saved_place_target_traversal() {
-    let source = include_str!("source.rs");
+    let source = hover_active_code();
     for obsolete in [
         "is_resource_member_hover_target",
         "is_saved_member_declaration_name",
@@ -1356,13 +1356,51 @@ fn hover_does_not_own_saved_place_target_traversal() {
 
 #[test]
 fn hover_does_not_own_saved_root_target_traversal() {
-    let source = include_str!("source.rs");
+    let source = hover_active_code();
     for obsolete in ["fn store_root_at", "fn saved_root_span"] {
         assert!(
             !source.contains(obsolete),
             "saved root hover should consume Marrow store-root hover facts, not own `{obsolete}`"
         );
     }
+}
+
+#[test]
+fn hover_does_not_own_resource_enum_schema_traversal() {
+    let hover_module = include_str!("../hover.rs");
+    assert!(
+        !hover_module.contains("mod source"),
+        "resource and enum hover should consume Marrow source schema hover facts, not a local source helper module"
+    );
+
+    let source = hover_active_code();
+    for obsolete in [
+        "fn rich_symbol_fact",
+        "fn is_rich_symbol_hover_target",
+        "fn blocked_enum_type_symbol_hover",
+        "fn resource_schema_for_symbol",
+        "fn enum_schema_for_symbol",
+        "fn enum_member_schema_for_symbol",
+        "fn enum_annotation_fact",
+        "enum_schema_in_file",
+        "enum_member_path_at",
+        "is_named_symbol_reference",
+        "is_symbol_declaration_name",
+    ] {
+        assert!(
+            !source.contains(obsolete),
+            "resource and enum hover should consume Marrow source schema hover facts, not own `{obsolete}`"
+        );
+    }
+}
+
+fn hover_active_code() -> String {
+    [
+        include_str!("../hover.rs"),
+        include_str!("facts.rs"),
+        include_str!("render.rs"),
+    ]
+    .join("\n")
 }
 
 #[test]

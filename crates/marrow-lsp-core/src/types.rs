@@ -6,7 +6,6 @@
 //! feature.
 
 use marrow_check::MarrowType;
-use marrow_schema::{Node, Type};
 
 /// The canonical `.mw` spelling of a checker type. Mirrors `marrow_schema::Type`'s
 /// `Display` for the storable types and names the checker-only forms (`Error`, a
@@ -24,14 +23,6 @@ pub(crate) fn render_type(ty: &MarrowType) -> String {
         MarrowType::LocalTree { value, .. } => format!("tree[{}]", render_type(value)),
         MarrowType::Invalid => "unknown".to_string(),
         MarrowType::Unknown => "unknown".to_string(),
-    }
-}
-
-pub(crate) fn render_schema_leaf_type(node: &Node, ty: &Type) -> String {
-    if node.is_error_code() {
-        "ErrorCode".to_string()
-    } else {
-        ty.to_string()
     }
 }
 

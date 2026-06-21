@@ -1,13 +1,16 @@
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::tooling::{
     SavedPlaceHoverFact, SavedPlaceHoverKeyParam, SourceCallableFunctionFact,
-    SourceCallableHoverFact, SourceCallableParamFact, StoreRootHoverFact, StoreRootHoverMember,
+    SourceCallableHoverFact, SourceCallableParamFact, SourceEnumHoverFact,
+    SourceEnumMemberHoverFact, SourceEnumMemberStatus, SourceResourceHoverFact,
+    SourceResourceHoverMember, SourceResourceHoverMemberKind, SourceResourceHoverPathSegment,
+    SourceSchemaHoverFact, SourceSchemaHoverKeyParam, StoreRootHoverFact, StoreRootHoverMember,
     StoreRootHoverPathSegment,
 };
 use marrow_check::{CheckedFacts, DirectEffectFacts, HostEffect, MarrowType, SavedPlaceEffect};
-use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, stdlib};
+use marrow_schema::stdlib;
 
-use crate::types::{render_schema_leaf_type, render_type};
+use crate::types::render_type;
 
 use super::facts::HoverFact;
 
@@ -19,9 +22,7 @@ pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
             checked_facts,
         } => source_callable_hover(&fact, checked_facts),
         HoverFact::StoreRoot(fact) => store_hover(&fact),
-        HoverFact::Resource { schema } => resource_hover(schema),
-        HoverFact::Enum { schema } => enum_hover(schema),
-        HoverFact::EnumMember { schema, ordinal } => enum_member_hover(schema, ordinal),
+        HoverFact::SourceSchema(fact) => source_schema_hover(&fact),
         HoverFact::SavedPlace(fact) => saved_place_markdown(&fact),
         HoverFact::Type { ty, docs } => type_hover(&ty, docs.as_deref()),
     })
@@ -103,13 +104,6 @@ fn default_library_hover_markdown(fact: &str) -> String {
     value
 }
 
-fn resource_hover(schema: &ResourceSchema) -> String {
-    let mut value = marrow_code_block(&resource_signature(schema));
-    append_docs(&mut value, join_docs(&schema.docs));
-    append_section(&mut value, resource_member_summary(schema, &[]));
-    value
-}
-
 fn store_hover(fact: &StoreRootHoverFact) -> String {
     let mut value = marrow_code_block(&store_signature(fact));
     append_docs(&mut value, join_docs(&fact.store_docs));
@@ -118,37 +112,42 @@ fn store_hover(fact: &StoreRootHoverFact) -> String {
     value
 }
 
-fn enum_hover(schema: &EnumSchema) -> String {
-    let mut value = marrow_code_block(&format!("enum {}", schema.name));
-    append_docs(&mut value, join_docs(&schema.docs));
-    append_section(&mut value, enum_member_summary(schema));
-    value
-}
-
-fn enum_member_hover(schema: &EnumSchema, ordinal: usize) -> String {
-    let path = schema.member_path(ordinal);
-    let mut value = marrow_code_block(&format!("{}::{}", schema.name, path.join("::")));
-    if let Some(member) = schema.members.get(ordinal) {
-        append_docs(&mut value, join_docs(&member.docs));
-    }
-    let status = if schema.is_selectable_leaf(ordinal) {
-        "selectable"
-    } else if schema.is_category(ordinal) {
-        "category"
-    } else {
-        "group"
-    };
-    value.push_str("\n\n");
-    value.push_str("**Facts**\n");
-    value.push_str(&format!("- enum {}\n", schema.name));
-    value.push_str(&format!("- {status}"));
-    value
-}
-
 fn saved_place_markdown(fact: &SavedPlaceHoverFact) -> String {
     let (signature, docs) = saved_place_signature_and_docs(fact);
     let mut value = marrow_code_block(&signature);
     append_docs(&mut value, join_docs(docs));
+    value
+}
+
+fn source_schema_hover(fact: &SourceSchemaHoverFact) -> String {
+    match fact {
+        SourceSchemaHoverFact::Resource(resource) => resource_hover(resource),
+        SourceSchemaHoverFact::Enum(enum_fact) => enum_hover(enum_fact),
+        SourceSchemaHoverFact::EnumMember(member) => enum_member_hover(member),
+    }
+}
+
+fn resource_hover(fact: &SourceResourceHoverFact) -> String {
+    let mut value = marrow_code_block(&resource_signature(&fact.name));
+    append_docs(&mut value, join_docs(&fact.docs));
+    append_section(&mut value, resource_member_summary(&fact.members));
+    value
+}
+
+fn enum_hover(fact: &SourceEnumHoverFact) -> String {
+    let mut value = marrow_code_block(&format!("enum {}", fact.name));
+    append_docs(&mut value, join_docs(&fact.docs));
+    append_section(&mut value, enum_member_summary(fact));
+    value
+}
+
+fn enum_member_hover(fact: &SourceEnumMemberHoverFact) -> String {
+    let mut value = marrow_code_block(&format!("{}::{}", fact.enum_name, fact.path.join("::")));
+    append_docs(&mut value, join_docs(&fact.docs));
+    value.push_str("\n\n");
+    value.push_str("**Facts**\n");
+    value.push_str(&format!("- enum {}\n", fact.enum_name));
+    value.push_str(&format!("- {}", enum_member_status(fact.status)));
     value
 }
 
@@ -314,8 +313,8 @@ fn parameter_docs(params: &[SourceCallableParamFact]) -> Option<String> {
     }
 }
 
-fn resource_signature(schema: &ResourceSchema) -> String {
-    format!("resource {}", schema.name)
+fn resource_signature(name: &str) -> String {
+    format!("resource {name}")
 }
 
 fn store_signature(fact: &StoreRootHoverFact) -> String {
@@ -348,58 +347,35 @@ fn store_member_summary(fact: &StoreRootHoverFact) -> Option<String> {
     )
 }
 
-fn resource_member_summary(schema: &ResourceSchema, indexes: &[IndexSchema]) -> Option<String> {
-    let mut lines = Vec::new();
-    for member in &schema.members {
-        resource_member_lines(member, "", &mut lines);
-    }
-    lines.extend(indexes.iter().map(|index| {
-        let unique = if index.unique { " unique" } else { "" };
-        format!("index {}({}){unique}", index.name, index.args.join(", "))
-    }));
-    bounded_summary("Members", lines)
+fn resource_member_summary(members: &[SourceResourceHoverMember]) -> Option<String> {
+    bounded_summary(
+        "Members",
+        members.iter().map(resource_member_line).collect(),
+    )
 }
 
-fn resource_member_lines(member: &marrow_schema::Node, prefix: &str, lines: &mut Vec<String>) {
-    let name = resource_member_path_segment(member);
-    let path = if prefix.is_empty() {
-        name
-    } else {
-        format!("{prefix}.{name}")
-    };
+fn resource_member_line(member: &SourceResourceHoverMember) -> String {
+    let path = source_resource_member_path(&member.path);
     match &member.kind {
-        NodeKind::Slot { ty, required, .. } => {
+        SourceResourceHoverMemberKind::Field { required, ty } => {
             let required = if *required { "required " } else { "" };
-            lines.push(format!(
-                "{required}{path}: {}",
-                render_schema_leaf_type(member, ty)
-            ));
+            format!("{required}{path}: {ty}")
         }
-        NodeKind::Group => {
-            lines.push(path.clone());
-            for child in &member.members {
-                resource_member_lines(child, &path, lines);
-            }
-        }
+        SourceResourceHoverMemberKind::Layer => path,
     }
 }
 
-fn resource_member_path_segment(member: &marrow_schema::Node) -> String {
-    format!("{}{}", member.name, schema_key_params(&member.key_params))
-}
-
-fn schema_key_params(keys: &[marrow_schema::KeyDef]) -> String {
-    if keys.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "({})",
-            keys.iter()
-                .map(|key| format!("{}: {}", key.name, key.ty))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
+fn source_resource_member_path(path: &[SourceResourceHoverPathSegment]) -> String {
+    path.iter()
+        .map(|segment| {
+            format!(
+                "{}{}",
+                segment.name,
+                source_hover_key_params(&segment.key_params)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn store_member_line(member: &StoreRootHoverMember) -> String {
@@ -423,25 +399,28 @@ fn store_member_path(path: &[StoreRootHoverPathSegment]) -> String {
         .join(".")
 }
 
-fn enum_member_summary(schema: &EnumSchema) -> Option<String> {
+fn enum_member_summary(fact: &SourceEnumHoverFact) -> Option<String> {
     bounded_summary(
         "Members",
-        schema
-            .members
+        fact.members
             .iter()
-            .enumerate()
-            .map(|(ordinal, _)| {
-                let status = if schema.is_selectable_leaf(ordinal) {
-                    "selectable"
-                } else if schema.is_category(ordinal) {
-                    "category"
-                } else {
-                    "group"
-                };
-                format!("{} {status}", schema.member_path(ordinal).join("::"))
+            .map(|member| {
+                format!(
+                    "{} {}",
+                    member.path.join("::"),
+                    enum_member_status(member.status)
+                )
             })
             .collect(),
     )
+}
+
+fn enum_member_status(status: SourceEnumMemberStatus) -> &'static str {
+    match status {
+        SourceEnumMemberStatus::Selectable => "selectable",
+        SourceEnumMemberStatus::Category => "category",
+        SourceEnumMemberStatus::Group => "group",
+    }
 }
 
 fn bounded_summary(label: &str, lines: Vec<String>) -> Option<String> {
@@ -501,6 +480,20 @@ fn saved_place_signature_and_docs(fact: &SavedPlaceHoverFact) -> (String, &[Stri
 }
 
 fn hover_key_params(keys: &[SavedPlaceHoverKeyParam]) -> String {
+    if keys.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "({})",
+            keys.iter()
+                .map(|key| format!("{}: {}", key.name, key.ty))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn source_hover_key_params(keys: &[SourceSchemaHoverKeyParam]) -> String {
     if keys.is_empty() {
         String::new()
     } else {

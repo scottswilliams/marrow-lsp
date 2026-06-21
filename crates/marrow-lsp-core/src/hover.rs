@@ -14,7 +14,6 @@ use marrow_check::{AnalysisSnapshot, BindingIndex, build_binding_index};
 
 mod facts;
 mod render;
-mod source;
 mod tokens;
 
 /// The hover for byte `offset` in `file`, or `None` when no known symbol or type
