@@ -434,7 +434,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_run",
-            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor, accepts typed `args`, and returns Marrow's run result/error DTO plus entry footprint, cost-shape, analysis-identity, and store-open-mode facts. `mode: \"test\"` runs the project's test session, each test over its own fresh store, and does not accept args.",
+            "description": "Presentation-only execution helper: execute Marrow to confirm behavior, always sandboxed through Marrow's fresh in-memory project session under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor, accepts typed `args`, and returns Marrow's run result/error DTO plus versioned analysis generation, entry descriptor, footprint, cost-shape, and store-open-mode facts. `mode: \"test\"` runs the project's test session, each test over its own fresh store, and does not accept args.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -445,7 +445,7 @@ pub fn tools() -> Json {
                 "realStore": "never-touched",
                 "catalogState": "not-mutated",
                 "runResult": "Marrow run result/error DTOs",
-                "runFacts": "Marrow entry descriptor, analysis identity, footprint, cost shape, and store open mode",
+                "runFacts": "Marrow versioned analysis generation, entry descriptor, footprint, cost shape, and store open mode",
                 "typedInputs": {
                     "args": "typed run protocol DTOs",
                     "entry": "current-session entry selector",
@@ -927,7 +927,13 @@ mod tests {
         assert_eq!(run["runResult"], "Marrow run result/error DTOs");
         assert_eq!(
             run["runFacts"],
-            "Marrow entry descriptor, analysis identity, footprint, cost shape, and store open mode"
+            "Marrow versioned analysis generation, entry descriptor, footprint, cost shape, and store open mode"
+        );
+        assert!(
+            tool(tools, "mw_run")["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("versioned analysis generation")),
+            "mw_run description should name versioned analysis generation"
         );
         assert_eq!(run["typedInputs"]["args"], "typed run protocol DTOs");
         assert_eq!(

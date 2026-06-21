@@ -30,10 +30,7 @@ fn assert_contract(result: &Json, status: &str, description: &str, missing_facts
     assert_eq!(actual, missing_facts, "missing facts for {result}");
 }
 
-const RUN_EXPECTED_MISSING_FACTS: &[&str] = &[
-    "runtime generation facts",
-    "serve/attach execution boundaries",
-];
+const RUN_EXPECTED_MISSING_FACTS: &[&str] = &["serve/attach execution boundaries"];
 
 fn assert_run_contract(result: &Json) {
     assert_contract(
@@ -1216,11 +1213,52 @@ fn run_reports_marrow_entry_footprint_and_open_mode_facts() {
 
     assert_eq!(result["diagnostics"], json!([]), "{result}");
     let facts = &result["runFacts"];
+    assert_eq!(
+        facts["analysis"]["profileVersion"], "analysis.generation.v1",
+        "runFacts should carry the Marrow analysis generation profile version: {result}"
+    );
     assert!(
         facts["analysis"]["sourceIdentity"]
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:")),
-        "runFacts should carry the Marrow analysis identity: {result}"
+        "runFacts should carry the Marrow analysis source identity: {result}"
+    );
+    assert!(
+        facts["analysis"]["configDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "runFacts should carry the Marrow config digest: {result}"
+    );
+    assert!(
+        facts["analysis"]["checkedSourceDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "runFacts should carry the Marrow checked source digest: {result}"
+    );
+    assert!(
+        facts["analysis"]["readOnlyContextDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "runFacts should carry the Marrow read-only context digest: {result}"
+    );
+    let accepted_catalog = &facts["analysis"]["acceptedCatalog"];
+    assert!(
+        accepted_catalog["epoch"].is_u64(),
+        "committed native fixture should carry accepted catalog epoch: {result}"
+    );
+    assert!(
+        accepted_catalog["digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "committed native fixture should carry accepted catalog digest: {result}"
+    );
+    assert!(
+        facts["analysis"]["proposalCatalog"].is_null()
+            || (facts["analysis"]["proposalCatalog"]["epoch"].is_u64()
+                && facts["analysis"]["proposalCatalog"]["digest"]
+                    .as_str()
+                    .is_some_and(|digest| digest.starts_with("sha256:"))),
+        "proposal catalog should be null or carry epoch and digest: {result}"
     );
     assert_eq!(facts["entry"]["requestedName"], "app::counter::show");
     assert_eq!(facts["entry"]["canonicalName"], "app::counter::show");

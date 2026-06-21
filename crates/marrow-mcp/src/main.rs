@@ -892,7 +892,7 @@ mod tests {
                         RUN_MISSING_FACTS,
                     ),
                 }),
-                "sandboxed execution helper (presentation-only: runtime generation facts +1): value 42",
+                "sandboxed execution helper (presentation-only: serve/attach execution boundaries): value 42",
             ),
         ];
         for (name, result, expected) in cases {

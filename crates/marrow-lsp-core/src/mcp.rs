@@ -75,10 +75,7 @@ pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "typed repair facts",
     "stable production integrity DTOs",
 ];
-pub const RUN_MISSING_FACTS: &[&str] = &[
-    "runtime generation facts",
-    "serve/attach execution boundaries",
-];
+pub const RUN_MISSING_FACTS: &[&str] = &["serve/attach execution boundaries"];
 
 fn production_contract(description: &str) -> Json {
     json!({
@@ -819,7 +816,8 @@ fn load_project_for_run(file: &Path) -> Result<PathBuf, String> {
 
 /// Evaluate one `entry` through Marrow's fresh-memory session under the locked
 /// host, returning Marrow's run envelope DTO plus entry run facts when entry
-/// admission succeeds.
+/// admission succeeds. The fact DTO is emitted by Marrow and includes the
+/// versioned analysis generation that admitted the entry.
 fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json {
     let mut open = ProjectOpen::run().with_fresh_memory_store();
     if let Some(entry) = entry {
