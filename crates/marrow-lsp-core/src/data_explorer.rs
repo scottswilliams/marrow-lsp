@@ -5,11 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use marrow_check::tooling::{self, ToolingError};
+use marrow_check::tooling::ToolingError;
 use marrow_json::DataGenerationJson;
 pub use marrow_json::saved_data::{
-    DataChildJson as DataChildDto, DataChildViewJson as DataChildViewDto,
-    DataChildViewsPageJson as DataChildViewsResult, DataChildrenPageJson as DataChildrenResult,
+    DataChildViewJson as DataChildViewDto, DataChildViewsPageJson as DataChildViewsResult,
     DataChildrenRequestJson as DataChildrenRequest, DataKeyJson as DataKeyDto,
     DataPathErrorJson as DataPathErrorDto, DataPathSegmentJson as DataPathSegmentDto,
     DataPresenceJson as DataPresenceDto, DataReadRequestJson as DataReadRequest,
@@ -41,7 +40,7 @@ pub fn saved_roots(session: Option<&SavedDataSession>) -> SavedRootsResult {
             roots: stamped
                 .data
                 .into_iter()
-                .map(|root| DataChildViewDto::from(tooling::DataChild::Root(root)))
+                .map(DataChildViewDto::from)
                 .collect(),
             store_snapshot: Some(DataGenerationJson::from(&stamped.stamp)),
         },
@@ -124,19 +123,6 @@ pub fn validate_data_read_request(
     Ok(request)
 }
 
-pub fn session_data_children_page(
-    session: &SavedDataSession,
-    request: DataChildrenRequest,
-) -> Result<DataChildrenResult, DataChildrenError> {
-    let (segments, limit, cursor) = request.into_path_parts();
-    let stamped = session.surface_read().saved_data_children(
-        &segments,
-        limit.min(DATA_CHILDREN_PAGE_LIMIT),
-        cursor.as_ref(),
-    )?;
-    Ok(DataChildrenResult::from(stamped))
-}
-
 pub fn session_data_child_views_page(
     session: &SavedDataSession,
     request: DataChildrenRequest,
@@ -210,7 +196,9 @@ mod tests {
         );
         assert_eq!(
             validate_data_children_request(DataChildrenRequest {
-                segments: vec![DataPathSegmentDto::Root("counter".into())],
+                segments: vec![DataPathSegmentDto::Root {
+                    store_catalog_id: "cat_00000000000000000000000000000001".into(),
+                }],
                 limit: 0,
                 cursor: None,
             }),
@@ -225,10 +213,21 @@ mod tests {
         );
         assert_eq!(
             validate_data_read_request(DataReadRequest {
-                segments: vec![DataPathSegmentDto::Root("counter".into())],
+                segments: vec![DataPathSegmentDto::Root {
+                    store_catalog_id: "cat_00000000000000000000000000000001".into(),
+                }],
                 preview_limit: Some(0),
             }),
             Err(DataRequestValidationError::ZeroPreviewLimit)
+        );
+        assert!(
+            serde_json::from_value::<DataChildrenRequest>(serde_json::json!({
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "limit": 1,
+                "cursor": null,
+            }))
+            .is_err(),
+            "downstream saved-data requests must not accept source-spelling root authority"
         );
     }
 
@@ -253,9 +252,16 @@ mod tests {
         assert_eq!(
             roots.roots,
             vec![DataChildViewDto {
-                segment: DataPathSegmentDto::Root("counter".into()),
+                segment: fixture.root_segment(),
                 label: "counter".into(),
             }]
+        );
+        assert_eq!(
+            serde_json::to_value(&roots.roots[0].segment).unwrap(),
+            serde_json::json!({
+                "kind": "root",
+                "store_catalog_id": fixture.store_catalog_id,
+            })
         );
         assert_generation_profile(&roots.store_snapshot);
     }
@@ -279,10 +285,10 @@ mod tests {
     fn zero_limit_returns_path_error() {
         let fixture = counter_fixture(CounterShape::default().with_ids(1..=1));
         assert_eq!(
-            session_data_children_page(
+            session_data_child_views_page(
                 &fixture.session,
                 DataChildrenRequest {
-                    segments: vec![DataPathSegmentDto::Root("counter".into())],
+                    segments: vec![fixture.root_segment()],
                     limit: 0,
                     cursor: None,
                 },
@@ -295,13 +301,10 @@ mod tests {
     fn typed_path_error_reports_string_scalar_type() {
         let fixture = counter_fixture(CounterShape::default().with_key_type("string"));
         assert_eq!(
-            session_data_children_page(
+            session_data_child_views_page(
                 &fixture.session,
                 DataChildrenRequest {
-                    segments: vec![
-                        DataPathSegmentDto::Root("counter".into()),
-                        DataPathSegmentDto::Key(DataKeyDto::Int(1)),
-                    ],
+                    segments: vec![fixture.root_segment(), key_segment(1),],
                     limit: 2,
                     cursor: None,
                 },
@@ -317,10 +320,10 @@ mod tests {
     #[test]
     fn data_children_clamps_large_caller_limit() {
         let fixture = counter_fixture(CounterShape::default().with_ids(1..=201));
-        let page = session_data_children_page(
+        let page = session_data_child_views_page(
             &fixture.session,
             DataChildrenRequest {
-                segments: vec![DataPathSegmentDto::Root("counter".into())],
+                segments: vec![fixture.root_segment()],
                 limit: DATA_CHILDREN_PAGE_LIMIT + 1,
                 cursor: None,
             },
@@ -328,14 +331,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(page.children.len(), DATA_CHILDREN_PAGE_LIMIT);
-        assert_eq!(
-            page.children.first(),
-            Some(&DataChildDto::Key(DataKeyDto::Int(1)))
-        );
-        assert_eq!(
-            page.children.last(),
-            Some(&DataChildDto::Key(DataKeyDto::Int(200)))
-        );
+        assert_eq!(page.children.first(), Some(&key_child(1)));
+        assert_eq!(page.children.last(), Some(&key_child(200)));
         assert!(page.truncated);
         assert_eq!(page.cursor, Some(DataKeyDto::Int(200)));
     }
@@ -343,9 +340,9 @@ mod tests {
     #[test]
     fn data_children_returns_paged_typed_segments() {
         let fixture = counter_fixture(CounterShape::default().with_ids(1..=5));
-        let root = vec![DataPathSegmentDto::Root("counter".into())];
+        let root = vec![fixture.root_segment()];
 
-        let page = session_data_children_page(
+        let page = session_data_child_views_page(
             &fixture.session,
             DataChildrenRequest {
                 segments: root.clone(),
@@ -356,11 +353,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             page,
-            DataChildrenResult {
-                children: vec![
-                    DataChildDto::Key(DataKeyDto::Int(1)),
-                    DataChildDto::Key(DataKeyDto::Int(2)),
-                ],
+            DataChildViewsResult {
+                children: vec![key_child(1), key_child(2),],
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(2)),
                 store_snapshot: page.store_snapshot.clone(),
@@ -368,7 +362,7 @@ mod tests {
         );
         assert_generation_profile(&page.store_snapshot);
 
-        let page = session_data_children_page(
+        let page = session_data_child_views_page(
             &fixture.session,
             DataChildrenRequest {
                 segments: root.clone(),
@@ -379,11 +373,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             page,
-            DataChildrenResult {
-                children: vec![
-                    DataChildDto::Key(DataKeyDto::Int(3)),
-                    DataChildDto::Key(DataKeyDto::Int(4)),
-                ],
+            DataChildViewsResult {
+                children: vec![key_child(3), key_child(4),],
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(4)),
                 store_snapshot: page.store_snapshot.clone(),
@@ -391,7 +382,7 @@ mod tests {
         );
         assert_generation_profile(&page.store_snapshot);
 
-        let page = session_data_children_page(
+        let page = session_data_child_views_page(
             &fixture.session,
             DataChildrenRequest {
                 segments: root,
@@ -402,8 +393,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             page,
-            DataChildrenResult {
-                children: vec![DataChildDto::Key(DataKeyDto::Int(5))],
+            DataChildViewsResult {
+                children: vec![key_child(5)],
                 truncated: false,
                 cursor: None,
                 store_snapshot: page.store_snapshot.clone(),
@@ -419,7 +410,7 @@ mod tests {
         let page = session_data_child_views_page(
             &fixture.session,
             DataChildrenRequest {
-                segments: vec![DataPathSegmentDto::Root("counter".into())],
+                segments: vec![fixture.root_segment()],
                 limit: 10,
                 cursor: None,
             },
@@ -429,7 +420,7 @@ mod tests {
         assert_eq!(
             page.children,
             vec![DataChildViewDto {
-                segment: DataPathSegmentDto::Key(DataKeyDto::Int(1)),
+                segment: key_segment(1),
                 label: "(1)".into(),
             }]
         );
@@ -445,9 +436,9 @@ mod tests {
             &fixture.session,
             DataReadRequest {
                 segments: vec![
-                    DataPathSegmentDto::Root("counter".into()),
-                    DataPathSegmentDto::Key(DataKeyDto::Int(1)),
-                    DataPathSegmentDto::Field("value".into()),
+                    fixture.root_segment(),
+                    key_segment(1),
+                    fixture.value_field_segment(),
                 ],
                 preview_limit: None,
             },
@@ -479,9 +470,9 @@ mod tests {
             &fixture.session,
             DataReadRequest {
                 segments: vec![
-                    DataPathSegmentDto::Root("counter".into()),
-                    DataPathSegmentDto::Key(DataKeyDto::Int(1)),
-                    DataPathSegmentDto::Field("value".into()),
+                    fixture.root_segment(),
+                    key_segment(1),
+                    fixture.value_field_segment(),
                 ],
                 preview_limit: Some(8),
             },
@@ -505,9 +496,38 @@ mod tests {
         assert_eq!(snapshot.profile_version, DATA_GENERATION_PROFILE_VERSION);
     }
 
+    fn key_segment(value: i64) -> DataPathSegmentDto {
+        DataPathSegmentDto::Key {
+            value: DataKeyDto::Int(value),
+        }
+    }
+
+    fn key_child(value: i64) -> DataChildViewDto {
+        DataChildViewDto {
+            segment: key_segment(value),
+            label: format!("({value})"),
+        }
+    }
+
     struct CounterFixture {
         _dir: tempfile::TempDir,
         session: crate::store::SavedDataSession,
+        store_catalog_id: String,
+        value_member_catalog_id: String,
+    }
+
+    impl CounterFixture {
+        fn root_segment(&self) -> DataPathSegmentDto {
+            DataPathSegmentDto::Root {
+                store_catalog_id: self.store_catalog_id.clone(),
+            }
+        }
+
+        fn value_field_segment(&self) -> DataPathSegmentDto {
+            DataPathSegmentDto::Field {
+                member_catalog_id: self.value_member_catalog_id.clone(),
+            }
+        }
     }
 
     struct CounterShape {
@@ -581,6 +601,8 @@ store ^counter(id: {}): Counter
         let place = root_place(&program, "counter").unwrap();
         let store_id = store_id_of(&place).unwrap();
         let value_id = member_catalog_id(&place, "value").unwrap();
+        let store_catalog_id = store_id.as_str().to_string();
+        let value_member_catalog_id = value_id.clone();
         let path = vec![DataPathSegment::Member(
             marrow_store::cell::CatalogId::new(value_id).unwrap(),
         )];
@@ -610,7 +632,12 @@ store ^counter(id: {}): Counter
         })
         .unwrap()
         .unwrap();
-        CounterFixture { _dir: dir, session }
+        CounterFixture {
+            _dir: dir,
+            session,
+            store_catalog_id,
+            value_member_catalog_id,
+        }
     }
 
     impl Default for CounterShape {

@@ -142,14 +142,22 @@ function fileUriFor(fsPath) {
 
 function makeClient() {
   const calls = [];
-  const rootPath = [{ kind: "root", value: "root-id" }];
-  const staleRootPath = [{ kind: "root", value: "stale-root-id" }];
+  const rootPath = [{ kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" }];
+  const staleRootPath = [
+    { kind: "root", store_catalog_id: "cat_00000000000000000000000000000002" },
+  ];
   const bytesKeyPath = [
     ...rootPath,
     { kind: "key", value: { kind: "bytes", value: [10] } },
   ];
-  const layerPath = [...rootPath, { kind: "layer", value: "history" }];
-  const staleValuePath = [...rootPath, { kind: "field", value: "stale" }];
+  const layerPath = [
+    ...rootPath,
+    { kind: "layer", member_catalog_id: "cat_00000000000000000000000000000003" },
+  ];
+  const staleValuePath = [
+    ...rootPath,
+    { kind: "field", member_catalog_id: "cat_00000000000000000000000000000004" },
+  ];
 
   return {
     calls,
@@ -181,11 +189,11 @@ function makeClient() {
                 label: "server-rendered-bytes-key",
               },
               {
-                segment: { kind: "layer", value: "history" },
+                segment: { kind: "layer", member_catalog_id: "cat_00000000000000000000000000000003" },
                 label: "history",
               },
               {
-                segment: { kind: "field", value: "stale" },
+                segment: { kind: "field", member_catalog_id: "cat_00000000000000000000000000000004" },
                 label: "stale",
               },
             ],
@@ -230,7 +238,7 @@ function makeClient() {
             available: true,
             children: [
               {
-                segment: { kind: "field", value: "value" },
+                segment: { kind: "field", member_catalog_id: "cat_00000000000000000000000000000005" },
                 label: "value",
               },
             ],
@@ -244,7 +252,7 @@ function makeClient() {
             available: true,
             children: [
               {
-                segment: { kind: "field", value: "entry" },
+                segment: { kind: "field", member_catalog_id: "cat_00000000000000000000000000000006" },
                 label: "entry",
               },
             ],
@@ -271,11 +279,14 @@ function makeClient() {
         if (
           deepEqual(params.segments, [
             ...bytesKeyPath,
-            { kind: "field", value: "value" },
+            { kind: "field", member_catalog_id: "cat_00000000000000000000000000000005" },
           ])
         ) {
           assert.deepEqual(params, {
-            segments: [...bytesKeyPath, { kind: "field", value: "value" }],
+            segments: [
+              ...bytesKeyPath,
+              { kind: "field", member_catalog_id: "cat_00000000000000000000000000000005" },
+            ],
             preview_limit: 2048,
           });
           return {
@@ -323,7 +334,12 @@ function makeRootsClient(storeSnapshot) {
       assert.equal(params, undefined);
       return {
         available: true,
-        roots: [{ segment: { kind: "root", value: "root-id" }, label: "Root" }],
+        roots: [
+          {
+            segment: { kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" },
+            label: "Root",
+          },
+        ],
         store_snapshot: storeSnapshot,
       };
     },
@@ -562,21 +578,21 @@ try {
   assert.deepEqual(roots[0], {
     kind: "root",
     label: "Root",
-    segment: { kind: "root", value: "root-id" },
+    segment: { kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" },
     snapshot: baseSnapshot,
   });
   assert.equal(roots[0].snapshot.profile_version, "data.generation.v1");
   assert.deepEqual(roots[1], {
     kind: "root",
     label: "StaleRoot",
-    segment: { kind: "root", value: "stale-root-id" },
+    segment: { kind: "root", store_catalog_id: "cat_00000000000000000000000000000002" },
     snapshot: baseSnapshot,
   });
   const keys = await provider.getChildren(roots[0]);
   assert.equal(keys.length, 4);
   assert.equal(keys[0].label, "server-rendered-bytes-key");
   assert.deepEqual(keys[0].segments, [
-    { kind: "root", value: "root-id" },
+    { kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" },
     { kind: "key", value: { kind: "bytes", value: [10] } },
   ]);
   assert.deepEqual(keys[0].snapshot, baseSnapshot);
@@ -585,7 +601,7 @@ try {
   assert.deepEqual(keys[3], {
     kind: "more",
     label: "more children",
-    segments: [{ kind: "root", value: "root-id" }],
+    segments: [{ kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" }],
     cursor: { kind: "int", value: 200 },
     snapshot: baseSnapshot,
   });
@@ -600,7 +616,7 @@ try {
   assert.deepEqual(client.calls.at(-1), {
     method: "marrow/dataChildren",
     params: {
-      segments: [{ kind: "root", value: "root-id" }],
+      segments: [{ kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" }],
       limit: 200,
       cursor: { kind: "int", value: 200 },
     },
@@ -613,8 +629,8 @@ try {
   assert.equal(terminalItem.collapsibleState, 0, "cursor-less truncation should not expand");
 
   const layerPath = [
-    { kind: "root", value: "root-id" },
-    { kind: "layer", value: "history" },
+    { kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" },
+    { kind: "layer", member_catalog_id: "cat_00000000000000000000000000000003" },
   ];
   const beforeLayerCalls = client.calls.length;
   const layerChildren = await provider.getChildren(keys[1]);
@@ -625,7 +641,7 @@ try {
   );
   assert.deepEqual(layerChildren[0].segments, [
     ...layerPath,
-    { kind: "field", value: "entry" },
+    { kind: "field", member_catalog_id: "cat_00000000000000000000000000000006" },
   ]);
   assert.equal(
     hasReadFor(client.calls, layerPath),
@@ -642,9 +658,9 @@ try {
   );
   assert.equal(fields.length, 1);
   assert.deepEqual(fields[0].segments, [
-    { kind: "root", value: "root-id" },
+    { kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" },
     { kind: "key", value: { kind: "bytes", value: [10] } },
-    { kind: "field", value: "value" },
+    { kind: "field", member_catalog_id: "cat_00000000000000000000000000000005" },
   ]);
   assert.deepEqual(fields[0].snapshot, baseSnapshot);
 

@@ -32,12 +32,12 @@ interface DataGenerationTransaction {
   readonly depth: number;
 }
 
-type DataRootSegment = { readonly kind: "root"; readonly value: string };
+type DataRootSegment = { readonly kind: "root"; readonly store_catalog_id: string };
 
 type DataPathSegment =
   | DataRootSegment
-  | { readonly kind: "field"; readonly value: string }
-  | { readonly kind: "layer"; readonly value: string }
+  | { readonly kind: "field"; readonly member_catalog_id: string }
+  | { readonly kind: "layer"; readonly member_catalog_id: string }
   | { readonly kind: "key"; readonly value: DataKey };
 
 type DataKey =
@@ -59,7 +59,7 @@ interface SavedRootView {
   readonly label: string;
 }
 
-interface DataChildrenResult {
+interface DataChildViewsResult {
   readonly available: boolean;
   readonly children: DataChildView[];
   readonly truncated: boolean;
@@ -213,9 +213,9 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (client === undefined) {
       return [];
     }
-    let result: DataChildrenResult;
+    let result: DataChildViewsResult;
     try {
-      result = await client.sendRequest<DataChildrenResult>(REQUEST_DATA_CHILDREN, {
+      result = await client.sendRequest<DataChildViewsResult>(REQUEST_DATA_CHILDREN, {
         segments,
         limit: DATA_PAGE_LIMIT,
         cursor,

@@ -40,7 +40,7 @@ use serde_json::{Value as Json, json};
 
 use crate::completion::completion;
 use crate::data_explorer::{
-    DataChildrenRequest, DataReadRequest, session_data_children_page, session_data_read,
+    DataChildrenRequest, DataReadRequest, session_data_child_views_page, session_data_read,
 };
 use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
@@ -51,19 +51,16 @@ use crate::workspace::Workspace;
 
 pub const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
 pub const SAVED_DATA_MISSING_FACTS: &[&str] = &[
-    "catalog-bound saved-root identity",
     "watch/refresh facts",
     "integrity and repair facts",
     "serve/attach data boundaries",
 ];
 pub const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
-    "catalog-bound saved-place identity",
     "watch/refresh facts",
     "integrity and repair facts",
     "serve/attach data boundaries",
 ];
 pub const DATA_READ_MISSING_FACTS: &[&str] = &[
-    "catalog-bound saved-place identity",
     "watch/refresh facts",
     "integrity and repair facts",
     "serve/attach data boundaries",
@@ -603,7 +600,7 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
     let Some(session) = session else {
         return with_contract(unavailable, contract);
     };
-    match session_data_children_page(&session, request) {
+    match session_data_child_views_page(&session, request) {
         Ok(result) => {
             let mut result =
                 serde_json::to_value(result).expect("data children DTO must serialize");

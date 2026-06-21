@@ -51,7 +51,7 @@ fn fixture_root() -> PathBuf {
         .expect("the shelf fixture exists")
 }
 
-fn native_counter_fixture() -> (tempfile::TempDir, PathBuf) {
+fn native_counter_fixture() -> (tempfile::TempDir, PathBuf, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -94,7 +94,9 @@ pub fn f()
     }
     let place = root_place(&program, "counter").unwrap();
     let store_id = store_id_of(&place).unwrap();
-    let value_id = CatalogId::new(member_catalog_id(&place, "value").unwrap()).unwrap();
+    let store_catalog_id = store_id.as_str().to_string();
+    let value_member_catalog_id = member_catalog_id(&place, "value").unwrap();
+    let value_id = CatalogId::new(value_member_catalog_id.clone()).unwrap();
     let identity = [SavedKey::Int(1)];
     store.write_record_presence(&store_id, &identity).unwrap();
     store
@@ -115,7 +117,7 @@ pub fn f()
     .unwrap();
     assert_eq!(page.children, vec![DataChild::Key(SavedKey::Int(1))]);
 
-    (dir, file)
+    (dir, file, store_catalog_id, value_member_catalog_id)
 }
 
 fn assert_store_snapshot(snapshot: &Value) {
@@ -1750,7 +1752,9 @@ fn custom_saved_roots_request_answers_over_the_transport() {
 
 #[test]
 fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
-    let (_dir, file) = native_counter_fixture();
+    let (_dir, file, store_catalog_id, value_member_catalog_id) = native_counter_fixture();
+    let counter_root = json!({ "kind": "root", "store_catalog_id": store_catalog_id });
+    let value_field = json!({ "kind": "field", "member_catalog_id": value_member_catalog_id });
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
             .stdin(Stdio::piped())
@@ -1809,7 +1813,7 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
         response["result"]["roots"],
         json!([
             {
-                "segment": { "kind": "root", "value": "counter" },
+                "segment": counter_root.clone(),
                 "label": "counter"
             }
         ])
@@ -1823,7 +1827,7 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
             "id": 3,
             "method": "marrow/dataChildren",
             "params": {
-                "segments": [{ "kind": "root", "value": "counter" }],
+                "segments": [counter_root.clone()],
                 "limit": 10,
                 "cursor": null
             }
@@ -1851,9 +1855,9 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
             "method": "marrow/dataRead",
             "params": {
                 "segments": [
-                    { "kind": "root", "value": "counter" },
+                    counter_root,
                     { "kind": "key", "value": { "kind": "int", "value": 1 } },
-                    { "kind": "field", "value": "value" }
+                    value_field
                 ]
             }
         }),
@@ -1871,7 +1875,7 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
 
 #[test]
 fn custom_data_watch_targets_return_project_paths_over_transport() {
-    let (_dir, file) = native_counter_fixture();
+    let (_dir, file, _, _) = native_counter_fixture();
     let root = file
         .parent()
         .and_then(|path| path.parent())
@@ -1986,7 +1990,7 @@ fn custom_data_watch_targets_return_project_paths_over_transport() {
 
 #[test]
 fn custom_saved_resource_inspector_refuses_stale_open_source() {
-    let (_dir, file) = native_counter_fixture();
+    let (_dir, file, _, _) = native_counter_fixture();
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
             .stdin(Stdio::piped())
@@ -2066,7 +2070,9 @@ fn custom_saved_resource_inspector_refuses_stale_open_source() {
 
 #[test]
 fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
-    let (_dir, file) = native_counter_fixture();
+    let (_dir, file, store_catalog_id, value_member_catalog_id) = native_counter_fixture();
+    let counter_root = json!({ "kind": "root", "store_catalog_id": store_catalog_id });
+    let value_field = json!({ "kind": "field", "member_catalog_id": value_member_catalog_id });
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
             .stdin(Stdio::piped())
@@ -2160,7 +2166,7 @@ fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
             "id": 4,
             "method": "marrow/dataChildren",
             "params": {
-                "segments": [{ "kind": "root", "value": "counter" }],
+                "segments": [counter_root.clone()],
                 "limit": 10,
                 "cursor": null
             }
@@ -2187,9 +2193,9 @@ fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
             "method": "marrow/dataRead",
             "params": {
                 "segments": [
-                    { "kind": "root", "value": "counter" },
+                    counter_root,
                     { "kind": "key", "value": { "kind": "int", "value": 1 } },
-                    { "kind": "field", "value": "value" }
+                    value_field
                 ]
             }
         }),
@@ -2262,16 +2268,28 @@ fn custom_data_requests_reject_invalid_typed_envelopes() {
         (
             3,
             "marrow/dataChildren",
-            json!({ "segments": [{ "kind": "root", "value": "counter" }], "limit": 0 }),
+            json!({
+                "segments": [
+                    { "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }
+                ],
+                "limit": 0
+            }),
         ),
         (4, "marrow/dataRead", json!({ "segments": [] })),
         (
             5,
             "marrow/dataRead",
             json!({
-                "segments": [{ "kind": "root", "value": "counter" }],
+                "segments": [
+                    { "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }
+                ],
                 "preview_limit": 0
             }),
+        ),
+        (
+            6,
+            "marrow/dataChildren",
+            json!({ "segments": [{ "kind": "root", "value": "counter" }], "limit": 1 }),
         ),
     ] {
         send(

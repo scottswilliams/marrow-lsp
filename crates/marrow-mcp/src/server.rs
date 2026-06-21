@@ -71,21 +71,21 @@ fn data_key_schema(description: &str) -> Json {
 }
 
 fn data_path_segment_schema() -> Json {
-    let named_segment = |kind: &str| {
+    let catalog_segment = |kind: &str, authority: &str| {
         json!({
             "type": "object",
             "properties": {
                 "kind": { "const": kind },
-                "value": { "type": "string" },
+                authority: { "type": "string" },
             },
-            "required": ["kind", "value"],
+            "required": ["kind", authority],
         })
     };
     json!({
         "oneOf": [
-            named_segment("root"),
-            named_segment("field"),
-            named_segment("layer"),
+            catalog_segment("root", "store_catalog_id"),
+            catalog_segment("field", "member_catalog_id"),
+            catalog_segment("layer", "member_catalog_id"),
             {
                 "type": "object",
                 "properties": {
@@ -308,7 +308,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Presentation-only saved-root listing helper: list typed saved-root views and Marrow versioned data generation DTOs under store_snapshot from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-root identity, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable typed production API.",
+            "description": "Presentation-only saved-root listing helper: list typed saved-root views and Marrow versioned data generation DTOs under store_snapshot from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable typed production API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -331,7 +331,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_children",
-            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow versioned data generation DTOs under store_snapshot for a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
+            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow versioned data generation DTOs under store_snapshot for a saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -356,7 +356,7 @@ pub fn tools() -> Json {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
                     "segments": {
                         "type": "array",
-                        "description": "Typed saved-data path segments, for example [{\"kind\":\"root\",\"value\":\"books\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}}].",
+                        "description": "Catalog-bound typed saved-data path segments, for example [{\"kind\":\"root\",\"store_catalog_id\":\"cat_00000000000000000000000000000001\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}}].",
                         "minItems": 1,
                         "items": data_path_segment_schema(),
                     },
@@ -372,7 +372,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_read",
-            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview and versioned data generation DTO under store_snapshot for one typed saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path, clamps `preview_limit`, uses Marrow-owned bounded read presence, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
+            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview and versioned data generation DTO under store_snapshot for one typed saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path, clamps `preview_limit`, uses Marrow-owned bounded read presence, and reads nothing when data access is disabled. Missing watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -395,7 +395,7 @@ pub fn tools() -> Json {
                     "file": string_prop("Absolute path to any .mw file inside the project."),
                     "segments": {
                         "type": "array",
-                        "description": "Typed saved-data path segments, for example [{\"kind\":\"root\",\"value\":\"books\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}},{\"kind\":\"field\",\"value\":\"title\"}].",
+                        "description": "Catalog-bound typed saved-data path segments, for example [{\"kind\":\"root\",\"store_catalog_id\":\"cat_00000000000000000000000000000001\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}},{\"kind\":\"field\",\"member_catalog_id\":\"cat_00000000000000000000000000000002\"}].",
                         "minItems": 1,
                         "items": data_path_segment_schema(),
                     },
@@ -989,7 +989,7 @@ mod tests {
             "mw_data_children",
             &json!({
                 "file": "/nope/x.mw",
-                "segments": [{ "kind": "root", "value": "counter" }],
+                "segments": [{ "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }],
                 "limit": 1,
             }),
             policy,
@@ -1000,7 +1000,7 @@ mod tests {
             "mw_data_read",
             &json!({
                 "file": "/nope/x.mw",
-                "segments": [{ "kind": "root", "value": "counter" }],
+                "segments": [{ "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }],
             }),
             policy,
         )
@@ -1083,8 +1083,13 @@ mod tests {
             }),
             json!({
                 "file": "/nope/project/src/main.mw",
-                "segments": [{ "kind": "root", "value": "counter" }],
+                "segments": [{ "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }],
                 "limit": 0,
+            }),
+            json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "limit": 1,
             }),
         ] {
             let error = call("mw_data_children", &arguments, policy)
@@ -1110,8 +1115,12 @@ mod tests {
             }),
             json!({
                 "file": "/nope/project/src/main.mw",
-                "segments": [{ "kind": "root", "value": "counter" }],
+                "segments": [{ "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }],
                 "preview_limit": 0,
+            }),
+            json!({
+                "file": "/nope/project/src/main.mw",
+                "segments": [{ "kind": "root", "value": "counter" }],
             }),
         ] {
             let error = call("mw_data_read", &arguments, policy)

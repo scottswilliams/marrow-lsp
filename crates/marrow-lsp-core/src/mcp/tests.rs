@@ -368,6 +368,46 @@ store ^settings: Settings
     (dir, src.join("settings.mw"))
 }
 
+fn saved_data_root_segment(file: &Path, root: &str) -> crate::data_explorer::DataPathSegmentDto {
+    crate::data_explorer::DataPathSegmentDto::Root {
+        store_catalog_id: saved_data_store_catalog_id(file, root),
+    }
+}
+
+fn saved_data_field_segment(
+    file: &Path,
+    root: &str,
+    member: &str,
+) -> crate::data_explorer::DataPathSegmentDto {
+    crate::data_explorer::DataPathSegmentDto::Field {
+        member_catalog_id: saved_data_member_catalog_id(file, root, member),
+    }
+}
+
+fn saved_data_store_catalog_id(file: &Path, root: &str) -> String {
+    let (workspace, _) = load_project(file, None).unwrap();
+    let session = open_saved_data_session(workspace.project().unwrap())
+        .unwrap()
+        .unwrap();
+    let place = root_place(session.surface_read().program(), root).unwrap();
+    store_id_of(&place).unwrap().as_str().to_string()
+}
+
+fn saved_data_member_catalog_id(file: &Path, root: &str, member: &str) -> String {
+    let (workspace, _) = load_project(file, None).unwrap();
+    let session = open_saved_data_session(workspace.project().unwrap())
+        .unwrap()
+        .unwrap();
+    let place = root_place(session.surface_read().program(), root).unwrap();
+    member_catalog_id(&place, member).unwrap()
+}
+
+fn sample_root_segment() -> crate::data_explorer::DataPathSegmentDto {
+    crate::data_explorer::DataPathSegmentDto::Root {
+        store_catalog_id: "cat_00000000000000000000000000000001".into(),
+    }
+}
+
 fn write_surface_project(root: &Path) -> PathBuf {
     std::fs::write(
         root.join("marrow.json"),
@@ -1435,7 +1475,6 @@ fn data_tools_refuse_when_not_enabled() {
         "presentation-only",
         "saved-root listing helper",
         &[
-            "catalog-bound saved-root identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1459,9 +1498,7 @@ fn data_tools_refuse_when_not_enabled() {
     let children = data_children(
         Path::new("/nope/project/src/main.mw"),
         crate::data_explorer::DataChildrenRequest {
-            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
-                "counter".into(),
-            )],
+            segments: vec![sample_root_segment()],
             limit: 1,
             cursor: None,
         },
@@ -1473,7 +1510,6 @@ fn data_tools_refuse_when_not_enabled() {
         "presentation-only",
         "bounded typed data helper",
         &[
-            "catalog-bound saved-place identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1483,9 +1519,7 @@ fn data_tools_refuse_when_not_enabled() {
     let read = data_read(
         Path::new("/nope/project/src/main.mw"),
         crate::data_explorer::DataReadRequest {
-            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
-                "counter".into(),
-            )],
+            segments: vec![sample_root_segment()],
             preview_limit: None,
         },
         false,
@@ -1496,7 +1530,6 @@ fn data_tools_refuse_when_not_enabled() {
         "presentation-only",
         "data value preview helper",
         &[
-            "catalog-bound saved-place identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1508,13 +1541,14 @@ fn data_tools_refuse_when_not_enabled() {
 fn saved_roots_return_snapshot_metadata_when_enabled() {
     let (_dir, file) = native_counter_project(1..=1);
     let result = saved_roots(&file, true);
+    let counter_root = saved_data_root_segment(&file, "counter");
 
     assert_eq!(result["available"], true, "{result}");
     assert_eq!(
         result["roots"],
         json!([
             {
-                "segment": { "kind": "root", "value": "counter" },
+                "segment": counter_root,
                 "label": "counter"
             }
         ]),
@@ -1526,7 +1560,6 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
         "presentation-only",
         "saved-root listing helper",
         &[
-            "catalog-bound saved-root identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1550,9 +1583,7 @@ fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
     let children = data_children(
         &file,
         crate::data_explorer::DataChildrenRequest {
-            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
-                "counter".into(),
-            )],
+            segments: vec![sample_root_segment()],
             limit: 10,
             cursor: None,
         },
@@ -1605,13 +1636,12 @@ fn data_integrity_returns_snapshot_metadata_when_enabled() {
 #[test]
 fn data_children_returns_paged_typed_segments_when_enabled() {
     let (_dir, file) = native_counter_project(1..=3);
+    let counter_root = saved_data_root_segment(&file, "counter");
 
     let result = data_children(
         &file,
         crate::data_explorer::DataChildrenRequest {
-            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
-                "counter".into(),
-            )],
+            segments: vec![counter_root],
             limit: 2,
             cursor: None,
         },
@@ -1621,8 +1651,14 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
     assert_eq!(
         result["children"],
         json!([
-            { "kind": "key", "value": { "kind": "int", "value": 1 } },
-            { "kind": "key", "value": { "kind": "int", "value": 2 } },
+            {
+                "segment": { "kind": "key", "value": { "kind": "int", "value": 1 } },
+                "label": "(1)"
+            },
+            {
+                "segment": { "kind": "key", "value": { "kind": "int", "value": 2 } },
+                "label": "(2)"
+            },
         ]),
         "{result}"
     );
@@ -1638,7 +1674,6 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
         "presentation-only",
         "bounded typed data helper",
         &[
-            "catalog-bound saved-place identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1649,16 +1684,18 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
 #[test]
 fn data_read_returns_bounded_value_preview_when_enabled() {
     let (_dir, file) = native_counter_project_with_value(42);
+    let counter_root = saved_data_root_segment(&file, "counter");
+    let value_field = saved_data_field_segment(&file, "counter", "value");
 
     let result = data_read(
         &file,
         crate::data_explorer::DataReadRequest {
             segments: vec![
-                crate::data_explorer::DataPathSegmentDto::Root("counter".into()),
-                crate::data_explorer::DataPathSegmentDto::Key(
-                    crate::data_explorer::DataKeyDto::Int(1),
-                ),
-                crate::data_explorer::DataPathSegmentDto::Field("value".into()),
+                counter_root,
+                crate::data_explorer::DataPathSegmentDto::Key {
+                    value: crate::data_explorer::DataKeyDto::Int(1),
+                },
+                value_field,
             ],
             preview_limit: Some(32),
         },
@@ -1675,7 +1712,6 @@ fn data_read_returns_bounded_value_preview_when_enabled() {
         "presentation-only",
         "data value preview helper",
         &[
-            "catalog-bound saved-place identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1686,15 +1722,16 @@ fn data_read_returns_bounded_value_preview_when_enabled() {
 #[test]
 fn data_children_returns_empty_page_for_absent_members() {
     let (_dir, file) = native_counter_project(1..=1);
+    let counter_root = saved_data_root_segment(&file, "counter");
 
     let result = data_children(
         &file,
         crate::data_explorer::DataChildrenRequest {
             segments: vec![
-                crate::data_explorer::DataPathSegmentDto::Root("counter".into()),
-                crate::data_explorer::DataPathSegmentDto::Key(
-                    crate::data_explorer::DataKeyDto::Int(1),
-                ),
+                counter_root,
+                crate::data_explorer::DataPathSegmentDto::Key {
+                    value: crate::data_explorer::DataKeyDto::Int(1),
+                },
             ],
             limit: 1,
             cursor: None,
@@ -1712,7 +1749,6 @@ fn data_children_returns_empty_page_for_absent_members() {
         "presentation-only",
         "bounded typed data helper",
         &[
-            "catalog-bound saved-place identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1723,13 +1759,12 @@ fn data_children_returns_empty_page_for_absent_members() {
 #[test]
 fn data_children_returns_empty_page_for_absent_keyless_root() {
     let (_dir, file) = native_settings_project();
+    let settings_root = saved_data_root_segment(&file, "settings");
 
     let result = data_children(
         &file,
         crate::data_explorer::DataChildrenRequest {
-            segments: vec![crate::data_explorer::DataPathSegmentDto::Root(
-                "settings".into(),
-            )],
+            segments: vec![settings_root],
             limit: 1,
             cursor: None,
         },
@@ -1746,7 +1781,6 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
         "presentation-only",
         "bounded typed data helper",
         &[
-            "catalog-bound saved-place identity",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",

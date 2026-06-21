@@ -236,7 +236,9 @@ fn data_tools_refuse_without_the_opt_in() {
                 "name": "mw_data_children",
                 "arguments": {
                     "file": "/nope/project/src/main.mw",
-                    "segments": [{ "kind": "root", "value": "counter" }],
+                    "segments": [
+                        { "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }
+                    ],
                     "limit": 1
                 }
             }
@@ -265,7 +267,9 @@ fn data_tools_refuse_without_the_opt_in() {
                 "name": "mw_data_read",
                 "arguments": {
                     "file": "/nope/project/src/main.mw",
-                    "segments": [{ "kind": "root", "value": "counter" }]
+                    "segments": [
+                        { "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }
+                    ]
                 }
             }
         }),
