@@ -1,21 +1,21 @@
 //! Document and workspace symbols from parsed and checked project facts.
 //!
-//! Document symbols are the outline of one file: a [`DocumentSymbol`] per
-//! declaration (constant, enum, resource, function), with enum members and resource
-//! members nested beneath their parents. Workspace symbols flatten checked and
-//! catalog-backed declarations into a project-wide list an editor's "go to symbol
-//! in workspace" searches. Nothing here re-parses or re-checks.
+//! Document symbols are the outline of one file: top-level declarations with
+//! enum members, resource members, store indexes, and evolve steps nested beneath
+//! their parents. Workspace symbols flatten checked and catalog-backed
+//! declarations into a project-wide list an editor's "go to symbol in workspace"
+//! searches. Nothing here re-parses or re-checks.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
 use marrow_check::AnalysisSnapshot;
-use marrow_check::tooling::{SourceSymbolKind, source_symbols};
-use marrow_syntax::{
-    Declaration, EnumDecl, EnumMember, EvolveDecl, EvolveStep, FieldDecl, FunctionDecl, GroupDecl,
-    IndexDecl, ResourceDecl, ResourceMember, SourceFile, SourceSpan, StoreDecl, SurfaceDecl,
+use marrow_check::tooling::{
+    DocumentSymbol as MarrowDocumentSymbol, DocumentSymbolKind, SourceSymbolKind,
+    document_symbols as marrow_document_symbols, source_symbols,
 };
+use marrow_syntax::{SourceFile, SourceSpan};
 
 use crate::positions::LineIndex;
 
@@ -25,231 +25,50 @@ use crate::positions::LineIndex;
 /// covers its whole declaration; its `selection_range` covers just the name, the
 /// span an editor highlights and reveals when the symbol is chosen.
 pub fn document_symbols(file: &SourceFile, index: &LineIndex) -> Vec<DocumentSymbol> {
-    file.declarations
-        .iter()
-        .map(|declaration| declaration_symbol(declaration, index))
+    marrow_document_symbols(file, index.text())
+        .into_iter()
+        .map(|symbol| document_symbol_from_fact(symbol, index))
         .collect()
 }
 
-fn declaration_symbol(declaration: &Declaration, index: &LineIndex) -> DocumentSymbol {
-    match declaration {
-        Declaration::Const(constant) => symbol(
-            &constant.name,
-            constant.ty.as_ref().map(|ty| ty.text.clone()),
-            SymbolKind::CONSTANT,
-            constant.span,
-            index,
-            None,
-        ),
-        Declaration::Function(function) => symbol(
-            &function.name,
-            Some(function_signature(function)),
-            SymbolKind::FUNCTION,
-            function.span,
-            index,
-            None,
-        ),
-        Declaration::Enum(enum_decl) => enum_symbol(enum_decl, index),
-        Declaration::Resource(resource) => resource_symbol(resource, index),
-        Declaration::Store(store) => store_symbol(store, index),
-        Declaration::Surface(surface) => surface_symbol(surface, index),
-        Declaration::Evolve(evolve) => evolve_symbol(evolve, index),
-    }
-}
-
-fn evolve_symbol(evolve: &EvolveDecl, index: &LineIndex) -> DocumentSymbol {
-    let children = evolve
-        .steps
-        .iter()
-        .map(|step| evolve_step_symbol(step, index))
-        .collect();
-    symbol(
-        "evolve",
-        None,
-        SymbolKind::NAMESPACE,
-        evolve.span,
-        index,
-        Some(children),
-    )
-}
-
-fn evolve_step_symbol(step: &EvolveStep, index: &LineIndex) -> DocumentSymbol {
-    let name = match step {
-        EvolveStep::Rename { .. } => "rename",
-        EvolveStep::Default { .. } => "default",
-        EvolveStep::Retire { .. } => "retire",
-        EvolveStep::Transform { .. } => "transform",
-    };
-    symbol(name, None, SymbolKind::EVENT, step.span(), index, None)
-}
-
-fn enum_symbol(enum_decl: &EnumDecl, index: &LineIndex) -> DocumentSymbol {
-    let children = enum_decl
-        .members
-        .iter()
-        .map(|member| enum_member_symbol(member, index))
-        .collect();
-    symbol(
-        &enum_decl.name,
-        None,
-        SymbolKind::ENUM,
-        enum_decl.span,
-        index,
-        Some(children),
-    )
-}
-
-fn enum_member_symbol(member: &EnumMember, index: &LineIndex) -> DocumentSymbol {
-    symbol(
-        &member.name,
-        None,
-        SymbolKind::ENUM_MEMBER,
-        member.span,
-        index,
-        None,
-    )
-}
-
-fn resource_symbol(resource: &ResourceDecl, index: &LineIndex) -> DocumentSymbol {
-    let children = resource
-        .members
-        .iter()
-        .map(|member| member_symbol(member, index))
-        .collect();
-    symbol(
-        &resource.name,
-        None,
-        SymbolKind::STRUCT,
-        resource.span,
-        index,
-        Some(children),
-    )
-}
-
-fn member_symbol(member: &ResourceMember, index: &LineIndex) -> DocumentSymbol {
-    match member {
-        ResourceMember::Field(field) => field_symbol(field, index),
-        ResourceMember::Group(group) => group_symbol(group, index),
-    }
-}
-
-fn store_symbol(store: &StoreDecl, index: &LineIndex) -> DocumentSymbol {
-    let children = store
-        .indexes
-        .iter()
-        .map(|idx| index_symbol(idx, index))
-        .collect();
-    symbol(
-        &format!("^{}", store.root.root),
-        Some(store.resource.clone()),
-        SymbolKind::OBJECT,
-        store.span,
-        index,
-        Some(children),
-    )
-}
-
-fn surface_symbol(surface: &SurfaceDecl, index: &LineIndex) -> DocumentSymbol {
-    symbol(
-        &surface.name,
-        Some(format!("^{}", surface.store.root)),
-        SymbolKind::INTERFACE,
-        surface.span,
-        index,
-        None,
-    )
-}
-
-fn field_symbol(field: &FieldDecl, index: &LineIndex) -> DocumentSymbol {
-    symbol(
-        &field.name,
-        Some(field.ty.text.clone()),
-        SymbolKind::FIELD,
-        field.span,
-        index,
-        None,
-    )
-}
-
-fn group_symbol(group: &GroupDecl, index: &LineIndex) -> DocumentSymbol {
-    let children = group
-        .members
-        .iter()
-        .map(|member| member_symbol(member, index))
-        .collect();
-    symbol(
-        &group.name,
-        None,
-        SymbolKind::OBJECT,
-        group.span,
-        index,
-        Some(children),
-    )
-}
-
-fn index_symbol(idx: &IndexDecl, index: &LineIndex) -> DocumentSymbol {
-    symbol(
-        &idx.name,
-        Some(format!("index({})", idx.args.join(", "))),
-        SymbolKind::KEY,
-        idx.span,
-        index,
-        None,
-    )
-}
-
-/// Build one symbol, computing its full range from `span` and its selection range
-/// from where `name` sits inside that span.
-fn symbol(
-    name: &str,
-    detail: Option<String>,
-    kind: SymbolKind,
-    span: SourceSpan,
-    index: &LineIndex,
-    children: Option<Vec<DocumentSymbol>>,
-) -> DocumentSymbol {
-    let range = index.range(span.start_byte, span.end_byte);
-    let (name_start, name_end) = name_span(name, span, index.text());
+fn document_symbol_from_fact(symbol: MarrowDocumentSymbol, index: &LineIndex) -> DocumentSymbol {
+    let children = (!symbol.children.is_empty()).then(|| {
+        symbol
+            .children
+            .into_iter()
+            .map(|child| document_symbol_from_fact(child, index))
+            .collect()
+    });
     #[allow(deprecated)]
     DocumentSymbol {
-        name: name.to_string(),
-        detail,
-        kind,
+        name: symbol.name,
+        detail: symbol.detail,
+        kind: document_symbol_kind(symbol.kind),
         tags: None,
         deprecated: None,
-        range,
-        selection_range: index.range(name_start, name_end),
+        range: index.range(symbol.span.start_byte, symbol.span.end_byte),
+        selection_range: index.range(
+            symbol.selection_span.start_byte,
+            symbol.selection_span.end_byte,
+        ),
         children,
     }
 }
 
-/// The byte span of `name` within a declaration's `span`, for the selection
-/// range. The name is the first occurrence of the identifier inside the
-/// declaration's source slice (declarations open with a keyword, so the name
-/// never precedes it); if it cannot be found the whole declaration span stands in.
-fn name_span(name: &str, span: SourceSpan, text: &str) -> (usize, usize) {
-    let slice = &text[span.start_byte..span.end_byte];
-    match slice.find(name) {
-        Some(offset) => {
-            let start = span.start_byte + offset;
-            (start, start + name.len())
-        }
-        None => (span.start_byte, span.end_byte),
-    }
-}
-
-/// A function's one-line signature for the symbol detail: its parameters and
-/// return type as written, e.g. `(n: int): int`.
-fn function_signature(function: &FunctionDecl) -> String {
-    let params = function
-        .params
-        .iter()
-        .map(|param| format!("{}: {}", param.name, param.ty.text))
-        .collect::<Vec<_>>()
-        .join(", ");
-    match &function.return_type {
-        Some(ty) => format!("({params}): {}", ty.text),
-        None => format!("({params})"),
+fn document_symbol_kind(kind: DocumentSymbolKind) -> SymbolKind {
+    match kind {
+        DocumentSymbolKind::Constant => SymbolKind::CONSTANT,
+        DocumentSymbolKind::Function => SymbolKind::FUNCTION,
+        DocumentSymbolKind::Enum => SymbolKind::ENUM,
+        DocumentSymbolKind::EnumMember => SymbolKind::ENUM_MEMBER,
+        DocumentSymbolKind::Resource => SymbolKind::STRUCT,
+        DocumentSymbolKind::ResourceField => SymbolKind::FIELD,
+        DocumentSymbolKind::ResourceGroup => SymbolKind::OBJECT,
+        DocumentSymbolKind::Store => SymbolKind::OBJECT,
+        DocumentSymbolKind::StoreIndex => SymbolKind::KEY,
+        DocumentSymbolKind::Surface => SymbolKind::INTERFACE,
+        DocumentSymbolKind::Evolve => SymbolKind::NAMESPACE,
+        DocumentSymbolKind::EvolveStep => SymbolKind::EVENT,
     }
 }
 
@@ -506,6 +325,35 @@ surface Books from ^books
             .expect("surface declaration is listed");
         assert_eq!(surface.kind, SymbolKind::INTERFACE);
         assert_eq!(surface.detail.as_deref(), Some("^books"));
+    }
+
+    #[test]
+    fn document_symbols_do_not_own_outline_assembly() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("symbols.rs"),
+        )
+        .expect("read symbols source");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
+
+        for obsolete in [
+            "fn declaration_symbol",
+            "fn evolve_symbol",
+            "fn enum_symbol",
+            "fn resource_symbol",
+            "fn store_symbol",
+            "fn surface_symbol",
+            "fn function_signature",
+            "fn name_span",
+            "Declaration::",
+            "ResourceMember::",
+        ] {
+            assert!(
+                !production.contains(obsolete),
+                "document symbols should consume marrow-check outline facts, not own `{obsolete}`"
+            );
+        }
     }
 
     /// Analyze a one-file project through the production project pipeline.
