@@ -34,6 +34,7 @@ async fn main() {
         .custom_method("marrow/dataChildren", Backend::data_children)
         .custom_method("marrow/dataRead", Backend::data_read)
         .custom_method("marrow/dataIntegrity", Backend::data_integrity)
+        .custom_method("marrow/dataWatchTargets", Backend::data_watch_targets)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 

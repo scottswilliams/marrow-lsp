@@ -42,6 +42,8 @@ const wrongProfileSnapshot = {
 };
 
 function installVscodeStub() {
+  const watchers = [];
+
   class EventEmitter {
     constructor() {
       this.event = () => undefined;
@@ -65,20 +67,77 @@ function installVscodeStub() {
     }
   }
 
+  class Uri {
+    constructor(fsPath) {
+      this.fsPath = fsPath;
+    }
+
+    toString() {
+      return `file://${this.fsPath}`;
+    }
+
+    static file(fsPath) {
+      return new Uri(fsPath);
+    }
+  }
+
+  class RelativePattern {
+    constructor(base, pattern) {
+      this.base = base;
+      this.pattern = pattern;
+    }
+  }
+
+  function createFileSystemWatcher(pattern) {
+    const watcher = {
+      pattern,
+      disposed: false,
+      changeListeners: [],
+      createListeners: [],
+      deleteListeners: [],
+      onDidChange(listener) {
+        this.changeListeners.push(listener);
+        return { dispose() {} };
+      },
+      onDidCreate(listener) {
+        this.createListeners.push(listener);
+        return { dispose() {} };
+      },
+      onDidDelete(listener) {
+        this.deleteListeners.push(listener);
+        return { dispose() {} };
+      },
+      dispose() {
+        this.disposed = true;
+      },
+    };
+    watchers.push(watcher);
+    return watcher;
+  }
+
   Module._load = function loadStubbedModule(request, parent, isMain) {
     if (request === "vscode") {
       return {
         EventEmitter,
+        RelativePattern,
         ThemeIcon,
         TreeItem,
         TreeItemCollapsibleState: { None: 0, Collapsed: 1 },
+        Uri,
+        workspace: { createFileSystemWatcher },
       };
     }
     if (request === "vscode-languageclient/node") {
-      return {};
+      return { FileChangeType: { Created: 1, Changed: 2, Deleted: 3 } };
     }
     return restoreLoad.call(this, request, parent, isMain);
   };
+
+  return { watchers };
+}
+
+function fileUriFor(fsPath) {
+  return `file://${fsPath}`;
 }
 
 function makeClient() {
@@ -289,6 +348,22 @@ function hasReadFor(calls, segments) {
   );
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function activeWatcherPaths(watchers) {
+  return watchers
+    .filter((watcher) => !watcher.disposed)
+    .map((watcher) => join(watcher.pattern.base, watcher.pattern.pattern));
+}
+
 try {
   if (!existsSync(tsc)) {
     throw new Error("Run npm install in editors/vscode before this check.");
@@ -298,9 +373,12 @@ try {
     stdio: "inherit",
   });
 
-  installVscodeStub();
+  const vscodeStub = installVscodeStub();
   const { SavedResourceProvider } = await import(
     pathToFileURL(join(outDir, "savedResourceInspector.js"))
+  );
+  const { SavedDataWatchTargetRegistry } = await import(
+    pathToFileURL(join(outDir, "extension.js"))
   );
 
   for (const storeSnapshot of [unversionedSnapshot, wrongProfileSnapshot, null]) {
@@ -314,6 +392,169 @@ try {
   const provider = new SavedResourceProvider();
   const client = makeClient();
   provider.setClient(client);
+
+  const watchTarget = join(outDir, "project", ".marrow", "data", "marrow.redb");
+  const watchClientCalls = [];
+  const watchEventLog = [];
+  const notificationRequests = [];
+  let refreshCount = 0;
+  const watchProvider = new SavedResourceProvider();
+  watchProvider.refresh = () => {
+    refreshCount += 1;
+    watchEventLog.push({ kind: "refresh" });
+  };
+  const watchRegistry = new SavedDataWatchTargetRegistry(
+    {
+      async sendRequest(method, params) {
+        watchClientCalls.push({ method, params });
+        assert.equal(method, "marrow/dataWatchTargets");
+        assert.equal(params, undefined);
+        return { paths: [watchTarget] };
+      },
+      sendNotification(method, params) {
+        watchEventLog.push({ kind: "notify", method, params });
+        const request = deferred();
+        notificationRequests.push(request);
+        return request.promise;
+      },
+    },
+    watchProvider,
+  );
+  await watchRegistry.refresh();
+  assert.deepEqual(watchClientCalls, [
+    { method: "marrow/dataWatchTargets", params: undefined },
+  ]);
+  assert.equal(vscodeStub.watchers.length, 1);
+  assert.equal(
+    vscodeStub.watchers[0].pattern.base,
+    dirname(watchTarget),
+    "watch base should come from the LSP-supplied target path",
+  );
+  assert.equal(
+    vscodeStub.watchers[0].pattern.pattern,
+    "marrow.redb",
+    "watch pattern should be the LSP-supplied target filename",
+  );
+  const watchNotification = (type) => ({
+    kind: "notify",
+    method: "workspace/didChangeWatchedFiles",
+    params: { changes: [{ uri: fileUriFor(watchTarget), type }] },
+  });
+
+  vscodeStub.watchers[0].changeListeners[0]();
+  assert.equal(refreshCount, 0, "change refresh must wait for notification settlement");
+  assert.deepEqual(watchEventLog, [watchNotification(2)]);
+  notificationRequests[0].resolve();
+  await Promise.resolve();
+  assert.equal(refreshCount, 1);
+  assert.deepEqual(watchEventLog, [watchNotification(2), { kind: "refresh" }]);
+
+  vscodeStub.watchers[0].createListeners[0]();
+  assert.equal(refreshCount, 1, "create refresh must wait for notification settlement");
+  assert.deepEqual(watchEventLog, [
+    watchNotification(2),
+    { kind: "refresh" },
+    watchNotification(1),
+  ]);
+  notificationRequests[1].reject(new Error("notification failed"));
+  await Promise.resolve();
+  assert.equal(refreshCount, 2, "create refresh must still fire after notification failure");
+  assert.deepEqual(watchEventLog, [
+    watchNotification(2),
+    { kind: "refresh" },
+    watchNotification(1),
+    { kind: "refresh" },
+  ]);
+
+  vscodeStub.watchers[0].deleteListeners[0]();
+  assert.equal(refreshCount, 2, "delete refresh must wait for notification settlement");
+  assert.deepEqual(watchEventLog, [
+    watchNotification(2),
+    { kind: "refresh" },
+    watchNotification(1),
+    { kind: "refresh" },
+    watchNotification(3),
+  ]);
+  notificationRequests[2].resolve();
+  await Promise.resolve();
+  assert.equal(refreshCount, 3);
+  assert.deepEqual(watchEventLog, [
+    watchNotification(2),
+    { kind: "refresh" },
+    watchNotification(1),
+    { kind: "refresh" },
+    watchNotification(3),
+    { kind: "refresh" },
+  ]);
+  watchRegistry.dispose();
+  assert.equal(vscodeStub.watchers[0].disposed, true);
+
+  const ignoredTargetRegistry = new SavedDataWatchTargetRegistry(
+    {
+      async sendRequest(method, params) {
+        assert.equal(method, "marrow/dataWatchTargets");
+        assert.equal(params, undefined);
+        return { paths: ["relative/marrow.redb", fileUriFor(watchTarget)] };
+      },
+      sendNotification() {
+        throw new Error("ignored watch targets must not notify the language server");
+      },
+    },
+    watchProvider,
+  );
+  await ignoredTargetRegistry.refresh();
+  assert.deepEqual(
+    activeWatcherPaths(vscodeStub.watchers),
+    [],
+    "relative paths and file URLs are not absolute filesystem watch targets",
+  );
+  ignoredTargetRegistry.dispose();
+
+  const racingRequests = [];
+  const racingRegistry = new SavedDataWatchTargetRegistry(
+    {
+      sendRequest(method, params) {
+        assert.equal(method, "marrow/dataWatchTargets");
+        assert.equal(params, undefined);
+        const request = deferred();
+        racingRequests.push(request);
+        return request.promise;
+      },
+    },
+    watchProvider,
+  );
+  const watchTargetA = join(outDir, "project", "data", "a.redb");
+  const watchTargetB = join(outDir, "project", "data", "b.redb");
+  const watchTargetC = join(outDir, "project", "data", "c.redb");
+
+  const refreshA = racingRegistry.refresh();
+  assert.equal(racingRequests.length, 1);
+  const refreshB = racingRegistry.refresh();
+  assert.equal(racingRequests.length, 2);
+  racingRequests[1].resolve({ paths: [watchTargetB] });
+  await refreshB;
+  assert.deepEqual(activeWatcherPaths(vscodeStub.watchers), [watchTargetB]);
+
+  racingRequests[0].resolve({ paths: [watchTargetA] });
+  await refreshA;
+  assert.deepEqual(
+    activeWatcherPaths(vscodeStub.watchers),
+    [watchTargetB],
+    "a stale watch-target response must not replace or duplicate the current watchers",
+  );
+
+  const refreshC = racingRegistry.refresh();
+  assert.equal(racingRequests.length, 3);
+  racingRegistry.dispose();
+  const watchersBeforeLateDisposeResponse = vscodeStub.watchers.length;
+  racingRequests[2].resolve({ paths: [watchTargetC] });
+  await refreshC;
+  assert.deepEqual(activeWatcherPaths(vscodeStub.watchers), []);
+  assert.equal(
+    vscodeStub.watchers.length,
+    watchersBeforeLateDisposeResponse,
+    "a disposed registry must not create watchers from a late response",
+  );
 
   const roots = await provider.getChildren();
   assert.equal(roots.length, 2);

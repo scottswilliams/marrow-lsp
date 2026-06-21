@@ -16,7 +16,9 @@ use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
 use marrow_lsp_core::positions::Position as CorePosition;
-use marrow_lsp_core::store::{SavedDataSession, open_saved_data_session};
+use marrow_lsp_core::store::{
+    SavedDataSession, SavedDataWatchTargets, open_saved_data_session, saved_data_watch_targets,
+};
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
 use marrow_lsp_core::{
     completion, formatting, hover, navigation, semantic_tokens, signature_help, symbols,
@@ -140,6 +142,20 @@ impl Backend {
         let state = self.state.lock().await;
         let session = self.data_session(&state);
         Ok(data_integrity(session.as_ref()))
+    }
+
+    /// `marrow/dataWatchTargets`: filesystem inputs whose changes can make the
+    /// saved-resource inspector stale. Paths are derived from the current
+    /// validated project config and remain unavailable while live data is off.
+    pub async fn data_watch_targets(&self) -> jsonrpc::Result<SavedDataWatchTargets> {
+        let state = self.state.lock().await;
+        saved_data_watch_targets(
+            state.workspace.project(),
+            self.live_data.load(Ordering::Relaxed),
+        )
+        .map_err(|error| {
+            jsonrpc::Error::invalid_params(format!("invalid project store config: {error}"))
+        })
     }
 
     /// Note that an edit happened and schedule a debounced recompute for `file`.

@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
+  FileChangeType,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
@@ -15,14 +16,104 @@ let client: LanguageClient | undefined;
 const EXE_SUFFIX = process.platform === "win32" ? ".exe" : "";
 const SERVER_BINARY = `marrow-lsp${EXE_SUFFIX}`;
 const DAP_BINARY = `marrow-dap${EXE_SUFFIX}`;
+const REQUEST_DATA_WATCH_TARGETS = "marrow/dataWatchTargets";
+const NOTIFICATION_DID_CHANGE_WATCHED_FILES = "workspace/didChangeWatchedFiles";
+
+interface SavedDataWatchTargets {
+  readonly paths: string[];
+}
+
+interface DataWatchTargetClient {
+  sendRequest<T>(method: string): Thenable<T>;
+  sendNotification(method: string, params: unknown): Thenable<void>;
+}
+
+interface RefreshableSavedResourceProvider {
+  refresh(): void;
+}
+
+export class SavedDataWatchTargetRegistry implements vscode.Disposable {
+  private watchers: vscode.FileSystemWatcher[] = [];
+  private refreshSeq = 0;
+  private disposed = false;
+
+  constructor(
+    private readonly client: DataWatchTargetClient,
+    private readonly provider: RefreshableSavedResourceProvider,
+  ) {}
+
+  async refresh(): Promise<void> {
+    const seq = ++this.refreshSeq;
+    let result: SavedDataWatchTargets;
+    try {
+      result = await this.client.sendRequest<SavedDataWatchTargets>(REQUEST_DATA_WATCH_TARGETS);
+    } catch {
+      return;
+    }
+    if (this.disposed || seq !== this.refreshSeq) {
+      return;
+    }
+    const nextWatchers: vscode.FileSystemWatcher[] = [];
+    for (const target of result.paths) {
+      const fsPath = watchTargetFsPath(target);
+      if (fsPath === undefined) {
+        continue;
+      }
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(path.dirname(fsPath), path.basename(fsPath)),
+      );
+      watcher.onDidChange(() => void this.handleTargetEvent(fsPath, FileChangeType.Changed));
+      watcher.onDidCreate(() => void this.handleTargetEvent(fsPath, FileChangeType.Created));
+      watcher.onDidDelete(() => void this.handleTargetEvent(fsPath, FileChangeType.Deleted));
+      nextWatchers.push(watcher);
+    }
+    if (this.disposed || seq !== this.refreshSeq) {
+      for (const watcher of nextWatchers) {
+        watcher.dispose();
+      }
+      return;
+    }
+    this.disposeWatchers();
+    this.watchers = nextWatchers;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.refreshSeq += 1;
+    this.disposeWatchers();
+  }
+
+  private disposeWatchers(): void {
+    for (const watcher of this.watchers) {
+      watcher.dispose();
+    }
+    this.watchers = [];
+  }
+
+  private async handleTargetEvent(fsPath: string, type: FileChangeType): Promise<void> {
+    try {
+      await this.client.sendNotification(NOTIFICATION_DID_CHANGE_WATCHED_FILES, {
+        changes: [{ uri: vscode.Uri.file(fsPath).toString(), type }],
+      });
+    } catch {
+      // A failed invalidation notification must not leave the inspector stale forever.
+    }
+    this.provider.refresh();
+  }
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const dataProvider = new SavedResourceProvider();
   let dataIntegrity: MarrowDataIntegrity | undefined;
+  let dataWatchTargets: SavedDataWatchTargetRegistry | undefined;
+  const refreshWatchTargets = () => {
+    void dataWatchTargets?.refresh();
+  };
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("marrowData", dataProvider),
     vscode.commands.registerCommand("marrow.refreshData", () => {
+      void dataWatchTargets?.refresh();
       dataProvider.refresh();
     }),
     vscode.commands.registerCommand("marrow.checkDataIntegrity", () => {
@@ -64,6 +155,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         .getConfiguration("marrow")
         .get<boolean>("liveData", false),
     },
+    middleware: {
+      handleDiagnostics(uri, diagnostics, next) {
+        next(uri, diagnostics);
+        refreshWatchTargets();
+        dataProvider.refresh();
+      },
+    },
     synchronize: {
       fileEvents: [
         vscode.workspace.createFileSystemWatcher("**/marrow.json"),
@@ -90,8 +188,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   dataProvider.setClient(client);
 
   dataIntegrity = new MarrowDataIntegrity(client);
+  dataWatchTargets = new SavedDataWatchTargetRegistry(client, dataProvider);
+  await dataWatchTargets.refresh();
 
-  context.subscriptions.push(dataIntegrity);
+  const projectConfigWatcher = vscode.workspace.createFileSystemWatcher("**/marrow.json");
+  projectConfigWatcher.onDidChange(refreshWatchTargets);
+  projectConfigWatcher.onDidCreate(refreshWatchTargets);
+  projectConfigWatcher.onDidDelete(refreshWatchTargets);
+
+  context.subscriptions.push(
+    dataIntegrity,
+    dataWatchTargets,
+    projectConfigWatcher,
+    vscode.window.onDidChangeActiveTextEditor(refreshWatchTargets),
+    vscode.workspace.onDidOpenTextDocument((document) => {
+      if (document.languageId === "marrow") {
+        refreshWatchTargets();
+      }
+    }),
+  );
 }
 
 export async function deactivate(): Promise<void> {
@@ -145,6 +260,13 @@ function isUsableBinary(file: string): boolean {
   } catch {
     return false;
   }
+}
+
+function watchTargetFsPath(target: string): string | undefined {
+  if (path.isAbsolute(target)) {
+    return target;
+  }
+  return undefined;
 }
 
 class MarrowDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {

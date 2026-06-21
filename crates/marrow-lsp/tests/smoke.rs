@@ -1870,6 +1870,121 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
 }
 
 #[test]
+fn custom_data_watch_targets_return_project_paths_over_transport() {
+    let (_dir, file) = native_counter_fixture();
+    let root = file
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("fixture file lives under src");
+    let expected_paths = json!([
+        root.join("data").join("marrow.redb").to_string_lossy(),
+        root.join("marrow.lock").to_string_lossy(),
+    ]);
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+                "initializationOptions": { "marrow.liveData": true }
+            }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let text = std::fs::read_to_string(&file).unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": text }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/dataWatchTargets" }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["paths"], expected_paths, "{response}");
+
+    let _ = server.0.kill();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": text }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/dataWatchTargets" }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["paths"], json!([]), "{response}");
+
+    let _ = server.0.kill();
+}
+
+#[test]
 fn custom_saved_resource_inspector_refuses_stale_open_source() {
     let (_dir, file) = native_counter_fixture();
     let mut server = Server(

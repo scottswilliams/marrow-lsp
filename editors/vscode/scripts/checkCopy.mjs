@@ -82,6 +82,16 @@ function assertDoesNotMention(text, source, label, pattern) {
   assert.doesNotMatch(text, pattern, `${source} must not mention ${label}`);
 }
 
+function assertOrderedSourceCalls(text, source, label, calls) {
+  let cursor = -1;
+  for (const call of calls) {
+    const index = text.indexOf(call);
+    assert.notEqual(index, -1, `${source} must call ${call} in ${label}`);
+    assert.ok(index > cursor, `${source} must call ${call} after the previous ${label} call`);
+    cursor = index;
+  }
+}
+
 function markdownBullet(text, source, marker) {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => line.startsWith("- ") && line.includes(marker));
@@ -122,8 +132,8 @@ assertMentions(
 assertMentions(
   changelogSavedInspector,
   "CHANGELOG.md Saved Resource Inspector bullet",
-  "manual refresh",
-  /manual-refresh/i,
+  "LSP-supplied automatic refresh scope",
+  /automatically\s+refreshes[\s\S]*LSP-supplied\s+native\s+dev-store[\s\S]*committed-lock\s+watch\s+targets[\s\S]*marrow\.liveData/i,
 );
 assertMentions(
   changelogSavedInspector,
@@ -140,8 +150,8 @@ assertMentions(
 assertMentions(
   readmeSavedInspector,
   "README.md Saved Resource Inspector bullet",
-  "manual refresh",
-  /refreshes\s+only\s+on\s+demand/i,
+  "LSP-supplied automatic refresh scope",
+  /automatically\s+refreshes[\s\S]*LSP-supplied\s+native\s+dev-store[\s\S]*committed-lock\s+watch\s+targets[\s\S]*marrow\.liveData/i,
 );
 assertMentions(
   readmeSavedInspector,
@@ -154,6 +164,26 @@ assertDoesNotMention(
   "src/extension.ts",
   "Saved Resource Inspector auto-refresh on saved documents",
   /onDidSaveTextDocument[\s\S]*dataProvider\.refresh\(\)/,
+);
+assertDoesNotMention(
+  files.get("src/extension.ts"),
+  "src/extension.ts",
+  "direct publishDiagnostics subscription",
+  /onNotification\(\s*["']textDocument\/publishDiagnostics["']/,
+);
+const diagnosticsMiddleware = files
+  .get("src/extension.ts")
+  .match(/handleDiagnostics\(\s*uri,\s*diagnostics,\s*next\s*\)\s*\{([\s\S]*?)\n\s*\},/);
+assert.notEqual(
+  diagnosticsMiddleware,
+  null,
+  "src/extension.ts must use diagnostics middleware for publishDiagnostics side effects",
+);
+assertOrderedSourceCalls(
+  diagnosticsMiddleware[1],
+  "src/extension.ts diagnostics middleware",
+  "diagnostics middleware",
+  ["next(uri, diagnostics);", "refreshWatchTargets();", "dataProvider.refresh();"],
 );
 assertMentions(
   changelog,
