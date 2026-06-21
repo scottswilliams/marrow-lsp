@@ -1326,19 +1326,11 @@ impl<W: Write> Session<W> {
         self.terminate_session();
     }
 
-    /// `terminate`: end a parked run, or cancel a resume that has not physically
-    /// woken the run-thread yet.
+    /// `terminate`: end any live run, including one that has already resumed.
     fn on_terminate(&mut self, request: &Json) {
-        match self.running.as_ref() {
-            None => {
-                self.respond_error(request, "not running", ERROR_NOT_RUNNING);
-                return;
-            }
-            Some(running) if running.stopped_at.is_none() && running.pending_resume.is_none() => {
-                self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
-                return;
-            }
-            Some(_) => {}
+        if self.running.is_none() {
+            self.respond_error(request, "not running", ERROR_NOT_RUNNING);
+            return;
         }
         self.respond(request, true, json!({}));
         self.terminate_session();
@@ -2022,6 +2014,11 @@ mod tests {
         (session, seen_rx)
     }
 
+    fn first_dap_message(output: &str) -> Json {
+        let mut reader = std::io::Cursor::new(output.as_bytes());
+        crate::protocol::read_message(&mut reader).unwrap()
+    }
+
     #[test]
     fn log_message_parser_splits_literals_and_expressions() {
         let template = parse_log_message("title { title } id {id}").expect("template");
@@ -2161,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    fn terminate_after_physical_resume_is_not_acknowledged() {
+    fn terminate_after_physical_resume_is_acknowledged() {
         let (mut session, seen) = session_with_running(None, None);
         let terminate = json!({
             "seq": 1,
@@ -2171,20 +2168,14 @@ mod tests {
         });
         session.handle(&terminate);
 
-        assert!(seen.try_recv().is_err());
-        assert!(!session.done());
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "terminate"
+        );
+        assert!(session.done());
         let output = String::from_utf8(session.out).unwrap();
-        let (_, body) = output.split_once("\r\n\r\n").unwrap();
-        let response: Json = serde_json::from_str(body).unwrap();
-        assert_eq!(response["success"], false, "{response}");
-        assert_eq!(
-            response["body"]["marrowError"]["code"], "dap.notStopped",
-            "{response}"
-        );
-        assert_eq!(
-            response["body"]["marrowError"]["status"], "invalid-state",
-            "{response}"
-        );
+        let response = first_dap_message(&output);
+        assert_eq!(response["success"], true, "{response}");
     }
 
     #[test]
