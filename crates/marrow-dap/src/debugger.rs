@@ -29,8 +29,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
-use marrow_check::CheckedDebugExpression;
+use marrow_check::{CheckedDebugExpression, tooling};
 use marrow_run::{DebugValue, Frame, RuntimeError, StepHook, Value};
+use marrow_store::key::SavedKey;
 use marrow_syntax::Diagnose;
 
 use crate::step::{self, Resume, StopReason};
@@ -58,6 +59,22 @@ pub struct LocalVar {
     pub children_truncated: Option<bool>,
     /// The owned debug value to expand, present only for a compound shape.
     pub expand: Option<DebugValue>,
+}
+
+/// One saved-data variable row captured from the stopped frame.
+#[derive(Debug, Clone)]
+pub struct DataVar {
+    pub name: String,
+    pub value: String,
+    pub children_truncated: Option<bool>,
+    pub path: Vec<tooling::DataPathSegment>,
+    pub expandable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DataVariablesSnapshot {
+    pub entries: Vec<DataVar>,
+    pub children_truncated: bool,
 }
 
 /// Where the run stopped, sent to the protocol thread so it can raise a DAP
@@ -183,6 +200,10 @@ pub enum Query {
     Evaluate {
         expression: Box<CheckedDebugExpression>,
     },
+    DataChildren {
+        segments: Vec<tooling::DataPathSegment>,
+        page: ChildPage,
+    },
 }
 
 /// The answer to a [`Query`], owned and `Send`.
@@ -190,6 +211,7 @@ pub enum Query {
 pub enum QueryResult {
     Locals(LocalsSnapshot),
     Evaluate(Result<DebugValue, RuntimeErrorDetail>),
+    DataChildren(Result<DataVariablesSnapshot, RuntimeErrorDetail>),
 }
 
 /// The stable runtime-error detail carried back to the protocol thread.
@@ -301,6 +323,42 @@ impl Debugger {
         }
     }
 
+    fn snapshot_data_children(
+        frame: &Frame<'_, '_>,
+        segments: Vec<tooling::DataPathSegment>,
+        page: ChildPage,
+    ) -> Result<DataVariablesSnapshot, RuntimeErrorDetail> {
+        let (start, limit) = data_page_bounds(page);
+        let page = data_children_at_offset(frame, &segments, start, limit)?;
+        let children_truncated = page.data.truncated;
+        let mut entries = Vec::with_capacity(page.data.children.len());
+        for child in page.data.children {
+            let mut path = segments.clone();
+            path.push(data_child_segment(child));
+            let preview = frame
+                .debug_data_preview(&path, marrow_check::tooling::DEFAULT_VALUE_PREVIEW_LIMIT)
+                .map_err(RuntimeErrorDetail::from)?;
+            let presence = preview
+                .as_ref()
+                .map(|preview| preview.data.presence)
+                .unwrap_or(tooling::DataPresence::Absent);
+            let value = preview
+                .and_then(|preview| preview.data.preview.map(|preview| preview.text))
+                .unwrap_or_default();
+            entries.push(DataVar {
+                name: tooling::render_data_path_segments(&path),
+                value,
+                children_truncated: None,
+                expandable: matches!(presence, tooling::DataPresence::ChildrenOnly),
+                path,
+            });
+        }
+        Ok(DataVariablesSnapshot {
+            entries,
+            children_truncated,
+        })
+    }
+
     /// Answer one query from the live frame, returning owned data.
     fn answer(
         &self,
@@ -317,6 +375,9 @@ impl Debugger {
                     .evaluate_debug_expression(expression.as_ref())
                     .map_err(RuntimeErrorDetail::from),
             ),
+            Query::DataChildren { segments, page } => {
+                QueryResult::DataChildren(Self::snapshot_data_children(frame, segments, page))
+            }
         }
     }
 
@@ -348,6 +409,107 @@ impl Debugger {
                 Ok(Control::Terminate) | Err(_) => return Err(terminated()),
             }
         }
+    }
+}
+
+fn data_page_bounds(page: ChildPage) -> (usize, usize) {
+    match page {
+        ChildPage::All { start } => (start, marrow_check::tooling::MAX_PREVIEW_ITEMS),
+        ChildPage::Range { start, count } => (
+            start,
+            count.clamp(1, marrow_check::tooling::MAX_PREVIEW_ITEMS),
+        ),
+    }
+}
+
+fn data_children_at_offset(
+    frame: &Frame<'_, '_>,
+    segments: &[tooling::DataPathSegment],
+    start: usize,
+    limit: usize,
+) -> Result<tooling::StampedData<tooling::DataChildrenPage>, RuntimeErrorDetail> {
+    data_children_at_offset_with_limit(
+        start,
+        limit,
+        marrow_check::tooling::MAX_PREVIEW_ITEMS,
+        |cursor, page_limit| {
+            frame
+                .debug_data_children(segments, page_limit, cursor)
+                .map_err(RuntimeErrorDetail::from)
+        },
+    )
+}
+
+fn data_children_at_offset_with_limit(
+    start: usize,
+    limit: usize,
+    page_limit: usize,
+    mut fetch: impl FnMut(
+        Option<&SavedKey>,
+        usize,
+    )
+        -> Result<tooling::StampedData<tooling::DataChildrenPage>, RuntimeErrorDetail>,
+) -> Result<tooling::StampedData<tooling::DataChildrenPage>, RuntimeErrorDetail> {
+    let page_limit = page_limit.max(1);
+    let mut skipped: usize = 0;
+    let mut cursor = None;
+    let mut children = Vec::new();
+    loop {
+        let page = fetch(cursor.as_ref(), page_limit)?;
+        let stamp = page.stamp;
+        let data = page.data;
+        let page_len = data.children.len();
+        let mut more_in_page = false;
+        for (index, child) in data.children.into_iter().enumerate() {
+            if skipped.saturating_add(index) < start {
+                continue;
+            }
+            if children.len() == limit {
+                more_in_page = true;
+                break;
+            }
+            children.push(child);
+        }
+
+        skipped = skipped.saturating_add(page_len);
+        if children.len() == limit {
+            return Ok(data_children_page(
+                stamp,
+                children,
+                more_in_page || data.truncated,
+            ));
+        }
+        if !data.truncated || page_len == 0 {
+            return Ok(data_children_page(stamp, children, false));
+        }
+        let Some(next_cursor) = data.cursor else {
+            return Ok(data_children_page(stamp, children, false));
+        };
+        cursor = Some(next_cursor);
+    }
+}
+
+fn data_children_page(
+    stamp: tooling::DataSnapshotStamp,
+    children: Vec<tooling::DataChild>,
+    truncated: bool,
+) -> tooling::StampedData<tooling::DataChildrenPage> {
+    tooling::StampedData {
+        data: tooling::DataChildrenPage {
+            children,
+            truncated,
+            cursor: None,
+        },
+        stamp,
+    }
+}
+
+fn data_child_segment(child: tooling::DataChild) -> tooling::DataPathSegment {
+    match child {
+        tooling::DataChild::Root(root) => tooling::DataPathSegment::Root(root),
+        tooling::DataChild::Key(key) => tooling::DataPathSegment::Key(key),
+        tooling::DataChild::Field(field) => tooling::DataPathSegment::Field(field),
+        tooling::DataChild::Layer(layer) => tooling::DataPathSegment::Layer(layer),
     }
 }
 
@@ -410,5 +572,88 @@ mod tests {
     #[test]
     fn terminated_fault_carries_the_terminated_code() {
         assert_eq!(terminated().code(), RUN_TERMINATED);
+    }
+
+    #[test]
+    fn data_offset_walks_cursor_pages() {
+        let mut pages = vec![
+            data_page([1, 2], true, Some(2)),
+            data_page([3, 4], true, Some(4)),
+            data_page([5], false, None),
+        ]
+        .into_iter();
+        let mut calls = Vec::new();
+
+        let page = data_children_at_offset_with_limit(3, 2, 2, |cursor, limit| {
+            calls.push((cursor.cloned(), limit));
+            Ok(pages.next().expect("test page"))
+        })
+        .expect("page");
+
+        assert_eq!(data_child_keys(&page.data.children), vec![4, 5]);
+        assert!(!page.data.truncated);
+        assert_eq!(
+            calls,
+            vec![
+                (None, 2),
+                (Some(SavedKey::Int(2)), 2),
+                (Some(SavedKey::Int(4)), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn data_offset_preserves_truncation_when_page_has_more_children() {
+        let mut pages = vec![
+            data_page([1, 2], true, Some(2)),
+            data_page([3, 4], true, Some(4)),
+        ]
+        .into_iter();
+
+        let page = data_children_at_offset_with_limit(1, 2, 2, |_, _| {
+            Ok(pages.next().expect("test page"))
+        })
+        .expect("page");
+
+        assert_eq!(data_child_keys(&page.data.children), vec![2, 3]);
+        assert!(page.data.truncated);
+    }
+
+    fn data_page<const N: usize>(
+        keys: [i64; N],
+        truncated: bool,
+        cursor: Option<i64>,
+    ) -> tooling::StampedData<tooling::DataChildrenPage> {
+        tooling::StampedData {
+            data: tooling::DataChildrenPage {
+                children: keys
+                    .into_iter()
+                    .map(|key| tooling::DataChild::Key(SavedKey::Int(key)))
+                    .collect(),
+                truncated,
+                cursor: cursor.map(SavedKey::Int),
+            },
+            stamp: data_stamp(),
+        }
+    }
+
+    fn data_child_keys(children: &[tooling::DataChild]) -> Vec<i64> {
+        children
+            .iter()
+            .map(|child| match child {
+                tooling::DataChild::Key(SavedKey::Int(key)) => *key,
+                other => panic!("unexpected data child: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn data_stamp() -> tooling::DataSnapshotStamp {
+        tooling::DataSnapshotStamp {
+            store_uid: None,
+            store_catalog_digest: None,
+            store_commit: None,
+            open_transaction: None,
+            checked_source_digest: "test".to_string(),
+        }
     }
 }

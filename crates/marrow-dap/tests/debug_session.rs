@@ -2,9 +2,9 @@
 //!
 //! Spawns the built binary, drives the DAP handshake over its stdio with
 //! `Content-Length` framing, launches a fixture entry with stop-on-entry, and
-//! asserts the run stops, exposes a live local, blocks durable inspection, then
-//! continues to a clean termination. This exercises the whole rendezvous through
-//! the wire protocol, not internal APIs.
+//! asserts the run stops, exposes live locals and durable data, then continues to
+//! a clean termination. This exercises the whole rendezvous through the wire
+//! protocol, not internal APIs.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -179,6 +179,51 @@ fn write_durable_helper_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
+fn write_durable_debug_data_fixture(dir: &Path) -> std::path::PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  resource Book\n\
+                  \x20   required title: string\n\
+                  store ^books(id: int): Book\n\
+                  pub fn main()\n\
+                  \x20   const id: int = 1\n\
+                  \x20   ^books(id).title = \"Dune\"\n\
+                  \x20   print(^books(id).title ?? \"\")\n";
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
+    )
+    .unwrap();
+    file
+}
+
+fn write_durable_debug_data_paging_fixture(dir: &Path) -> std::path::PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  resource Book\n\
+                  \x20   required title: string\n\
+                  store ^books(id: int): Book\n\
+                  pub fn main()\n\
+                  \x20   ^books(1).title = \"Dune\"\n\
+                  \x20   ^books(2).title = \"Hyperion\"\n\
+                  \x20   ^books(3).title = \"Solaris\"\n\
+                  \x20   print(^books(3).title ?? \"\")\n";
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
+    )
+    .unwrap();
+    file
+}
+
 fn write_repeated_call_fixture(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -343,7 +388,7 @@ fn corrupt_catalog_utf8_with_empty_native_store(dir: &Path) {
 }
 
 /// Write a fixture with an expandable local sequence so DAP value responses
-/// exercise the local expansion contract while durable surfaces stay blocked.
+/// exercise the local expansion contract.
 fn write_value_contract_fixture(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -463,10 +508,6 @@ fn assert_response_marrow_error(
 
 fn assert_blocked_response(response: &Json, code: &str, blocked_on: &str) {
     assert_response_marrow_error(response, code, "blocked-on-marrow", Some(blocked_on));
-}
-
-fn assert_breakpoint_marrow_contract(breakpoint: &Json, code: &str, blocked_on: &str) {
-    assert_breakpoint_contract(breakpoint, code, "blocked-on-marrow", Some(blocked_on));
 }
 
 fn assert_verified_breakpoint(breakpoint: &Json, line: i64) {
@@ -1773,13 +1814,11 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
         .find(|scope| scope["name"] == "Locals")
         .and_then(|scope| scope["variablesReference"].as_i64())
         .expect("a Locals scope");
-    assert!(
-        scope_list.iter().all(|scope| !scope["name"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("^ Durable Data")),
-        "durable scope must stay hidden: {scopes}"
-    );
+    let durable_ref = scope_list
+        .iter()
+        .find(|scope| scope["name"] == "Durable Data")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a Durable Data scope");
 
     // The Locals scope exposes `title = "Dune"` (a string local in scope).
     let locals = client.request("variables", json!({ "variablesReference": locals_ref }));
@@ -1818,12 +1857,13 @@ fn verified_breakpoint_and_stepped_stop_exposes_locals() {
     let invalid = client.response_for(invalid);
     assert_evaluate_envelope_error(&invalid, "dap.evaluate.expressionInvalid", "invalid-params");
 
-    let durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
+    let durable_variables =
+        client.request("variables", json!({ "variablesReference": durable_ref }));
     let durable_variables = client.response_for(durable_variables);
-    assert_blocked_response(
-        &durable_variables,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
+    assert_eq!(
+        durable_variables["body"]["variables"],
+        json!([]),
+        "a project with no saved roots has an empty Durable Data scope: {durable_variables}"
     );
 
     let watch = client.request(
@@ -2315,9 +2355,9 @@ fn false_conditional_breakpoint_verifies_but_does_not_stop() {
 }
 
 #[test]
-fn durable_conditional_breakpoint_is_blocked_through_marrow_data_access_fact() {
+fn durable_conditional_breakpoint_evaluates_against_frame_data() {
     let dir = tempfile::tempdir().unwrap();
-    let file = write_durable_helper_fixture(dir.path());
+    let file = write_durable_debug_data_fixture(dir.path());
 
     let mut client = initialized_client();
 
@@ -2334,22 +2374,17 @@ fn durable_conditional_breakpoint_is_blocked_through_marrow_data_access_fact() {
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 11, "condition": "storedTitle(id) == \"Dune\"" }],
+            "breakpoints": [{ "line": 9, "condition": "(^books(id).title ?? \"\") == \"Dune\"" }],
         }),
     );
     let response = client.response_for(set);
     let breakpoint = &response["body"]["breakpoints"][0];
-    assert_eq!(breakpoint["verified"], false, "{response}");
-    assert_eq!(breakpoint["line"], 11, "{response}");
-    assert_breakpoint_marrow_contract(
-        breakpoint,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
-    );
+    assert_verified_breakpoint(breakpoint, 9);
 
     let done = client.request("configurationDone", json!({}));
     assert_eq!(client.response_for(done)["success"], true);
-    assert_terminates_without_stopping(&mut client);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
 }
 
 #[test]
@@ -2710,12 +2745,19 @@ fn dap_local_values_consume_runtime_debug_facts() {
         .find(|scope| scope["name"] == "Locals")
         .and_then(|scope| scope["variablesReference"].as_i64())
         .expect("a Locals scope");
-    assert!(
-        scope_list.iter().all(|scope| !scope["name"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("^ Durable Data")),
-        "durable scope must stay hidden: {scopes}"
+    let durable_ref = scope_list
+        .iter()
+        .find(|scope| scope["name"] == "Durable Data")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a Durable Data scope");
+
+    let durable_variables =
+        client.request("variables", json!({ "variablesReference": durable_ref }));
+    let durable_variables = client.response_for(durable_variables);
+    assert_eq!(
+        durable_variables["body"]["variables"],
+        json!([]),
+        "a project with no saved roots has an empty Durable Data scope: {durable_variables}"
     );
 
     let locals = client.request("variables", json!({ "variablesReference": locals_ref }));
@@ -2838,10 +2880,10 @@ fn dap_local_values_consume_runtime_debug_facts() {
 
     let durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
     let durable_variables = client.response_for(durable_variables);
-    assert_blocked_response(
-        &durable_variables,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
+    assert_eq!(
+        durable_variables["body"]["variables"],
+        json!([]),
+        "no saved roots are visible in this fixture: {durable_variables}"
     );
 
     let watch = client.request(
@@ -2957,7 +2999,7 @@ fn dap_large_local_sequences_preserve_truncation_facts() {
 }
 
 #[test]
-fn durable_data_inspection_is_blocked_by_default() {
+fn durable_data_scope_is_empty_without_saved_roots() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_fixture(dir.path());
 
@@ -2998,20 +3040,19 @@ fn durable_data_inspection_is_blocked_by_default() {
     let scopes = client.request("scopes", json!({ "frameId": frame_id }));
     let scopes = client.response_for(scopes);
     let scope_list = scopes["body"]["scopes"].as_array().unwrap();
-    assert!(
-        scope_list.iter().all(|scope| !scope["name"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with("^ Durable Data")),
-        "durable-data scope must be hidden by default: {scopes}"
-    );
+    let durable_ref = scope_list
+        .iter()
+        .find(|scope| scope["name"] == "Durable Data")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a Durable Data scope");
 
-    let manual_durable_variables = client.request("variables", json!({ "variablesReference": 2 }));
+    let manual_durable_variables =
+        client.request("variables", json!({ "variablesReference": durable_ref }));
     let manual_durable_variables = client.response_for(manual_durable_variables);
-    assert_blocked_response(
-        &manual_durable_variables,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
+    assert_eq!(
+        manual_durable_variables["body"]["variables"],
+        json!([]),
+        "no saved roots are visible in this fixture: {manual_durable_variables}"
     );
 
     let local_watch = client.request(
@@ -3023,9 +3064,9 @@ fn durable_data_inspection_is_blocked_by_default() {
 }
 
 #[test]
-fn durable_watch_is_blocked_through_marrow_data_access_fact() {
+fn durable_watch_evaluates_against_frame_data() {
     let dir = tempfile::tempdir().unwrap();
-    let file = write_durable_helper_fixture(dir.path());
+    let file = write_durable_debug_data_fixture(dir.path());
 
     let mut client = Client::spawn();
 
@@ -3042,7 +3083,7 @@ fn durable_watch_is_blocked_through_marrow_data_access_fact() {
         "setBreakpoints",
         json!({
             "source": { "path": file.display().to_string() },
-            "breakpoints": [{ "line": 11 }],
+            "breakpoints": [{ "line": 9 }],
         }),
     );
     assert_eq!(client.response_for(set)["success"], true);
@@ -3051,28 +3092,174 @@ fn durable_watch_is_blocked_through_marrow_data_access_fact() {
     assert_eq!(client.response_for(done)["success"], true);
     let stopped = client.event("stopped");
     assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
-    step_to_line(&mut client, 11);
+    step_to_line(&mut client, 9);
 
     let durable_watch = client.request(
         "evaluate",
         json!({ "expression": "(^books(id).title ?? \"\")", "context": "watch" }),
     );
     let durable_watch = client.response_for(durable_watch);
-    assert_blocked_response(
-        &durable_watch,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
-    );
+    assert_evaluate_runtime_debug_value(&durable_watch, "Dune", 0);
 
     let root_durable_watch = client.request(
         "evaluate",
         json!({ "expression": "^books(id).title", "context": "watch" }),
     );
     let root_durable_watch = client.response_for(root_durable_watch);
-    assert_blocked_response(
-        &root_durable_watch,
-        "dap.durableData.blocked",
-        "typed durable watch/path facts",
+    assert_evaluate_runtime_debug_value(&root_durable_watch, "Dune", 0);
+}
+
+#[test]
+fn durable_data_scope_expands_frame_data_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_durable_debug_data_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 9 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 9);
+
+    let stack = client.request("stackTrace", json!({ "threadId": 1 }));
+    let frames = client.response_for(stack);
+    let frame_id = frames["body"]["stackFrames"][0]["id"].as_i64().unwrap();
+    let scopes = client.request("scopes", json!({ "frameId": frame_id }));
+    let scopes = client.response_for(scopes);
+    let durable_ref = scopes["body"]["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scope| scope["name"] == "Durable Data")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a Durable Data scope");
+
+    let roots = client.request("variables", json!({ "variablesReference": durable_ref }));
+    let roots = client.response_for(roots);
+    let books = roots["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "^books")
+        .cloned()
+        .expect("books root");
+    let books_ref = books["variablesReference"].as_i64().expect("books expands");
+
+    let records = client.request("variables", json!({ "variablesReference": books_ref }));
+    let records = client.response_for(records);
+    let book = records["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "^books(1)")
+        .cloned()
+        .expect("book record");
+    let book_ref = book["variablesReference"].as_i64().expect("record expands");
+
+    let fields = client.request("variables", json!({ "variablesReference": book_ref }));
+    let fields = client.response_for(fields);
+    let title = fields["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "^books(1).title")
+        .expect("title field");
+    assert_eq!(title["value"], "\"Dune\"", "{fields}");
+    assert_eq!(title["variablesReference"], 0, "{fields}");
+}
+
+#[test]
+fn durable_data_scope_honors_offset_pages_over_frame_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_durable_debug_data_paging_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({ "supportsVariablePaging": true }));
+    client.response_for(init);
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 10 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 10);
+
+    let stack = client.request("stackTrace", json!({ "threadId": 1 }));
+    let frames = client.response_for(stack);
+    let frame_id = frames["body"]["stackFrames"][0]["id"].as_i64().unwrap();
+    let scopes = client.request("scopes", json!({ "frameId": frame_id }));
+    let scopes = client.response_for(scopes);
+    let durable_ref = scopes["body"]["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scope| scope["name"] == "Durable Data")
+        .and_then(|scope| scope["variablesReference"].as_i64())
+        .expect("a Durable Data scope");
+
+    let roots = client.request("variables", json!({ "variablesReference": durable_ref }));
+    let roots = client.response_for(roots);
+    let books_ref = roots["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variable| variable["name"] == "^books")
+        .and_then(|variable| variable["variablesReference"].as_i64())
+        .expect("books root expands");
+
+    let records = client.request(
+        "variables",
+        json!({ "variablesReference": books_ref, "start": 1, "count": 1 }),
+    );
+    let records = client.response_for(records);
+    let variables = records["body"]["variables"].as_array().unwrap();
+    assert_eq!(variables.len(), 1, "{records}");
+    assert_eq!(variables[0]["name"], "^books(2)", "{records}");
+    assert_eq!(variables[0]["value"], "", "{records}");
+    assert!(
+        variables[0]["variablesReference"]
+            .as_i64()
+            .is_some_and(|reference| reference > 0),
+        "{records}"
+    );
+    assert_eq!(
+        variables[0]["presentationHint"],
+        json!({ "attributes": ["readOnly"], "kind": "data" }),
+        "{records}"
     );
 }
 

@@ -14,9 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
-use marrow_check::{
-    AnalysisSnapshot, CheckedDebugExpression, DebugExpressionDataAccess, MarrowType, ScalarType,
-};
+use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType, tooling};
 use marrow_run::{DebugValue, EntryArgument, EntryInvocation, SourceAnalysisAdmission};
 use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
@@ -31,8 +29,7 @@ use crate::variables::{ChildCounts, ChildPage, VariablesFilter};
 /// The variable reference for the Locals scope at a stop. Fixed, since there is
 /// one Locals scope per frame.
 const LOCALS_REF: i64 = 1;
-/// Reserved durable-data reference. It rejects until Marrow exposes canonical
-/// durable watch/path facts.
+/// The variable reference for the Durable Data scope at a stop.
 const DURABLE_REF: i64 = 2;
 /// The first dynamically-allocated reference for expandable locals.
 const FIRST_DYNAMIC_REF: i64 = 1000;
@@ -41,14 +38,10 @@ const THREAD_ID: i64 = 1;
 /// The single stack frame id exposed while stopped. It is a frame identity, not
 /// the thread identity, even while both singleton ids share the same value.
 const FRAME_ID: i64 = 1;
-const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
 const STATUS_INVALID_PARAMS: &str = "invalid-params";
 const STATUS_INVALID_STATE: &str = "invalid-state";
 const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
-const DURABLE_WATCH_PATH_FACTS: &str = "typed durable watch/path facts";
-const RAW_DATA_INSPECTION_BLOCKED: &str =
-    "blocked-on-marrow: durable-data inspection needs typed durable watch/path facts from Marrow";
 const BREAKPOINT_CONFIGURATION_NOT_READY: &str =
     "breakpoint verification requires launch configuration";
 const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expression";
@@ -106,8 +99,6 @@ const ERROR_BREAKPOINT_NO_STOP_POINT: DapError =
 const ERROR_CONFIGURATION_NOT_READY: DapError =
     DapError::new("dap.launch.notConfigured", STATUS_INVALID_STATE);
 const ERROR_RUN_INVALID: DapError = DapError::new("dap.run.invalid", STATUS_RUNTIME_ERROR);
-const ERROR_DURABLE_DATA_BLOCKED: DapError =
-    DapError::blocked("dap.durableData.blocked", DURABLE_WATCH_PATH_FACTS);
 const ERROR_NOT_RUNNING: DapError = DapError::new("dap.notRunning", STATUS_INVALID_STATE);
 const ERROR_NOT_STOPPED: DapError = DapError::new("dap.notStopped", STATUS_INVALID_STATE);
 const ERROR_EVALUATE_EXPRESSION_INVALID: DapError =
@@ -122,6 +113,8 @@ const ERROR_VARIABLES_PAGE_INVALID: DapError =
     DapError::new("dap.variables.pageInvalid", STATUS_INVALID_PARAMS);
 const ERROR_VARIABLES_FILTER_INVALID: DapError =
     DapError::new("dap.variables.filterInvalid", STATUS_INVALID_PARAMS);
+const ERROR_VARIABLES_RUNTIME: DapError =
+    DapError::new("dap.variables.runtimeError", STATUS_RUNTIME_ERROR);
 const ERROR_THREAD_ID_INVALID: DapError =
     DapError::new("dap.threadId.invalid", STATUS_INVALID_PARAMS);
 const ERROR_FRAME_ID_INVALID: DapError =
@@ -140,14 +133,6 @@ impl DapError {
             code,
             status,
             blocked_on: None,
-        }
-    }
-
-    const fn blocked(code: &'static str, blocked_on: &'static str) -> Self {
-        Self {
-            code,
-            status: STATUS_BLOCKED_ON_MARROW,
-            blocked_on: Some(blocked_on),
         }
     }
 
@@ -190,6 +175,7 @@ struct BreakpointSpec {
 #[derive(Clone)]
 enum Expandable {
     Value(DebugValue),
+    DataPath(Vec<tooling::DataPathSegment>),
 }
 
 /// The live run-thread plus the channels to drive it.
@@ -301,18 +287,6 @@ impl DapInputError {
             message: message.into(),
             contract,
         }
-    }
-}
-
-fn reject_durable_debug_expression(
-    expression: &CheckedDebugExpression,
-) -> Result<(), DapInputError> {
-    match expression.data_access() {
-        DebugExpressionDataAccess::LocalOnly => Ok(()),
-        DebugExpressionDataAccess::RequiresDurableData => Err(DapInputError::new(
-            RAW_DATA_INSPECTION_BLOCKED,
-            ERROR_DURABLE_DATA_BLOCKED,
-        )),
     }
 }
 
@@ -790,7 +764,6 @@ impl<W: Write> Session<W> {
                     ERROR_BREAKPOINT_CONDITION_INVALID,
                 )
             })?;
-        reject_durable_debug_expression(&expression)?;
         if !matches!(expression.ty(), MarrowType::Primitive(ScalarType::Bool)) {
             return Err(DapInputError::new(
                 BREAKPOINT_CONDITION_INVALID,
@@ -930,8 +903,8 @@ impl<W: Write> Session<W> {
         );
     }
 
-    /// `scopes`: Locals are available. Durable data is blocked until Marrow
-    /// exposes canonical tooling facts.
+    /// `scopes`: Locals and durable saved data are both served by Marrow runtime
+    /// debug facts from the parked frame.
     fn on_scopes(&mut self, request: &Json, arguments: &Json) {
         if let Err(error) = parse_frame_id(arguments) {
             self.respond_error(request, error.message, error.contract);
@@ -946,11 +919,18 @@ impl<W: Write> Session<W> {
             self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
             return;
         }
-        let scopes = vec![json!({
-            "name": "Locals",
-            "variablesReference": LOCALS_REF,
-            "expensive": false,
-        })];
+        let scopes = vec![
+            json!({
+                "name": "Locals",
+                "variablesReference": LOCALS_REF,
+                "expensive": false,
+            }),
+            json!({
+                "name": "Durable Data",
+                "variablesReference": DURABLE_REF,
+                "expensive": false,
+            }),
+        ];
         self.respond(request, true, json!({ "scopes": scopes }));
     }
 
@@ -963,17 +943,21 @@ impl<W: Write> Session<W> {
                 return;
             }
         };
-        if input.reference == DURABLE_REF {
-            self.respond_error(
-                request,
-                RAW_DATA_INSPECTION_BLOCKED,
-                ERROR_DURABLE_DATA_BLOCKED,
-            );
-            return;
-        }
         let body = match input.reference {
-            LOCALS_REF => self.locals_variables(input.page, input.filter),
+            LOCALS_REF => Ok(self.locals_variables(input.page, input.filter)),
+            DURABLE_REF => self.data_variables(Vec::new(), input.page),
             other => self.expandable_variables(other, input.page, input.filter),
+        };
+        let body = match body {
+            Ok(body) => body,
+            Err(error) => {
+                self.respond_error(
+                    request,
+                    format!("{}: {}", error.code, error.message),
+                    ERROR_VARIABLES_RUNTIME,
+                );
+                return;
+            }
         };
         self.respond(request, true, body);
     }
@@ -1020,15 +1004,20 @@ impl<W: Write> Session<W> {
         reference: i64,
         page: ChildPage,
         filter: VariablesFilter,
-    ) -> Json {
+    ) -> Result<Json, crate::debugger::RuntimeErrorDetail> {
         let Some(value) = self
             .expandables
             .get(&reference)
             .map(|expandable| match expandable {
-                Expandable::Value(value) => value.clone(),
+                Expandable::Value(value) => Ok(value.clone()),
+                Expandable::DataPath(path) => Err(path.clone()),
             })
         else {
-            return variables_body(Vec::new());
+            return Ok(variables_body(Vec::new()));
+        };
+        let value = match value {
+            Ok(value) => value,
+            Err(path) => return self.data_variables(path, page),
         };
         let children_truncated = value.children_truncated();
         let children = crate::variables::children(&value, page, filter);
@@ -1036,7 +1025,44 @@ impl<W: Write> Session<W> {
         body["marrowDebug"] = json!({
             "childrenTruncated": children_truncated,
         });
-        body
+        Ok(body)
+    }
+
+    fn data_variables(
+        &mut self,
+        segments: Vec<tooling::DataPathSegment>,
+        page: ChildPage,
+    ) -> Result<Json, crate::debugger::RuntimeErrorDetail> {
+        let Some(QueryResult::DataChildren(snapshot)) =
+            self.query(Query::DataChildren { segments, page })
+        else {
+            return Ok(variables_body(Vec::new()));
+        };
+        let snapshot = snapshot?;
+        let children_truncated = snapshot.children_truncated;
+        let variables = snapshot
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let reference = if entry.expandable {
+                    self.alloc_ref(Expandable::DataPath(entry.path))
+                } else {
+                    0
+                };
+                variable_json(
+                    &entry.name,
+                    &entry.value,
+                    reference,
+                    None,
+                    entry.children_truncated,
+                )
+            })
+            .collect();
+        let mut body = variables_body(variables);
+        body["marrowDebug"] = json!({
+            "childrenTruncated": children_truncated,
+        });
+        Ok(body)
     }
 
     fn child_variables(&mut self, children: Vec<crate::variables::Child>) -> Vec<Json> {
@@ -1140,8 +1166,7 @@ impl<W: Write> Session<W> {
     }
 
     /// `evaluate`: watch, REPL, and hover requests evaluate checked Marrow
-    /// debug expressions at the current stopped frame. Expressions that require
-    /// durable data remain blocked.
+    /// debug expressions at the current stopped frame.
     fn on_evaluate(&mut self, request: &Json, arguments: &Json) {
         let input = match parse_evaluate_input(arguments) {
             Ok(input) => input,
@@ -1201,10 +1226,6 @@ impl<W: Write> Session<W> {
                     diagnostic_message(EVALUATE_EXPRESSION_INVALID, &diagnostics),
                     ERROR_EVALUATE_EXPRESSION_INVALID,
                 )
-            })
-            .and_then(|expression| {
-                reject_durable_debug_expression(&expression)?;
-                Ok(expression)
             })
     }
 
@@ -1911,7 +1932,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_evaluate_expression_blocks_durable_data_access() {
+    fn checked_evaluate_expression_admits_durable_data_access() {
         let dir = write_durable_debug_project();
         let launch = crate::project::prepare(dir.path(), None, &[]).expect("launch");
         let stop_points = StopPointIndex::from_runtime(launch.session.runtime_program());
@@ -1925,13 +1946,21 @@ mod tests {
 
         let direct = session
             .checked_evaluate_expression(&stop.file, stop.span, "(^books(id).title ?? \"\")")
-            .expect_err("durable data expression should be blocked");
-        assert_eq!(direct.contract.code, "dap.durableData.blocked");
+            .unwrap_or_else(|_| panic!("durable data expression checks through Marrow"));
+        assert!(matches!(
+            direct.data_access(),
+            marrow_check::DebugExpressionDataAccess::RequiresDurableData
+        ));
 
         let helper = session
             .checked_evaluate_expression(&stop.file, stop.span, "storedTitle(id) == \"Dune\"")
-            .expect_err("helper-mediated durable data expression should be blocked");
-        assert_eq!(helper.contract.code, "dap.durableData.blocked");
+            .unwrap_or_else(|_| {
+                panic!("helper-mediated durable data expression checks through Marrow")
+            });
+        assert!(matches!(
+            helper.ty(),
+            marrow_check::MarrowType::Primitive(marrow_check::ScalarType::Bool)
+        ));
     }
 
     #[test]
