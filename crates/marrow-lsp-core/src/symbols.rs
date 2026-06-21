@@ -10,10 +10,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
-use marrow_check::{
-    AnalysisSnapshot, CatalogDeclaration, CatalogEntryKind, CheckedFacts, EnumMemberFact,
-    ModuleFact, ModuleId, ResourceMemberFact,
-};
+use marrow_check::AnalysisSnapshot;
+use marrow_check::tooling::{SourceSymbolKind, source_symbols};
 use marrow_syntax::{
     Declaration, EnumDecl, EnumMember, EvolveDecl, EvolveStep, FieldDecl, FunctionDecl, GroupDecl,
     IndexDecl, ResourceDecl, ResourceMember, SourceFile, SourceSpan, StoreDecl, SurfaceDecl,
@@ -259,221 +257,19 @@ fn function_signature(function: &FunctionDecl) -> String {
 /// project-wide list for "go to symbol in workspace".
 pub fn workspace_symbols(snapshot: &AnalysisSnapshot) -> Vec<SymbolInformation> {
     let sources = WorkspaceSources::new(snapshot);
-    let containers = CatalogContainers::new(snapshot);
-    let mut symbols = Vec::new();
-    for module in &snapshot.program.modules {
-        let Some(source) = sources.get(&module.source_file) else {
-            continue;
-        };
-        for function in &module.functions {
-            symbols.push(flat_symbol(
-                &function.name,
-                SymbolKind::FUNCTION,
+    source_symbols(snapshot)
+        .into_iter()
+        .filter_map(|symbol| {
+            let source = sources.get(&symbol.file)?;
+            Some(flat_symbol(
+                &symbol.name,
+                source_symbol_kind(symbol.kind),
                 source,
-                function.span,
-                non_empty(&module.name),
-            ));
-        }
-        for constant in &module.constants {
-            symbols.push(flat_symbol(
-                &constant.name,
-                SymbolKind::CONSTANT,
-                source,
-                constant.span,
-                non_empty(&module.name),
-            ));
-        }
-    }
-    for declaration in snapshot.catalog_declarations() {
-        let Some(source) = sources.get(&declaration.file) else {
-            continue;
-        };
-        let name = catalog_symbol_name(declaration);
-        symbols.push(flat_symbol(
-            &name,
-            catalog_symbol_kind(declaration.kind),
-            source,
-            declaration.span,
-            containers.get(declaration),
-        ));
-    }
-    symbols
-}
-
-struct CatalogContainers {
-    by_catalog_id: HashMap<String, String>,
-}
-
-impl CatalogContainers {
-    fn new(snapshot: &AnalysisSnapshot) -> Self {
-        let mut containers = Self {
-            by_catalog_id: HashMap::new(),
-        };
-        let facts = &snapshot.program.facts;
-        let modules = facts.modules();
-
-        for declaration in snapshot.catalog_declarations() {
-            if let Some(owner) = declaration_owner(facts, modules, declaration) {
-                containers.insert_owner(declaration.catalog_id.as_str(), owner);
-            }
-        }
-
-        containers
-    }
-
-    fn insert_owner(&mut self, catalog_id: &str, owner: String) {
-        if !owner.is_empty() {
-            self.by_catalog_id.insert(catalog_id.to_string(), owner);
-        }
-    }
-
-    fn get(&self, declaration: &CatalogDeclaration) -> Option<&str> {
-        self.by_catalog_id
-            .get(&declaration.catalog_id)
-            .map(String::as_str)
-    }
-}
-
-fn module_name(modules: &[ModuleFact], id: ModuleId) -> &str {
-    modules
-        .get(id.0 as usize)
-        .map_or("", |module| module.name.as_str())
-}
-
-fn declaration_owner(
-    facts: &CheckedFacts,
-    modules: &[ModuleFact],
-    declaration: &CatalogDeclaration,
-) -> Option<String> {
-    match declaration.kind {
-        CatalogEntryKind::Resource => facts
-            .resources()
-            .iter()
-            .find(|resource| {
-                resource.name == declaration.name
-                    && resource.name_span == declaration.span
-                    && fact_file(modules, resource.module) == Some(declaration.file.as_path())
-            })
-            .map(|resource| module_name(modules, resource.module).to_string()),
-        CatalogEntryKind::Store => facts
-            .stores()
-            .iter()
-            .find(|store| {
-                store.root == declaration.name
-                    && store.name_span == declaration.span
-                    && fact_file(modules, store.module) == Some(declaration.file.as_path())
-            })
-            .map(|store| module_name(modules, store.module).to_string()),
-        CatalogEntryKind::StoreIndex => facts.store_indexes().iter().find_map(|index| {
-            let store = facts.store(index.store);
-            (index.name == declaration.name
-                && index.name_span == declaration.span
-                && fact_file(modules, store.module) == Some(declaration.file.as_path()))
-            .then(|| {
-                let module = module_name(modules, store.module);
-                join_owner(module, vec![format!("^{}", store.root)])
-            })
-        }),
-        CatalogEntryKind::ResourceMember => facts.resource_members().iter().find_map(|member| {
-            let resource = facts.resource(member.resource);
-            (member.name == declaration.name
-                && member.name_span == declaration.span
-                && fact_file(modules, resource.module) == Some(declaration.file.as_path()))
-            .then(|| {
-                let module = module_name(modules, resource.module);
-                join_owner(module, resource_member_owner_parts(facts, member))
-            })
-        }),
-        CatalogEntryKind::Enum => facts
-            .enums()
-            .iter()
-            .find(|enum_fact| {
-                enum_fact.name == declaration.name
-                    && enum_fact.name_span == declaration.span
-                    && fact_file(modules, enum_fact.module) == Some(declaration.file.as_path())
-            })
-            .map(|enum_fact| module_name(modules, enum_fact.module).to_string()),
-        CatalogEntryKind::EnumMember => facts.enum_members().iter().find_map(|member| {
-            let enum_fact = facts.enum_(member.enum_id)?;
-            (member.name == declaration.name
-                && member.name_span == declaration.span
-                && fact_file(modules, enum_fact.module) == Some(declaration.file.as_path()))
-            .then(|| {
-                let module = module_name(modules, enum_fact.module);
-                join_owner(module, enum_member_owner_parts(facts, member))
-            })
-        }),
-    }
-}
-
-fn fact_file(modules: &[ModuleFact], id: ModuleId) -> Option<&Path> {
-    modules
-        .get(id.0 as usize)
-        .map(|module| module.source_file.as_path())
-}
-
-fn resource_member_owner_parts(facts: &CheckedFacts, member: &ResourceMemberFact) -> Vec<String> {
-    let resource = facts.resource(member.resource);
-    let mut parts = vec![resource.name.clone()];
-    let mut parents = resource_member_parent_names(facts, member);
-    parts.append(&mut parents);
-    parts
-}
-
-fn resource_member_parent_names(facts: &CheckedFacts, member: &ResourceMemberFact) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut parent = member.parent;
-    while let Some(parent_id) = parent {
-        let Some(parent_member) = facts.resource_members().get(parent_id.0 as usize) else {
-            break;
-        };
-        names.push(parent_member.name.clone());
-        parent = parent_member.parent;
-    }
-    names.reverse();
-    names
-}
-
-fn enum_member_owner_parts(facts: &CheckedFacts, member: &EnumMemberFact) -> Vec<String> {
-    let Some(enum_fact) = facts.enum_(member.enum_id) else {
-        return Vec::new();
-    };
-    let mut parts = vec![enum_fact.name.clone()];
-    let mut parents = enum_member_parent_names(facts, member);
-    parts.append(&mut parents);
-    parts
-}
-
-fn enum_member_parent_names(facts: &CheckedFacts, member: &EnumMemberFact) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut parent = member.parent;
-    while let Some(parent_id) = parent {
-        let Some(parent_member) = facts.enum_member(parent_id) else {
-            break;
-        };
-        names.push(parent_member.name.clone());
-        parent = parent_member.parent;
-    }
-    names.reverse();
-    names
-}
-
-fn join_owner(module: &str, parts: Vec<String>) -> String {
-    let mut owner = String::new();
-    if !module.is_empty() {
-        owner.push_str(module);
-    }
-    for part in parts {
-        if !owner.is_empty() {
-            owner.push_str("::");
-        }
-        owner.push_str(&part);
-    }
-    owner
-}
-
-fn non_empty(value: &str) -> Option<&str> {
-    (!value.is_empty()).then_some(value)
+                symbol.span,
+                symbol.container.as_deref(),
+            ))
+        })
+        .collect()
 }
 
 struct WorkspaceSources {
@@ -509,21 +305,16 @@ struct WorkspaceSource {
     index: LineIndex,
 }
 
-fn catalog_symbol_name(declaration: &CatalogDeclaration) -> String {
-    match declaration.kind {
-        CatalogEntryKind::Store => format!("^{}", declaration.name),
-        _ => declaration.name.clone(),
-    }
-}
-
-fn catalog_symbol_kind(kind: CatalogEntryKind) -> SymbolKind {
+fn source_symbol_kind(kind: SourceSymbolKind) -> SymbolKind {
     match kind {
-        CatalogEntryKind::Resource => SymbolKind::STRUCT,
-        CatalogEntryKind::Store => SymbolKind::OBJECT,
-        CatalogEntryKind::StoreIndex => SymbolKind::KEY,
-        CatalogEntryKind::ResourceMember => SymbolKind::FIELD,
-        CatalogEntryKind::Enum => SymbolKind::ENUM,
-        CatalogEntryKind::EnumMember => SymbolKind::ENUM_MEMBER,
+        SourceSymbolKind::Constant => SymbolKind::CONSTANT,
+        SourceSymbolKind::Function => SymbolKind::FUNCTION,
+        SourceSymbolKind::Resource => SymbolKind::STRUCT,
+        SourceSymbolKind::Store => SymbolKind::OBJECT,
+        SourceSymbolKind::StoreIndex => SymbolKind::KEY,
+        SourceSymbolKind::ResourceMember => SymbolKind::FIELD,
+        SourceSymbolKind::Enum => SymbolKind::ENUM,
+        SourceSymbolKind::EnumMember => SymbolKind::ENUM_MEMBER,
     }
 }
 
@@ -894,5 +685,28 @@ enum Status
             .find(|symbol| symbol.name == "active")
             .expect("enum member symbol");
         assert_eq!(member.container_name.as_deref(), Some("a::Status"));
+    }
+
+    #[test]
+    fn workspace_symbols_do_not_own_catalog_classification() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("symbols.rs"),
+        )
+        .expect("read symbols source");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
+
+        for obsolete in [
+            "CatalogEntryKind",
+            "struct CatalogContainers",
+            "fn declaration_owner",
+            "fn catalog_symbol_kind",
+        ] {
+            assert!(
+                !production.contains(obsolete),
+                "workspace symbols should consume marrow-check source-symbol facts, not own `{obsolete}`"
+            );
+        }
     }
 }
