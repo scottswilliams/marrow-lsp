@@ -103,6 +103,7 @@ impl Backend {
                 truncated: result.truncated,
                 cursor: result.cursor,
                 store_snapshot: result.store_snapshot,
+                data_view_boundary: result.data_view_boundary,
                 error: None,
             },
             Err(error) => data_children_error(error),
@@ -125,6 +126,7 @@ impl Backend {
                 value: result.value,
                 value_truncated: result.value_truncated,
                 store_snapshot: result.store_snapshot,
+                data_view_boundary: result.data_view_boundary,
                 error: None,
             },
             Err(error) => data_read_error(error),
@@ -226,6 +228,7 @@ fn unavailable_data_children() -> DataChildViewsResponse {
         truncated: false,
         cursor: None::<DataKeyDto>,
         store_snapshot: None,
+        data_view_boundary: None,
         error: None,
     }
 }
@@ -237,6 +240,7 @@ fn data_children_error(error: DataChildrenError) -> DataChildViewsResponse {
         truncated: false,
         cursor: None::<DataKeyDto>,
         store_snapshot: None,
+        data_view_boundary: None,
         error: Some(error),
     }
 }
@@ -248,6 +252,7 @@ fn unavailable_data_read() -> DataReadResponse {
         value: None,
         value_truncated: false,
         store_snapshot: None,
+        data_view_boundary: None,
         error: None,
     }
 }
@@ -259,6 +264,7 @@ fn data_read_error(error: DataChildrenError) -> DataReadResponse {
         value: None,
         value_truncated: false,
         store_snapshot: None,
+        data_view_boundary: None,
         error: Some(error),
     }
 }

@@ -7,6 +7,7 @@ interface SavedRootsResult {
   available: boolean;
   roots: SavedRootView[];
   store_snapshot: StoreSnapshot | null;
+  data_view_boundary?: DataViewBoundary;
 }
 
 type StoreSnapshot = DataGeneration;
@@ -30,6 +31,33 @@ interface DataGenerationCommit {
 
 interface DataGenerationTransaction {
   readonly depth: number;
+}
+
+interface SourceAnalysisGeneration {
+  readonly profileVersion: "analysis.generation.v1";
+  readonly sourceIdentity: string;
+  readonly configDigest: string;
+  readonly checkedSourceDigest: string;
+  readonly readOnlyContextDigest: string;
+  readonly acceptedCatalog: SourceAnalysisCatalog | null;
+  readonly proposalCatalog: SourceAnalysisCatalog | null;
+}
+
+interface SourceAnalysisCatalog {
+  readonly epoch: number;
+  readonly digest: string | null;
+}
+
+interface DataViewBoundary {
+  readonly sourceAnalysisGeneration: SourceAnalysisGeneration;
+  readonly storeSnapshot: StoreSnapshot;
+  readonly compatibility: { readonly verdict: "admitted" };
+  readonly watchTargets: DataViewWatchTarget[];
+}
+
+interface DataViewWatchTarget {
+  readonly kind: "store_file" | "catalog_lock";
+  readonly path: string;
 }
 
 type DataRootSegment = { readonly kind: "root"; readonly store_catalog_id: string };
@@ -65,6 +93,7 @@ interface DataChildViewsResult {
   readonly truncated: boolean;
   readonly cursor: DataKey | null;
   readonly store_snapshot: StoreSnapshot | null;
+  readonly data_view_boundary?: DataViewBoundary;
   readonly error?: unknown;
 }
 
@@ -79,6 +108,7 @@ interface DataReadResult {
   readonly value?: string;
   readonly value_truncated: boolean;
   readonly store_snapshot: StoreSnapshot | null;
+  readonly data_view_boundary?: DataViewBoundary;
   readonly error?: unknown;
 }
 
@@ -99,14 +129,14 @@ interface SavedRootNode {
   readonly kind: "root";
   readonly label: string;
   readonly segment: DataRootSegment;
-  readonly snapshot: StoreSnapshot;
+  readonly boundary: DataViewBoundary;
 }
 
 interface SavedSegmentNode {
   readonly kind: "segment";
   readonly label: string;
   readonly segments: DataPathSegment[];
-  readonly snapshot: StoreSnapshot;
+  readonly boundary: DataViewBoundary;
 }
 
 interface SavedValueNode {
@@ -120,7 +150,7 @@ interface SavedMoreNode {
   readonly label: string;
   readonly segments: DataPathSegment[];
   readonly cursor: DataKey;
-  readonly snapshot: StoreSnapshot;
+  readonly boundary: DataViewBoundary;
 }
 
 interface SavedPlaceholderNode {
@@ -167,13 +197,13 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
   async getChildren(node?: SavedResourceNode): Promise<SavedResourceNode[]> {
     if (node !== undefined) {
       if (node.kind === "root") {
-        return this.getDataChildren([node.segment], null, node.snapshot);
+        return this.getDataChildren([node.segment], null, node.boundary);
       }
       if (node.kind === "segment") {
         return this.getSegmentChildren(node);
       }
       if (node.kind === "more") {
-        return this.getDataChildren(node.segments, node.cursor, node.snapshot);
+        return this.getDataChildren(node.segments, node.cursor, node.boundary);
       }
       return [];
     }
@@ -190,8 +220,8 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
-    const snapshot = storeSnapshotFromWire(result.store_snapshot);
-    if (snapshot === undefined) {
+    const boundary = dataViewBoundaryFromWire(result.data_view_boundary);
+    if (boundary === undefined) {
       return [unavailableNode()];
     }
     return result.roots.map(
@@ -199,7 +229,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
         kind: "root",
         label: root.label,
         segment: root.segment,
-        snapshot,
+        boundary,
       }),
     );
   }
@@ -207,7 +237,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
   private async getDataChildren(
     segments: DataPathSegment[],
     cursor: DataKey | null,
-    expectedSnapshot: StoreSnapshot,
+    expectedBoundary: DataViewBoundary,
   ): Promise<SavedResourceNode[]> {
     const client = this.client;
     if (client === undefined) {
@@ -226,8 +256,8 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
-    const snapshot = storeSnapshotFromWire(result.store_snapshot);
-    if (snapshot === undefined || !sameSnapshot(expectedSnapshot, snapshot)) {
+    const boundary = dataViewBoundaryFromWire(result.data_view_boundary);
+    if (boundary === undefined || !sameBoundary(expectedBoundary, boundary)) {
       return [changedNode()];
     }
     if (result.error !== undefined) {
@@ -237,7 +267,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       kind: "segment",
       label: child.label,
       segments: [...segments, child.segment],
-      snapshot,
+      boundary,
     }));
     if (result.truncated) {
       if (result.cursor !== null) {
@@ -246,7 +276,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
           label: "more children",
           segments: [...segments],
           cursor: result.cursor,
-          snapshot,
+          boundary,
         });
       } else {
         nodes.push({ kind: "truncated", label: "additional children unavailable" });
@@ -256,16 +286,16 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
   }
 
   private async getSegmentChildren(node: SavedSegmentNode): Promise<SavedResourceNode[]> {
-    const read = await this.readData(node.segments, node.snapshot);
+    const read = await this.readData(node.segments, node.boundary);
     if (read !== undefined) {
       return read;
     }
-    return this.getDataChildren(node.segments, null, node.snapshot);
+    return this.getDataChildren(node.segments, null, node.boundary);
   }
 
   private async readData(
     segments: DataPathSegment[],
-    expectedSnapshot: StoreSnapshot,
+    expectedBoundary: DataViewBoundary,
   ): Promise<SavedResourceNode[] | undefined> {
     const client = this.client;
     if (client === undefined) {
@@ -284,8 +314,8 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
-    const snapshot = storeSnapshotFromWire(result.store_snapshot);
-    if (snapshot === undefined || !sameSnapshot(expectedSnapshot, snapshot)) {
+    const boundary = dataViewBoundaryFromWire(result.data_view_boundary);
+    if (boundary === undefined || !sameBoundary(expectedBoundary, boundary)) {
       return [changedNode()];
     }
     if (result.error !== undefined) {
@@ -299,6 +329,100 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     }
     return undefined;
   }
+}
+
+function dataViewBoundaryFromWire(value: unknown): DataViewBoundary | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const sourceAnalysisGeneration = sourceAnalysisGenerationFromWire(
+    value.sourceAnalysisGeneration,
+  );
+  const storeSnapshot = storeSnapshotFromWire(value.storeSnapshot);
+  const compatibility = compatibilityFromWire(value.compatibility);
+  const watchTargets = watchTargetsFromWire(value.watchTargets);
+  if (
+    sourceAnalysisGeneration === undefined ||
+    storeSnapshot === undefined ||
+    compatibility === undefined ||
+    watchTargets === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    sourceAnalysisGeneration,
+    storeSnapshot,
+    compatibility,
+    watchTargets,
+  };
+}
+
+function sourceAnalysisGenerationFromWire(
+  value: unknown,
+): SourceAnalysisGeneration | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (
+    value.profileVersion !== "analysis.generation.v1" ||
+    typeof value.sourceIdentity !== "string" ||
+    typeof value.configDigest !== "string" ||
+    typeof value.checkedSourceDigest !== "string" ||
+    typeof value.readOnlyContextDigest !== "string"
+  ) {
+    return undefined;
+  }
+  const acceptedCatalog = sourceAnalysisCatalogFromWire(value.acceptedCatalog);
+  const proposalCatalog = sourceAnalysisCatalogFromWire(value.proposalCatalog);
+  if (acceptedCatalog === undefined || proposalCatalog === undefined) {
+    return undefined;
+  }
+  return {
+    profileVersion: "analysis.generation.v1",
+    sourceIdentity: value.sourceIdentity,
+    configDigest: value.configDigest,
+    checkedSourceDigest: value.checkedSourceDigest,
+    readOnlyContextDigest: value.readOnlyContextDigest,
+    acceptedCatalog,
+    proposalCatalog,
+  };
+}
+
+function sourceAnalysisCatalogFromWire(value: unknown): SourceAnalysisCatalog | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (!isRecord(value) || !isSafeInteger(value.epoch) || !isStringOrNull(value.digest)) {
+    return undefined;
+  }
+  return { epoch: value.epoch, digest: value.digest };
+}
+
+function compatibilityFromWire(
+  value: unknown,
+): { readonly verdict: "admitted" } | undefined {
+  if (!isRecord(value) || value.verdict !== "admitted") {
+    return undefined;
+  }
+  return { verdict: "admitted" };
+}
+
+function watchTargetsFromWire(value: unknown): DataViewWatchTarget[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const targets: DataViewWatchTarget[] = [];
+  for (const target of value) {
+    if (
+      !isRecord(target) ||
+      (target.kind !== "store_file" && target.kind !== "catalog_lock") ||
+      typeof target.path !== "string"
+    ) {
+      return undefined;
+    }
+    targets.push({ kind: target.kind, path: target.path });
+  }
+  return targets;
 }
 
 function unavailableNode(): SavedPlaceholderNode {
@@ -388,6 +512,60 @@ function isStringOrNull(value: unknown): value is string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sameBoundary(left: DataViewBoundary, right: DataViewBoundary): boolean {
+  return (
+    sameSourceAnalysisGeneration(
+      left.sourceAnalysisGeneration,
+      right.sourceAnalysisGeneration,
+    ) &&
+    sameSnapshot(left.storeSnapshot, right.storeSnapshot) &&
+    left.compatibility.verdict === right.compatibility.verdict &&
+    sameWatchTargets(left.watchTargets, right.watchTargets)
+  );
+}
+
+function sameWatchTargets(
+  left: DataViewWatchTarget[],
+  right: DataViewWatchTarget[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((target, index) => {
+      const other = right[index];
+      return (
+        other !== undefined &&
+        target.kind === other.kind &&
+        target.path === other.path
+      );
+    })
+  );
+}
+
+function sameSourceAnalysisGeneration(
+  left: SourceAnalysisGeneration,
+  right: SourceAnalysisGeneration,
+): boolean {
+  return (
+    left.profileVersion === right.profileVersion &&
+    left.sourceIdentity === right.sourceIdentity &&
+    left.configDigest === right.configDigest &&
+    left.checkedSourceDigest === right.checkedSourceDigest &&
+    left.readOnlyContextDigest === right.readOnlyContextDigest &&
+    sameSourceAnalysisCatalog(left.acceptedCatalog, right.acceptedCatalog) &&
+    sameSourceAnalysisCatalog(left.proposalCatalog, right.proposalCatalog)
+  );
+}
+
+function sameSourceAnalysisCatalog(
+  left: SourceAnalysisCatalog | null,
+  right: SourceAnalysisCatalog | null,
+): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  return left.epoch === right.epoch && left.digest === right.digest;
 }
 
 function sameSnapshot(left: StoreSnapshot, right: StoreSnapshot): boolean {

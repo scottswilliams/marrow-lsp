@@ -105,6 +105,25 @@ fn assert_store_snapshot(snapshot: &Json) {
     );
 }
 
+fn assert_data_view_boundary(boundary: &Json) {
+    assert_eq!(
+        boundary["sourceAnalysisGeneration"]["profileVersion"], "analysis.generation.v1",
+        "boundary should carry Marrow source analysis generation: {boundary}"
+    );
+    assert_store_snapshot(&boundary["storeSnapshot"]);
+    assert_eq!(
+        boundary["compatibility"],
+        json!({ "verdict": "admitted" }),
+        "boundary should carry admitted compatibility: {boundary}"
+    );
+    assert!(
+        boundary["watchTargets"]
+            .as_array()
+            .is_some_and(|targets| targets.len() == 2),
+        "boundary should carry Marrow watch targets: {boundary}"
+    );
+}
+
 /// Write a clean two-resource project to a temp dir and return its root and a
 /// file inside it. The project declares a saved `Book` resource and a couple of
 /// functions an `mw_run`/`mw_type_at` test can target.
@@ -1522,19 +1541,23 @@ fn data_tools_refuse_when_not_enabled() {
     let roots = saved_roots(&file, false);
     assert_eq!(roots["available"], false);
     assert_eq!(roots["dataAccess"], "disabled");
+    assert!(
+        roots.get("data_view_boundary").is_none(),
+        "disabled data replies must not carry a fake boundary: {roots}"
+    );
     assert_contract(
         &roots,
         "presentation-only",
         "saved-root listing helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
     let integrity = data_integrity(&file, false);
     assert_eq!(integrity["dataAccess"], "disabled");
     assert_eq!(integrity["store_snapshot"], Json::Null);
+    assert!(
+        integrity.get("data_view_boundary").is_none(),
+        "disabled data replies must not carry a fake boundary: {integrity}"
+    );
     assert_contract(
         &integrity,
         "presentation-only",
@@ -1557,15 +1580,15 @@ fn data_tools_refuse_when_not_enabled() {
         false,
     );
     assert_eq!(children["dataAccess"], "disabled");
+    assert!(
+        children.get("data_view_boundary").is_none(),
+        "disabled data replies must not carry a fake boundary: {children}"
+    );
     assert_contract(
         &children,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
 
     let read = data_read(
@@ -1577,15 +1600,15 @@ fn data_tools_refuse_when_not_enabled() {
         false,
     );
     assert_eq!(read["dataAccess"], "disabled");
+    assert!(
+        read.get("data_view_boundary").is_none(),
+        "disabled data replies must not carry a fake boundary: {read}"
+    );
     assert_contract(
         &read,
         "presentation-only",
         "data value preview helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
 }
 
@@ -1607,15 +1630,12 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
         "{result}"
     );
     assert_store_snapshot(&result["store_snapshot"]);
+    assert_data_view_boundary(&result["data_view_boundary"]);
     assert_contract(
         &result,
         "presentation-only",
         "saved-root listing helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
 }
 
@@ -1625,6 +1645,10 @@ fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
 
     let roots = saved_roots(&file, true);
     assert_eq!(roots["available"], false, "{roots}");
+    assert!(
+        roots.get("data_view_boundary").is_none(),
+        "unavailable data replies must not carry a fake boundary: {roots}"
+    );
     assert!(
         roots["error"]
             .as_str()
@@ -1645,6 +1669,10 @@ fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
     assert_eq!(children["available"], false, "{children}");
     assert_eq!(children["children"], json!([]), "{children}");
     assert!(
+        children.get("data_view_boundary").is_none(),
+        "unavailable data replies must not carry a fake boundary: {children}"
+    );
+    assert!(
         children["error"]
             .as_str()
             .is_some_and(|error| error.contains("no catalog activation stamp")),
@@ -1660,6 +1688,7 @@ fn data_integrity_returns_snapshot_metadata_when_enabled() {
 
     assert_eq!(result["available"], true, "{result}");
     assert_store_snapshot(&result["store_snapshot"]);
+    assert_data_view_boundary(&result["data_view_boundary"]);
     assert!(
         result["scanned"]
             .as_u64()
@@ -1721,15 +1750,12 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
         "{result}"
     );
     assert_store_snapshot(&result["store_snapshot"]);
+    assert_data_view_boundary(&result["data_view_boundary"]);
     assert_contract(
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
 }
 
@@ -1759,15 +1785,12 @@ fn data_read_returns_bounded_value_preview_when_enabled() {
     assert_eq!(result["value"], "42", "{result}");
     assert_eq!(result["value_truncated"], false, "{result}");
     assert_store_snapshot(&result["store_snapshot"]);
+    assert_data_view_boundary(&result["data_view_boundary"]);
     assert_contract(
         &result,
         "presentation-only",
         "data value preview helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
 }
 
@@ -1800,11 +1823,7 @@ fn data_children_returns_empty_page_for_absent_members() {
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
 }
 
@@ -1832,10 +1851,6 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
         &result,
         "presentation-only",
         "bounded typed data helper",
-        &[
-            "watch/refresh facts",
-            "integrity and repair facts",
-            "serve/attach data boundaries",
-        ],
+        &["integrity and repair facts", "serve/attach data boundaries"],
     );
 }

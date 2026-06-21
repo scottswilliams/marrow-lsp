@@ -3,8 +3,10 @@
 use std::path::PathBuf;
 
 use marrow_check::CheckedProgram;
-use marrow_project::{CATALOG_FILE_NAME, StoreBackend, StoreConfig};
-use marrow_run::ProjectSurfaceReadSession;
+use marrow_run::{
+    DataViewBoundary, ProjectSurfaceReadSession, data_view_unavailable_reason_for_config,
+    data_view_watch_targets,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::workspace::Project;
@@ -23,20 +25,25 @@ impl SavedDataSession {
         &self.session
     }
 
+    pub(crate) fn data_view_boundary(&self) -> &DataViewBoundary {
+        self.session.data_view_boundary()
+    }
+
     pub fn matches_checked_program(&self, program: &CheckedProgram) -> bool {
         self.session.admits_checked_program(program)
     }
 }
 
 pub fn open_saved_data_session(project: &Project) -> Result<Option<SavedDataSession>, String> {
-    let StoreConfig { backend, data_dir } = &project.config.store;
-    match backend {
-        StoreBackend::Memory => Ok(None),
-        StoreBackend::Native if data_dir.is_none() => Ok(None),
-        StoreBackend::Native => ProjectSurfaceReadSession::open(&project.root)
-            .map(|session| Some(SavedDataSession { session }))
-            .map_err(|error| error.message()),
+    if data_view_unavailable_reason_for_config(&project.root, &project.config)
+        .map_err(|error| error.message())?
+        .is_some()
+    {
+        return Ok(None);
     }
+    ProjectSurfaceReadSession::open(&project.root)
+        .map(|session| Some(SavedDataSession { session }))
+        .map_err(|error| error.message())
 }
 
 pub fn saved_data_watch_targets(
@@ -46,13 +53,12 @@ pub fn saved_data_watch_targets(
     let Some(project) = project.filter(|_| live_data) else {
         return Ok(SavedDataWatchTargets { paths: Vec::new() });
     };
-    let Some(store_path) = marrow_check::native_store_path(&project.root, &project.config)
-        .map_err(|error| error.message())?
-    else {
-        return Ok(SavedDataWatchTargets { paths: Vec::new() });
-    };
     Ok(SavedDataWatchTargets {
-        paths: vec![store_path, project.root.join(CATALOG_FILE_NAME)],
+        paths: data_view_watch_targets(&project.root, &project.config)
+            .map_err(|error| error.message())?
+            .into_iter()
+            .map(|target| target.path)
+            .collect(),
     })
 }
 
@@ -133,6 +139,21 @@ mod tests {
             assert!(
                 !production_source.contains(fragment),
                 "SavedDataSession must delegate admission to marrow-run instead of keeping `{fragment}` in store.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_data_watch_targets_are_not_derived_from_local_project_paths() {
+        let source = include_str!("store.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source before tests");
+        for fragment in ["CATALOG_FILE_NAME", "native_store_path", "StoreBackend"] {
+            assert!(
+                !production_source.contains(fragment),
+                "SavedDataSession must consume Marrow data-view watch targets instead of deriving `{fragment}` locally"
             );
         }
     }

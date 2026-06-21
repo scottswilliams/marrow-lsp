@@ -820,7 +820,7 @@ mod tests {
                         SAVED_DATA_MISSING_FACTS,
                     ),
                 }),
-                "saved-root listing helper (presentation-only: watch/refresh facts +2): data unavailable",
+                "saved-root listing helper (presentation-only: integrity and repair facts +1): data unavailable",
             ),
             (
                 "mw_data_integrity",
@@ -849,7 +849,7 @@ mod tests {
                         DATA_CHILDREN_MISSING_FACTS,
                     ),
                 }),
-                "bounded typed data helper (presentation-only: watch/refresh facts +2): 2 children (truncated)",
+                "bounded typed data helper (presentation-only: integrity and repair facts +1): 2 children (truncated)",
             ),
             (
                 "mw_data_read",
@@ -864,7 +864,7 @@ mod tests {
                         DATA_READ_MISSING_FACTS,
                     ),
                 }),
-                "data value preview helper (presentation-only: watch/refresh facts +2): 42",
+                "data value preview helper (presentation-only: integrity and repair facts +1): 42",
             ),
             (
                 "mw_surface_read",

@@ -307,7 +307,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Presentation-only saved-root listing helper: list typed saved-root views and Marrow versioned data generation DTOs under store_snapshot from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable typed production API.",
+            "description": "Presentation-only saved-root listing helper: list typed saved-root views with Marrow data_view_boundary facts and generation/snapshot metadata, retained for current clients, from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing integrity and repair facts plus serve/attach data boundaries; not a stable typed production API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -330,7 +330,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_children",
-            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow versioned data generation DTOs under store_snapshot for a saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
+            "description": "Presentation-only bounded typed data helper: return one page of typed child segments with Marrow data_view_boundary facts and generation/snapshot metadata, retained for current clients, for a saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing integrity and repair facts plus serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -371,7 +371,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_read",
-            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview and versioned data generation DTO under store_snapshot for one typed saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path, clamps `preview_limit`, uses Marrow-owned bounded read presence, and reads nothing when data access is disabled. Missing watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
+            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview with Marrow data_view_boundary facts and generation/snapshot metadata, retained for current clients, for one typed saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path, clamps `preview_limit`, uses Marrow-owned bounded read presence, and reads nothing when data access is disabled. Missing integrity and repair facts plus serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,

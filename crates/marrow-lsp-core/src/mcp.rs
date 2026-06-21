@@ -50,21 +50,12 @@ use crate::types::render_type;
 use crate::workspace::Workspace;
 
 pub const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
-pub const SAVED_DATA_MISSING_FACTS: &[&str] = &[
-    "watch/refresh facts",
-    "integrity and repair facts",
-    "serve/attach data boundaries",
-];
-pub const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
-    "watch/refresh facts",
-    "integrity and repair facts",
-    "serve/attach data boundaries",
-];
-pub const DATA_READ_MISSING_FACTS: &[&str] = &[
-    "watch/refresh facts",
-    "integrity and repair facts",
-    "serve/attach data boundaries",
-];
+pub const SAVED_DATA_MISSING_FACTS: &[&str] =
+    &["integrity and repair facts", "serve/attach data boundaries"];
+pub const DATA_CHILDREN_MISSING_FACTS: &[&str] =
+    &["integrity and repair facts", "serve/attach data boundaries"];
+pub const DATA_READ_MISSING_FACTS: &[&str] =
+    &["integrity and repair facts", "serve/attach data boundaries"];
 pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "source/store compatibility verdicts",
     "drift witnesses",

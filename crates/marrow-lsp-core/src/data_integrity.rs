@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use marrow_check::tooling::IntegrityProblem;
 use marrow_json::DataGenerationJson;
+use marrow_json::saved_data::{DataViewBoundaryJson, data_view_boundary_to_json};
 
 use crate::store::SavedDataSession;
 
@@ -41,6 +42,8 @@ pub struct DataIntegrityResult {
     pub scanned: usize,
     pub truncated: bool,
     pub store_snapshot: Option<DataGenerationJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_view_boundary: Option<DataViewBoundaryJson>,
 }
 
 impl DataIntegrityResult {
@@ -51,6 +54,7 @@ impl DataIntegrityResult {
             scanned: 0,
             truncated: false,
             store_snapshot: None,
+            data_view_boundary: None,
         }
     }
 }
@@ -73,6 +77,7 @@ pub fn data_integrity(session: Option<&SavedDataSession>) -> DataIntegrityResult
             scanned: stamped.data.items_checked,
             truncated: stamped.data.truncated,
             store_snapshot: Some(DataGenerationJson::from(&stamped.stamp)),
+            data_view_boundary: Some(data_view_boundary_to_json(session.surface_read())),
         },
         Err(_) => DataIntegrityResult::unavailable(),
     }

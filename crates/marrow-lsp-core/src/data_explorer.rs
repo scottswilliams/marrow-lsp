@@ -13,8 +13,9 @@ pub use marrow_json::saved_data::{
     DataPathErrorJson as DataPathErrorDto, DataPathSegmentJson as DataPathSegmentDto,
     DataPresenceJson as DataPresenceDto, DataReadRequestJson as DataReadRequest,
     DataReadResultJson as DataReadResult, DataStoreErrorCodeJson as DataStoreErrorCodeDto,
-    DataStoreErrorJson as DataStoreErrorDto, MemberFlavorJson as MemberFlavorDto,
-    ScalarTypeJson as ScalarTypeDto,
+    DataStoreErrorJson as DataStoreErrorDto, DataViewBoundaryJson,
+    MemberFlavorJson as MemberFlavorDto, ScalarTypeJson as ScalarTypeDto,
+    data_view_boundary_to_json,
 };
 
 use crate::store::SavedDataSession;
@@ -29,13 +30,23 @@ pub struct SavedRootsResult {
     pub available: bool,
     pub roots: Vec<DataChildViewDto>,
     pub store_snapshot: Option<DataGenerationJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_view_boundary: Option<DataViewBoundaryJson>,
 }
 
 /// Handle `marrow/savedRoots`. A `None` session (no native store configured) or an
 /// unavailable store both answer `available: false` with no roots.
 pub fn saved_roots(session: Option<&SavedDataSession>) -> SavedRootsResult {
-    match session.map(|session| session.surface_read().saved_data_roots()) {
-        Some(Ok(stamped)) => SavedRootsResult {
+    let Some(session) = session else {
+        return SavedRootsResult {
+            available: false,
+            roots: Vec::new(),
+            store_snapshot: None,
+            data_view_boundary: None,
+        };
+    };
+    match session.surface_read().saved_data_roots() {
+        Ok(stamped) => SavedRootsResult {
             available: true,
             roots: stamped
                 .data
@@ -43,11 +54,13 @@ pub fn saved_roots(session: Option<&SavedDataSession>) -> SavedRootsResult {
                 .map(DataChildViewDto::from)
                 .collect(),
             store_snapshot: Some(DataGenerationJson::from(&stamped.stamp)),
+            data_view_boundary: Some(data_view_boundary_to_json(session.surface_read())),
         },
-        _ => SavedRootsResult {
+        Err(_) => SavedRootsResult {
             available: false,
             roots: Vec::new(),
             store_snapshot: None,
+            data_view_boundary: None,
         },
     }
 }
@@ -60,6 +73,8 @@ pub struct DataChildViewsResponse {
     pub cursor: Option<DataKeyDto>,
     pub store_snapshot: Option<DataGenerationJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_view_boundary: Option<DataViewBoundaryJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DataChildrenError>,
 }
 
@@ -71,6 +86,8 @@ pub struct DataReadResponse {
     pub value: Option<String>,
     pub value_truncated: bool,
     pub store_snapshot: Option<DataGenerationJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_view_boundary: Option<DataViewBoundaryJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DataChildrenError>,
 }
@@ -133,7 +150,7 @@ pub fn session_data_child_views_page(
         limit.min(DATA_CHILDREN_PAGE_LIMIT),
         cursor.as_ref(),
     )?;
-    Ok(DataChildViewsResult::from(stamped))
+    Ok(DataChildViewsResult::from(stamped).with_data_view_boundary(session.data_view_boundary()))
 }
 
 pub fn session_data_read(
@@ -151,9 +168,10 @@ pub fn session_data_read(
             value: None,
             value_truncated: false,
             store_snapshot: None,
+            data_view_boundary: Some(data_view_boundary_to_json(session.surface_read())),
         });
     };
-    Ok(DataReadResult::from(stamped))
+    Ok(DataReadResult::from(stamped).with_data_view_boundary(session.data_view_boundary()))
 }
 
 impl From<ToolingError> for DataChildrenError {
@@ -175,7 +193,9 @@ mod tests {
     use marrow_check::{
         check_project, check_project_against, project_store_lock, read_committed_lock,
     };
-    use marrow_json::{DATA_GENERATION_PROFILE_VERSION, DataGenerationJson};
+    use marrow_json::{
+        DATA_GENERATION_PROFILE_VERSION, DataGenerationJson, saved_data::DataViewBoundaryJson,
+    };
     use marrow_project::parse_config;
     use marrow_store::key::SavedKey;
     use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
@@ -239,6 +259,7 @@ mod tests {
                 available: false,
                 roots: Vec::new(),
                 store_snapshot: None,
+                data_view_boundary: None,
             }
         );
     }
@@ -264,6 +285,7 @@ mod tests {
             })
         );
         assert_generation_profile(&roots.store_snapshot);
+        assert_data_view_boundary(&roots.data_view_boundary);
     }
 
     #[test]
@@ -358,9 +380,11 @@ mod tests {
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(2)),
                 store_snapshot: page.store_snapshot.clone(),
+                data_view_boundary: page.data_view_boundary.clone(),
             }
         );
         assert_generation_profile(&page.store_snapshot);
+        assert_data_view_boundary(&page.data_view_boundary);
 
         let page = session_data_child_views_page(
             &fixture.session,
@@ -378,9 +402,11 @@ mod tests {
                 truncated: true,
                 cursor: Some(DataKeyDto::Int(4)),
                 store_snapshot: page.store_snapshot.clone(),
+                data_view_boundary: page.data_view_boundary.clone(),
             }
         );
         assert_generation_profile(&page.store_snapshot);
+        assert_data_view_boundary(&page.data_view_boundary);
 
         let page = session_data_child_views_page(
             &fixture.session,
@@ -398,9 +424,11 @@ mod tests {
                 truncated: false,
                 cursor: None,
                 store_snapshot: page.store_snapshot.clone(),
+                data_view_boundary: page.data_view_boundary.clone(),
             }
         );
         assert_generation_profile(&page.store_snapshot);
+        assert_data_view_boundary(&page.data_view_boundary);
     }
 
     #[test]
@@ -452,9 +480,11 @@ mod tests {
                 value: Some("42".into()),
                 value_truncated: false,
                 store_snapshot: read.store_snapshot.clone(),
+                data_view_boundary: read.data_view_boundary.clone(),
             }
         );
         assert_generation_profile(&read.store_snapshot);
+        assert_data_view_boundary(&read.data_view_boundary);
     }
 
     #[test]
@@ -486,9 +516,39 @@ mod tests {
                 value: Some("\"aaaaaaa...".into()),
                 value_truncated: true,
                 store_snapshot: read.store_snapshot.clone(),
+                data_view_boundary: read.data_view_boundary.clone(),
             }
         );
         assert_generation_profile(&read.store_snapshot);
+        assert_data_view_boundary(&read.data_view_boundary);
+    }
+
+    fn assert_data_view_boundary(boundary: &Option<DataViewBoundaryJson>) {
+        let boundary = serde_json::to_value(
+            boundary
+                .as_ref()
+                .expect("available data response carries boundary"),
+        )
+        .expect("boundary serializes");
+        assert_eq!(
+            boundary["sourceAnalysisGeneration"]["profileVersion"], "analysis.generation.v1",
+            "{boundary}"
+        );
+        assert_eq!(
+            boundary["storeSnapshot"]["profile_version"], DATA_GENERATION_PROFILE_VERSION,
+            "{boundary}"
+        );
+        assert_eq!(
+            boundary["compatibility"],
+            serde_json::json!({ "verdict": "admitted" }),
+            "{boundary}"
+        );
+        assert!(
+            boundary["watchTargets"]
+                .as_array()
+                .is_some_and(|targets| targets.len() == 2),
+            "{boundary}"
+        );
     }
 
     fn assert_generation_profile(snapshot: &Option<DataGenerationJson>) {

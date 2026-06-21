@@ -40,6 +40,34 @@ const wrongProfileSnapshot = {
   ...baseSnapshot,
   profile_version: "data.generation.v0",
 };
+const baseBoundary = {
+  sourceAnalysisGeneration: {
+    profileVersion: "analysis.generation.v1",
+    sourceIdentity: "sha256:source-identity",
+    configDigest: "sha256:config",
+    checkedSourceDigest: "sha256:checked",
+    readOnlyContextDigest: "sha256:readonly",
+    acceptedCatalog: { epoch: 3, digest: "sha256:catalog" },
+    proposalCatalog: null,
+  },
+  storeSnapshot: baseSnapshot,
+  compatibility: { verdict: "admitted" },
+  watchTargets: [
+    { kind: "store_file", path: "/project/.marrow/data/marrow.redb" },
+    { kind: "catalog_lock", path: "/project/marrow.lock" },
+  ],
+};
+const staleBoundary = {
+  ...baseBoundary,
+  sourceAnalysisGeneration: {
+    ...baseBoundary.sourceAnalysisGeneration,
+    sourceIdentity: "sha256:stale-source-identity",
+  },
+};
+const malformedBoundary = {
+  ...baseBoundary,
+  storeSnapshot: wrongProfileSnapshot,
+};
 
 function installVscodeStub() {
   const watchers = [];
@@ -172,6 +200,7 @@ function makeClient() {
             { segment: staleRootPath[0], label: "StaleRoot" },
           ],
           store_snapshot: baseSnapshot,
+          data_view_boundary: baseBoundary,
         };
       }
       if (method === "marrow/dataChildren") {
@@ -200,6 +229,7 @@ function makeClient() {
             truncated: true,
             cursor: { kind: "int", value: 200 },
             store_snapshot: baseSnapshot,
+            data_view_boundary: baseBoundary,
           };
         }
         if (deepEqual(params.segments, staleRootPath) && params.cursor === null) {
@@ -213,7 +243,8 @@ function makeClient() {
             ],
             truncated: false,
             cursor: null,
-            store_snapshot: wrongProfileSnapshot,
+            store_snapshot: baseSnapshot,
+            data_view_boundary: staleBoundary,
           };
         }
         if (
@@ -231,6 +262,7 @@ function makeClient() {
             truncated: true,
             cursor: null,
             store_snapshot: baseSnapshot,
+            data_view_boundary: baseBoundary,
           };
         }
         if (deepEqual(params.segments, bytesKeyPath)) {
@@ -245,6 +277,7 @@ function makeClient() {
             truncated: false,
             cursor: null,
             store_snapshot: baseSnapshot,
+            data_view_boundary: baseBoundary,
           };
         }
         if (deepEqual(params.segments, layerPath)) {
@@ -259,6 +292,7 @@ function makeClient() {
             truncated: false,
             cursor: null,
             store_snapshot: baseSnapshot,
+            data_view_boundary: baseBoundary,
           };
         }
         throw new Error(`unexpected dataChildren path ${JSON.stringify(params)}`);
@@ -274,6 +308,7 @@ function makeClient() {
             presence: "children_only",
             value_truncated: false,
             store_snapshot: baseSnapshot,
+            data_view_boundary: baseBoundary,
           };
         }
         if (
@@ -295,6 +330,7 @@ function makeClient() {
             value: "42",
             value_truncated: true,
             store_snapshot: baseSnapshot,
+            data_view_boundary: baseBoundary,
           };
         }
         if (deepEqual(params.segments, staleValuePath)) {
@@ -303,7 +339,8 @@ function makeClient() {
             presence: "value_only",
             value: "mixed-generation-value",
             value_truncated: false,
-            store_snapshot: unversionedSnapshot,
+            store_snapshot: baseSnapshot,
+            data_view_boundary: staleBoundary,
           };
         }
         if (deepEqual(params.segments, layerPath)) {
@@ -316,6 +353,7 @@ function makeClient() {
             presence: "children_only",
             value_truncated: false,
             store_snapshot: baseSnapshot,
+            data_view_boundary: baseBoundary,
           };
         }
         throw new Error(`unexpected dataRead path ${JSON.stringify(params)}`);
@@ -325,7 +363,7 @@ function makeClient() {
   };
 }
 
-function makeRootsClient(storeSnapshot) {
+function makeRootsClient(dataViewBoundary) {
   return {
     async sendRequest(method, params) {
       if (method !== "marrow/savedRoots") {
@@ -340,7 +378,8 @@ function makeRootsClient(storeSnapshot) {
             label: "Root",
           },
         ],
-        store_snapshot: storeSnapshot,
+        store_snapshot: baseSnapshot,
+        data_view_boundary: dataViewBoundary,
       };
     },
   };
@@ -397,9 +436,9 @@ try {
     pathToFileURL(join(outDir, "extension.js"))
   );
 
-  for (const storeSnapshot of [unversionedSnapshot, wrongProfileSnapshot, null]) {
+  for (const dataViewBoundary of [malformedBoundary, { ...baseBoundary, compatibility: null }, null]) {
     const malformedRootsProvider = new SavedResourceProvider();
-    malformedRootsProvider.setClient(makeRootsClient(storeSnapshot));
+    malformedRootsProvider.setClient(makeRootsClient(dataViewBoundary));
     assert.deepEqual(await malformedRootsProvider.getChildren(), [
       { kind: "unavailable", label: "store unavailable" },
     ]);
@@ -579,14 +618,17 @@ try {
     kind: "root",
     label: "Root",
     segment: { kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" },
-    snapshot: baseSnapshot,
+    boundary: baseBoundary,
   });
-  assert.equal(roots[0].snapshot.profile_version, "data.generation.v1");
+  assert.equal(
+    roots[0].boundary.storeSnapshot.profile_version,
+    "data.generation.v1",
+  );
   assert.deepEqual(roots[1], {
     kind: "root",
     label: "StaleRoot",
     segment: { kind: "root", store_catalog_id: "cat_00000000000000000000000000000002" },
-    snapshot: baseSnapshot,
+    boundary: baseBoundary,
   });
   const keys = await provider.getChildren(roots[0]);
   assert.equal(keys.length, 4);
@@ -595,15 +637,15 @@ try {
     { kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" },
     { kind: "key", value: { kind: "bytes", value: [10] } },
   ]);
-  assert.deepEqual(keys[0].snapshot, baseSnapshot);
-  assert.deepEqual(keys[1].snapshot, baseSnapshot);
-  assert.deepEqual(keys[2].snapshot, baseSnapshot);
+  assert.deepEqual(keys[0].boundary, baseBoundary);
+  assert.deepEqual(keys[1].boundary, baseBoundary);
+  assert.deepEqual(keys[2].boundary, baseBoundary);
   assert.deepEqual(keys[3], {
     kind: "more",
     label: "more children",
     segments: [{ kind: "root", store_catalog_id: "cat_00000000000000000000000000000001" }],
     cursor: { kind: "int", value: 200 },
-    snapshot: baseSnapshot,
+    boundary: baseBoundary,
   });
 
   const moreItem = provider.getTreeItem(keys[3]);
@@ -612,7 +654,7 @@ try {
   const nextKeys = await provider.getChildren(keys[3]);
   assert.equal(nextKeys.length, 2);
   assert.equal(nextKeys[0].label, "server-rendered-next-key");
-  assert.deepEqual(nextKeys[0].snapshot, baseSnapshot);
+  assert.deepEqual(nextKeys[0].boundary, baseBoundary);
   assert.deepEqual(client.calls.at(-1), {
     method: "marrow/dataChildren",
     params: {
@@ -662,7 +704,7 @@ try {
     { kind: "key", value: { kind: "bytes", value: [10] } },
     { kind: "field", member_catalog_id: "cat_00000000000000000000000000000005" },
   ]);
-  assert.deepEqual(fields[0].snapshot, baseSnapshot);
+  assert.deepEqual(fields[0].boundary, baseBoundary);
 
   const values = await provider.getChildren(fields[0]);
   assert.deepEqual(values, [{ kind: "value", label: "42", valueTruncated: true }]);

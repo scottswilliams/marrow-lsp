@@ -173,6 +173,25 @@ fn assert_store_snapshot(snapshot: &Value) {
     );
 }
 
+fn assert_data_view_boundary(boundary: &Value) {
+    assert_eq!(
+        boundary["sourceAnalysisGeneration"]["profileVersion"], "analysis.generation.v1",
+        "boundary should carry Marrow source analysis generation: {boundary}"
+    );
+    assert_store_snapshot(&boundary["storeSnapshot"]);
+    assert_eq!(
+        boundary["compatibility"],
+        json!({ "verdict": "admitted" }),
+        "boundary should carry admitted compatibility: {boundary}"
+    );
+    assert!(
+        boundary["watchTargets"]
+            .as_array()
+            .is_some_and(|targets| targets.len() == 2),
+        "boundary should carry Marrow watch targets: {boundary}"
+    );
+}
+
 struct Server(Child);
 
 impl Drop for Server {
@@ -1819,6 +1838,7 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
         ])
     );
     assert_store_snapshot(&response["result"]["store_snapshot"]);
+    assert_data_view_boundary(&response["result"]["data_view_boundary"]);
 
     send(
         &mut stdin,
@@ -1846,6 +1866,7 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
         ])
     );
     assert_store_snapshot(&response["result"]["store_snapshot"]);
+    assert_data_view_boundary(&response["result"]["data_view_boundary"]);
 
     send(
         &mut stdin,
@@ -1869,6 +1890,7 @@ fn custom_saved_resource_inspector_reads_live_store_when_enabled() {
     assert_eq!(response["result"]["value"], "42");
     assert_eq!(response["result"]["value_truncated"], false);
     assert_store_snapshot(&response["result"]["store_snapshot"]);
+    assert_data_view_boundary(&response["result"]["data_view_boundary"]);
 
     let _ = server.0.kill();
 }
@@ -2040,6 +2062,7 @@ fn custom_saved_resource_inspector_refuses_stale_open_source() {
     );
     let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
     assert_eq!(response["result"]["available"], true, "{response}");
+    assert_data_view_boundary(&response["result"]["data_view_boundary"]);
 
     let edited = "module counter\n\npub fn f()\n    return\n";
     send(
@@ -2158,6 +2181,14 @@ fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
         response["result"]["store_snapshot"],
         serde_json::Value::Null
     );
+    assert!(
+        response["result"].get("data_view_boundary").is_none(),
+        "unavailable dataIntegrity must not carry a boundary: {response}"
+    );
+    assert!(
+        response["result"].get("data_view_boundary").is_none(),
+        "unavailable savedRoots must not carry a boundary: {response}"
+    );
 
     send(
         &mut stdin,
@@ -2184,6 +2215,10 @@ fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
         response["result"]["store_snapshot"],
         serde_json::Value::Null
     );
+    assert!(
+        response["result"].get("data_view_boundary").is_none(),
+        "unavailable dataChildren must not carry a boundary: {response}"
+    );
 
     send(
         &mut stdin,
@@ -2208,6 +2243,10 @@ fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
     assert_eq!(
         response["result"]["store_snapshot"],
         serde_json::Value::Null
+    );
+    assert!(
+        response["result"].get("data_view_boundary").is_none(),
+        "unavailable dataRead must not carry a boundary: {response}"
     );
 
     send(
@@ -2385,6 +2424,10 @@ fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
     assert_eq!(result["findings"].as_array().map(Vec::len), Some(0));
     assert_eq!(result["truncated"].as_bool(), Some(false));
     assert_eq!(result["store_snapshot"], serde_json::Value::Null);
+    assert!(
+        result.get("data_view_boundary").is_none(),
+        "disabled dataIntegrity must not carry a boundary: {response}"
+    );
 
     let _ = server.0.kill();
 }
