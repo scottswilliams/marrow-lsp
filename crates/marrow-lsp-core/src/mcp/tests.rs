@@ -30,15 +30,8 @@ fn assert_contract(result: &Json, status: &str, description: &str, missing_facts
     assert_eq!(actual, missing_facts, "missing facts for {result}");
 }
 
-const RUN_EXPECTED_MISSING_FACTS: &[&str] = &["serve/attach execution boundaries"];
-
 fn assert_run_contract(result: &Json) {
-    assert_contract(
-        result,
-        "presentation-only",
-        "sandboxed execution helper",
-        RUN_EXPECTED_MISSING_FACTS,
-    );
+    assert_production_contract(result, "sandboxed execution API");
 }
 
 fn assert_production_contract(result: &Json, description: &str) {
@@ -1172,6 +1165,21 @@ fn run_accepts_typed_string_arguments() {
         }),
         "{result}"
     );
+    let boundary = &result["runFacts"]["executionBoundary"];
+    assert_eq!(boundary["sessionKind"], "run", "{result}");
+    assert_eq!(result["runFacts"].get("analysis"), None, "{result}");
+    assert_eq!(
+        boundary["sourceAnalysisGeneration"]["profileVersion"], "analysis.generation.v1",
+        "{result}"
+    );
+    assert!(
+        boundary["sourceAnalysisGeneration"]["sourceIdentity"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "run boundary should carry Marrow's source analysis identity: {result}"
+    );
+    assert_eq!(boundary["store"]["kind"], "fresh_memory", "{result}");
+    assert_eq!(boundary["store"]["stamp"], json!(null), "{result}");
 }
 
 #[test]
@@ -1253,35 +1261,37 @@ fn run_reports_marrow_entry_footprint_and_open_mode_facts() {
 
     assert_eq!(result["diagnostics"], json!([]), "{result}");
     let facts = &result["runFacts"];
+    let generation = &facts["executionBoundary"]["sourceAnalysisGeneration"];
+    assert_eq!(facts.get("analysis"), None, "{result}");
     assert_eq!(
-        facts["analysis"]["profileVersion"], "analysis.generation.v1",
-        "runFacts should carry the Marrow analysis generation profile version: {result}"
+        generation["profileVersion"], "analysis.generation.v1",
+        "executionBoundary should carry the Marrow analysis generation profile version: {result}"
     );
     assert!(
-        facts["analysis"]["sourceIdentity"]
+        generation["sourceIdentity"]
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:")),
-        "runFacts should carry the Marrow analysis source identity: {result}"
+        "executionBoundary should carry the Marrow analysis source identity: {result}"
     );
     assert!(
-        facts["analysis"]["configDigest"]
+        generation["configDigest"]
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:")),
-        "runFacts should carry the Marrow config digest: {result}"
+        "executionBoundary should carry the Marrow config digest: {result}"
     );
     assert!(
-        facts["analysis"]["checkedSourceDigest"]
+        generation["checkedSourceDigest"]
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:")),
-        "runFacts should carry the Marrow checked source digest: {result}"
+        "executionBoundary should carry the Marrow checked source digest: {result}"
     );
     assert!(
-        facts["analysis"]["readOnlyContextDigest"]
+        generation["readOnlyContextDigest"]
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:")),
-        "runFacts should carry the Marrow read-only context digest: {result}"
+        "executionBoundary should carry the Marrow read-only context digest: {result}"
     );
-    let accepted_catalog = &facts["analysis"]["acceptedCatalog"];
+    let accepted_catalog = &generation["acceptedCatalog"];
     assert!(
         accepted_catalog["epoch"].is_u64(),
         "committed native fixture should carry accepted catalog epoch: {result}"
@@ -1293,9 +1303,9 @@ fn run_reports_marrow_entry_footprint_and_open_mode_facts() {
         "committed native fixture should carry accepted catalog digest: {result}"
     );
     assert!(
-        facts["analysis"]["proposalCatalog"].is_null()
-            || (facts["analysis"]["proposalCatalog"]["epoch"].is_u64()
-                && facts["analysis"]["proposalCatalog"]["digest"]
+        generation["proposalCatalog"].is_null()
+            || (generation["proposalCatalog"]["epoch"].is_u64()
+                && generation["proposalCatalog"]["digest"]
                     .as_str()
                     .is_some_and(|digest| digest.starts_with("sha256:"))),
         "proposal catalog should be null or carry epoch and digest: {result}"
@@ -1371,6 +1381,30 @@ fn test_mode_does_not_inspect_the_real_store() {
     assert_eq!(tests.len(), 1, "{result}");
     assert_eq!(tests[0]["name"], "tests::smoke_test::smoke");
     assert_eq!(tests[0]["outcome"], "passed");
+    assert_eq!(
+        result["executionBoundary"]["sessionKind"], "test",
+        "{result}"
+    );
+    assert_eq!(
+        result["executionBoundary"]["sourceAnalysisGeneration"]["profileVersion"],
+        "analysis.generation.v1",
+        "{result}"
+    );
+    assert!(
+        result["executionBoundary"]["sourceAnalysisGeneration"]["sourceIdentity"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "test boundary should carry Marrow's source analysis identity: {result}"
+    );
+    assert_eq!(
+        result["executionBoundary"]["store"]["kind"], "test_memory",
+        "{result}"
+    );
+    assert_eq!(
+        result["executionBoundary"]["store"]["stamp"],
+        json!(null),
+        "{result}"
+    );
     assert_run_contract(&result);
 }
 
@@ -1407,6 +1441,24 @@ pub fn fails()
     assert_eq!(
         fails["outcome"], "failed",
         "an assertion failure is a failed test: {fails}"
+    );
+    assert_eq!(
+        result["executionBoundary"]["sessionKind"], "test",
+        "{result}"
+    );
+    assert_eq!(
+        result["executionBoundary"]["sourceAnalysisGeneration"]["profileVersion"],
+        "analysis.generation.v1",
+        "{result}"
+    );
+    assert_eq!(
+        result["executionBoundary"]["store"]["kind"], "test_memory",
+        "{result}"
+    );
+    assert_eq!(
+        result["executionBoundary"]["store"]["stamp"],
+        json!(null),
+        "{result}"
     );
     assert_run_contract(&result);
 }

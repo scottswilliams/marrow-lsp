@@ -68,6 +68,33 @@ fn temp_project() -> PathBuf {
     file
 }
 
+fn temp_project_with_tests() -> PathBuf {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" }, "tests": ["tests"] }"#,
+    )
+    .unwrap();
+    let src = root.join("src/shelf");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("books.mw");
+    std::fs::write(
+        &file,
+        "module shelf::books\n\npub fn answer(): int\n    return 42\n",
+    )
+    .unwrap();
+    let tests = root.join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(
+        tests.join("smoke_test.mw"),
+        "use shelf::books\n\npub fn smoke()\n    std::assert::isTrue(books::answer() == 42)\n",
+    )
+    .unwrap();
+    std::mem::forget(dir);
+    file
+}
+
 #[test]
 fn initialize_list_tools_then_call_mw_check() {
     let mut server = Server(
@@ -403,18 +430,68 @@ fn mw_run_executes_over_a_sandboxed_store() {
     );
     assert_eq!(
         response["result"]["structuredContent"]["contract"]["status"],
-        "presentation-only"
+        "ready"
     );
     assert_eq!(
         response["result"]["structuredContent"]["contract"]["description"],
-        "sandboxed execution helper"
+        "sandboxed execution API"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["runFacts"]["executionBoundary"]["store"]["kind"],
+        "fresh_memory",
+        "mw_run must surface Marrow's execution boundary, got {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["runFacts"].get("analysis"),
+        None,
+        "mw_run must use executionBoundary as the only analysis generation carrier, got {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["runFacts"]["executionBoundary"]["sourceAnalysisGeneration"]
+            ["profileVersion"],
+        "analysis.generation.v1",
+        "mw_run must surface Marrow's boundary generation, got {response}"
     );
     assert!(
         response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .starts_with("sandboxed execution helper (presentation-only: "),
+            .starts_with("sandboxed execution API (ready): "),
         "summary must name the run contract, got {response}"
+    );
+
+    let file = temp_project_with_tests();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "mw_run",
+                "arguments": { "file": file.to_string_lossy(), "mode": "test" }
+            }
+        }),
+    );
+    let response = wait_for(&mut stdout, 3, Duration::from_secs(10));
+    assert_eq!(
+        response["result"]["structuredContent"]["executionBoundary"]["sessionKind"], "test",
+        "mw_run test mode must surface the Marrow test boundary, got {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["executionBoundary"]["sourceAnalysisGeneration"]["profileVersion"],
+        "analysis.generation.v1",
+        "mw_run test mode must carry Marrow's source analysis generation, got {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["executionBoundary"]["store"]["kind"],
+        "test_memory",
+        "mw_run test mode must report Marrow's test-memory boundary, got {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["executionBoundary"]["store"]["stamp"],
+        json!(null),
+        "test-memory boundary must not fabricate a store stamp, got {response}"
     );
 
     let _ = server.0.kill();

@@ -71,7 +71,6 @@ pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "typed repair facts",
     "stable production integrity DTOs",
 ];
-pub const RUN_MISSING_FACTS: &[&str] = &["serve/attach execution boundaries"];
 
 fn production_contract(description: &str) -> Json {
     json!({
@@ -149,7 +148,13 @@ fn data_integrity_contract() -> Json {
 }
 
 fn run_contract() -> Json {
-    presentation_contract("sandboxed execution helper", RUN_MISSING_FACTS)
+    let mut contract = production_contract("sandboxed execution API");
+    contract["basis"] = json!("Marrow execution boundary and run DTOs");
+    contract["sandbox"] = json!("fresh-in-memory-store");
+    contract["host"] = json!("locked-down");
+    contract["realStore"] = json!("never-touched");
+    contract["testBoundary"] = json!("Marrow test session execution boundary");
+    contract
 }
 
 fn with_contract(mut result: Json, contract: Json) -> Json {
@@ -813,7 +818,8 @@ fn load_project_for_run(file: &Path) -> Result<PathBuf, String> {
 /// Evaluate one `entry` through Marrow's fresh-memory session under the locked
 /// host, returning Marrow's run envelope DTO plus entry run facts when entry
 /// admission succeeds. The fact DTO is emitted by Marrow and includes the
-/// versioned analysis generation that admitted the entry.
+/// opened execution boundary with the versioned analysis generation that
+/// admitted the entry.
 fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json {
     let mut open = ProjectOpen::run().with_fresh_memory_store();
     if let Some(entry) = entry {
@@ -871,8 +877,13 @@ fn entry_run_facts_json(session: &ProjectSession) -> Option<Json> {
         .map(|facts| serde_json::to_value(facts).expect("Marrow run facts DTO serializes"))
 }
 
+fn execution_boundary_json(session: &ProjectSession) -> Json {
+    let boundary = marrow_json::execution_boundary_to_json(session);
+    serde_json::to_value(boundary).expect("Marrow boundary DTO serializes")
+}
+
 /// Discover and run the project's tests through Marrow's test project session,
-/// returning `{ output, diagnostics, tests: [...] }`.
+/// returning `{ output, diagnostics, tests: [...], executionBoundary }`.
 fn run_tests(root: &Path) -> Json {
     let session = match ProjectSession::open(root, ProjectOpen::test()) {
         Ok(session) => session,
@@ -886,6 +897,7 @@ fn run_tests(root: &Path) -> Json {
             );
         }
     };
+    let execution_boundary = execution_boundary_json(&session);
     let host = locked_host();
     let mut tests = Vec::new();
     for case in session.test_cases() {
@@ -910,7 +922,7 @@ fn run_tests(root: &Path) -> Json {
         };
         tests.push(result);
     }
-    json!({ "diagnostics": [], "output": "", "tests": tests })
+    json!({ "diagnostics": [], "output": "", "tests": tests, "executionBoundary": execution_boundary })
 }
 
 /// The locked-down host every sandboxed run gets: a deterministic clock (a fixed

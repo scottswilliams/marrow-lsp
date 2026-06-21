@@ -489,7 +489,7 @@ mod tests {
 
     use marrow_lsp_core::mcp::{
         COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
-        DATA_READ_MISSING_FACTS, RUN_MISSING_FACTS, SAVED_DATA_MISSING_FACTS,
+        DATA_READ_MISSING_FACTS, SAVED_DATA_MISSING_FACTS,
     };
 
     /// Drive the server loop over an in-memory stdin and collect its line-framed
@@ -886,13 +886,14 @@ mod tests {
                     "result": { "kind": "value", "value": { "kind": "int", "value": 42 } },
                     "output": "",
                     "diagnostics": [],
-                    "contract": contract(
-                        "presentation-only",
-                        "sandboxed execution helper",
-                        RUN_MISSING_FACTS,
-                    ),
+                    "contract": {
+                        "status": "ready",
+                        "stableProductionApi": true,
+                        "description": "sandboxed execution API",
+                        "missingFacts": [],
+                    },
                 }),
-                "sandboxed execution helper (presentation-only: serve/attach execution boundaries): value 42",
+                "sandboxed execution API (ready): value 42",
             ),
         ];
         for (name, result, expected) in cases {
