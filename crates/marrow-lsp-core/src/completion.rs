@@ -13,10 +13,12 @@ use std::path::Path;
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use marrow_check::{
-    CheckedModule, CheckedProgram, StoreLeafKind, scope_at,
+    CheckedProgram, StoreLeafKind, scope_at,
     tooling::{
-        DeclaredDataChild, DeclaredDataChildKind, declared_source_receiver_data_children,
-        intrinsic_completion_callables,
+        DeclaredDataChild, DeclaredDataChildKind, SourceEnumNamespaceCompletionFact,
+        SourceModuleNamespaceCompletionFact, SourceNamespaceCompletionFact,
+        SourceNamespaceFunctionCompletion, declared_source_receiver_data_children,
+        intrinsic_completion_callables, source_namespace_completion_fact,
     },
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema, stdlib};
@@ -78,7 +80,9 @@ pub fn completion(
             saved_path_completions(program, file, parsed, &receiver, span)
         }
         Context::InvalidSavedPath => Vec::new(),
-        Context::Namespace { qualifier } => namespace_completions(program, file, &qualifier),
+        Context::Namespace { qualifier } => {
+            namespace_completions(program, file, &parsed.file, &qualifier)
+        }
         Context::Type => type_completions(program),
         Context::Bare => bare_completions(program, file, parsed, offset),
     }
@@ -543,27 +547,29 @@ fn store_leaf_detail(leaf: &StoreLeafKind) -> Option<String> {
     }
 }
 
-/// What `qualifier::` exposes: an enum's members, a used module's public
-/// functions and constants, or a `std` module's ops.
+/// What `qualifier::` exposes: an enum's members, a project module's resources,
+/// visible enums and functions, or a `std` module's ops.
 fn namespace_completions(
     program: &CheckedProgram,
     file: &Path,
+    source_file: &marrow_syntax::SourceFile,
     qualifier: &[String],
 ) -> Vec<CompletionItem> {
-    // `std::` exposes modules; `std::<module>::` exposes that module's ops.
+    // `std::` exposes modules; known `std::<module>::` paths expose std ops.
+    // Unknown `std::<name>::` paths may still be project modules.
     if qualifier.first().map(String::as_str) == Some("std") {
-        return match qualifier {
-            [_] => std_root_module_completions(),
-            [_, module] => std_module_completions(module),
-            _ => Vec::new(),
-        };
+        match qualifier {
+            [_] => return std_root_module_completions(),
+            [_, module] if std_module_exists(module) => return std_module_completions(module),
+            _ => {}
+        }
     }
 
-    if let Some(enum_schema) = enum_for_namespace(program, file, qualifier) {
-        return enum_member_completions(enum_schema);
+    match source_namespace_completion_fact(program, file, source_file, qualifier) {
+        Some(SourceNamespaceCompletionFact::Module(fact)) => module_namespace_completions(&fact),
+        Some(SourceNamespaceCompletionFact::Enum(fact)) => enum_member_completions(&fact),
+        None => Vec::new(),
     }
-
-    Vec::new()
 }
 
 /// The modules exposed at `std::`, in stdlib table order.
@@ -585,17 +591,57 @@ fn std_module_completions(module: &str) -> Vec<CompletionItem> {
         .collect()
 }
 
+fn std_module_exists(module: &str) -> bool {
+    stdlib::all().iter().any(|op| op.module == module)
+}
+
+fn module_namespace_completions(fact: &SourceModuleNamespaceCompletionFact) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    items.extend(fact.resources.iter().map(|resource| {
+        item(&resource.name, CompletionItemKind::STRUCT)
+            .detail("resource".to_string())
+            .docs_from(&resource.docs)
+    }));
+    items.extend(fact.enums.iter().map(|enum_schema| {
+        item(&enum_schema.name, CompletionItemKind::ENUM)
+            .detail("enum".to_string())
+            .docs_from(&enum_schema.docs)
+    }));
+    items.extend(fact.functions.iter().map(|function| {
+        item(&function.name, CompletionItemKind::FUNCTION)
+            .detail(source_function_signature(function))
+            .docs_from(&function.docs)
+    }));
+    dedup(items)
+}
+
 /// The members of an enum, in declaration order.
-fn enum_member_completions(enum_schema: &EnumSchema) -> Vec<CompletionItem> {
-    enum_schema
-        .members
+fn enum_member_completions(fact: &SourceEnumNamespaceCompletionFact) -> Vec<CompletionItem> {
+    fact.members
         .iter()
         .map(|member| {
             item(&member.name, CompletionItemKind::ENUM_MEMBER)
-                .detail(enum_schema.name.clone())
+                .detail(fact.enum_name.clone())
                 .docs_from(&member.docs)
         })
         .collect()
+}
+
+fn source_function_signature(function: &SourceNamespaceFunctionCompletion) -> String {
+    let params = function
+        .params
+        .iter()
+        .map(|param| format!("{}: {}", param.name, render_type(&param.ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match &function.return_type {
+        Some(return_type) => format!(
+            "fn {}({params}): {}",
+            function.name,
+            render_type(return_type)
+        ),
+        None => format!("fn {}({params})", function.name),
+    }
 }
 
 /// Type-position completions: the built-in type names plus every resource name,
@@ -672,41 +718,6 @@ fn enums(program: &CheckedProgram) -> impl Iterator<Item = &EnumSchema> {
         .modules
         .iter()
         .flat_map(|module| module.enums.iter())
-}
-
-fn enum_for_namespace<'a>(
-    program: &'a CheckedProgram,
-    file: &Path,
-    qualifier: &[String],
-) -> Option<&'a EnumSchema> {
-    let (name, module_prefix) = qualifier.split_last()?;
-    if module_prefix.is_empty() {
-        return enum_visible_by_bare_name(program, file, name);
-    }
-
-    None
-}
-
-fn enum_visible_by_bare_name<'a>(
-    program: &'a CheckedProgram,
-    file: &Path,
-    name: &str,
-) -> Option<&'a EnumSchema> {
-    current_module(program, file).and_then(|module| enum_in_module(module, name))
-}
-
-fn enum_in_module<'a>(module: &'a CheckedModule, name: &str) -> Option<&'a EnumSchema> {
-    module
-        .enums
-        .iter()
-        .find(|enum_schema| enum_schema.name == name)
-}
-
-fn current_module<'a>(program: &'a CheckedProgram, file: &Path) -> Option<&'a CheckedModule> {
-    program
-        .modules
-        .iter()
-        .find(|module| module.source_file == file)
 }
 
 /// A one-line rendering of a std op's signature, e.g. `(string, string): bool`.

@@ -46,9 +46,15 @@ pub enum Status
     ;; No longer active.
     archived
 
+enum Secret
+    hidden
+
 ;; Returns a book title.
 pub fn titleOf(id: Id(^books)): string
     return ^books(id).title
+
+fn privateTitle(): string
+    return \"hidden\"
 
 const LIMIT: int = 100
 ",
@@ -548,10 +554,7 @@ fn resource_namespace_does_not_list_identity() {
         &file,
         "module shelf::app\n\npub fn f()\n    const x: Book::|\n",
     );
-    assert!(
-        !labels.contains(&"Id".to_string()),
-        "`Book::` must not offer stale resource-owned identities, got {labels:?}"
-    );
+    assert_eq!(labels, Vec::<String>::new());
 }
 
 #[test]
@@ -562,10 +565,7 @@ fn used_module_qualified_resource_namespace_does_not_list_identity() {
         &file,
         "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x: books::Book::|\n",
     );
-    assert!(
-        !labels.contains(&"Id".to_string()),
-        "`books::Book::` must not offer stale resource-owned identities, got {labels:?}"
-    );
+    assert_eq!(labels, Vec::<String>::new());
 }
 
 #[test]
@@ -576,14 +576,11 @@ fn fully_qualified_resource_namespace_does_not_list_identity() {
         &file,
         "module shelf::app\n\npub fn f()\n    const x: shelf::books::Book::|\n",
     );
-    assert!(
-        !labels.contains(&"Id".to_string()),
-        "`shelf::books::Book::` must not offer stale resource-owned identities, got {labels:?}"
-    );
+    assert_eq!(labels, Vec::<String>::new());
 }
 
 #[test]
-fn foreign_bare_enum_namespace_is_blocked_without_canonical_fact() {
+fn foreign_bare_enum_namespace_returns_no_items() {
     let (program, file) = project();
     let labels = complete(
         &program,
@@ -592,7 +589,7 @@ fn foreign_bare_enum_namespace_is_blocked_without_canonical_fact() {
     );
     assert!(
         labels.is_empty(),
-        "foreign enum namespace completion should stay blocked, got {labels:?}"
+        "foreign enum namespace completion should stay closed, got {labels:?}"
     );
 }
 
@@ -623,7 +620,7 @@ fn bare_enum_namespace_prefers_current_module_without_leaking_private_foreign_en
 }
 
 #[test]
-fn used_module_qualified_enum_namespace_is_blocked_without_canonical_module_prefix_fact() {
+fn used_module_qualified_enum_namespace_lists_members_from_marrow_fact() {
     let (program, file) = project();
     let items = complete_items(
         &program,
@@ -631,14 +628,15 @@ fn used_module_qualified_enum_namespace_is_blocked_without_canonical_module_pref
         "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x = books::Status::|\n",
     );
     let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-    assert!(
-        labels.is_empty(),
-        "module-prefix enum completion should be blocked, got {labels:?}"
-    );
+    assert_eq!(labels, ["active", "archived"]);
+    let active = item_named(&items, "active");
+    assert_eq!(active.kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(active.detail.as_deref(), Some("Status"));
+    assert_eq!(documentation_value(active), "Ready for use.");
 }
 
 #[test]
-fn fully_qualified_enum_namespace_is_blocked_without_canonical_module_prefix_fact() {
+fn fully_qualified_enum_namespace_lists_members_from_marrow_fact() {
     let (program, file) = project();
     let items = complete_items(
         &program,
@@ -646,10 +644,11 @@ fn fully_qualified_enum_namespace_is_blocked_without_canonical_module_prefix_fac
         "module shelf::app\n\npub fn f()\n    const x = shelf::books::Status::|\n",
     );
     let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-    assert!(
-        labels.is_empty(),
-        "module-prefix enum completion should be blocked, got {labels:?}"
-    );
+    assert_eq!(labels, ["active", "archived"]);
+    let archived = item_named(&items, "archived");
+    assert_eq!(archived.kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(archived.detail.as_deref(), Some("Status"));
+    assert_eq!(documentation_value(archived), "No longer active.");
 }
 
 #[test]
@@ -703,31 +702,54 @@ fn std_root_namespace_lists_modules() {
 }
 
 #[test]
-fn used_module_function_completion_is_blocked_without_canonical_module_prefix_fact() {
+fn used_module_function_completion_lists_public_function_from_marrow_fact() {
     let (program, file) = project();
     let items = complete_items(
         &program,
         &file,
         "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x = books::|\n",
     );
-    assert!(
-        items.is_empty(),
-        "module-prefix completion should be blocked, got {items:?}"
+    let title = item_named(&items, "titleOf");
+    assert_eq!(title.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(
+        title.detail.as_deref(),
+        Some("fn titleOf(id: Id(^books)): string")
     );
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert!(!labels.contains(&"privateTitle"), "got {labels:?}");
+    assert!(!labels.contains(&"LIMIT"), "got {labels:?}");
 }
 
 #[test]
-fn used_module_namespace_lists_no_members_without_canonical_module_prefix_fact() {
+fn used_module_namespace_lists_schema_members_from_marrow_fact() {
     let (program, file) = project();
-    let labels = complete(
+    let items = complete_items(
         &program,
         &file,
         "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x = books::|\n",
     );
-    assert!(
-        labels.is_empty(),
-        "module-prefix completion should be blocked, got {labels:?}"
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["Book", "Pair", "Status", "titleOf"]);
+
+    let book = item_named(&items, "Book");
+    assert_eq!(book.kind, Some(CompletionItemKind::STRUCT));
+    assert_eq!(book.detail.as_deref(), Some("resource"));
+
+    let status = item_named(&items, "Status");
+    assert_eq!(status.kind, Some(CompletionItemKind::ENUM));
+    assert_eq!(status.detail.as_deref(), Some("enum"));
+    assert!(!labels.contains(&"Secret"), "got {labels:?}");
+}
+
+#[test]
+fn partial_project_module_prefix_returns_no_namespace_items() {
+    let (program, file) = project();
+    let labels = complete(
+        &program,
+        &file,
+        "module shelf::app\n\npub fn f()\n    const x = shelf::|\n",
     );
+    assert_eq!(labels, Vec::<String>::new());
 }
 
 #[test]
