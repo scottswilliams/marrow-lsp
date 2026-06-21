@@ -14,12 +14,15 @@ use std::path::Path;
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use marrow_check::{
     CheckedModule, CheckedProgram, StoreLeafKind, scope_at,
-    tooling::{DeclaredDataChild, DeclaredDataChildKind, declared_source_receiver_data_children},
+    tooling::{
+        DeclaredDataChild, DeclaredDataChildKind, declared_source_receiver_data_children,
+        intrinsic_completion_callables,
+    },
 };
 use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema, stdlib};
 use marrow_syntax::{LexedSource, ParsedSource, SourceSpan, Token, TokenKind};
 
-use crate::{language_facts, types::render_type};
+use crate::{callables::render_callable_signature, types::render_type};
 
 /// The Marrow keywords offered in statement/expression position. The type
 /// keywords are offered separately in type position, so they are left out here.
@@ -636,15 +639,13 @@ fn bare_completions(
     for keyword in KEYWORDS {
         items.push(item(keyword, CompletionItemKind::KEYWORD));
     }
-    for builtin in language_facts::bare_function_builtins() {
+    for callable in intrinsic_completion_callables() {
+        let label = callable.path.join("::");
         items.push(
-            item(builtin.name, CompletionItemKind::FUNCTION).detail(builtin.detail.to_string()),
+            item(&label, CompletionItemKind::FUNCTION)
+                .detail(render_callable_signature(&callable))
+                .docs_from(&callable.docs),
         );
-    }
-    for name in language_facts::scalar_conversion_names() {
-        if let Some(detail) = language_facts::scalar_conversion_detail(name) {
-            items.push(item(name, CompletionItemKind::FUNCTION).detail(detail));
-        }
     }
     items
 }

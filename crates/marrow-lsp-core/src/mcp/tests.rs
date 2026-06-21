@@ -591,6 +591,18 @@ fn complete_in_a_function_body_lists_locals_and_keywords() {
         items.iter().any(|item| item["kind"] == "keyword"),
         "a bare position should offer keywords, got {result}"
     );
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "key"
+                && item["kind"] == "function"
+                && item["detail"] == "key(id): value"
+        }),
+        "canonical key builtin should be offered, got {result}"
+    );
+    assert!(
+        items.iter().all(|item| item["label"] != "write"),
+        "removed builtins must not be offered, got {result}"
+    );
     assert_contract(
         &result,
         "presentation-only",

@@ -1,81 +1,9 @@
-use marrow_schema::{scalar_type_from_name, stdlib};
-
-pub(crate) struct BareBuiltin {
-    pub(crate) name: &'static str,
-    pub(crate) detail: &'static str,
-}
+use marrow_schema::stdlib;
 
 pub(crate) struct OperatorFact {
     pub(crate) spelling: &'static str,
     pub(crate) description: &'static str,
 }
-
-const BARE_FUNCTION_BUILTINS: &[BareBuiltin] = &[
-    BareBuiltin {
-        name: "exists",
-        detail: "exists(path): bool",
-    },
-    BareBuiltin {
-        name: "keys",
-        detail: "keys(layer): sequence",
-    },
-    BareBuiltin {
-        name: "values",
-        detail: "values(layer): sequence",
-    },
-    BareBuiltin {
-        name: "entries",
-        detail: "entries(layer): sequence",
-    },
-    BareBuiltin {
-        name: "count",
-        detail: "count(layer): int",
-    },
-    BareBuiltin {
-        name: "reversed",
-        detail: "reversed(sequence): sequence",
-    },
-    BareBuiltin {
-        name: "next",
-        detail: "next(path): value",
-    },
-    BareBuiltin {
-        name: "prev",
-        detail: "prev(path): value",
-    },
-    BareBuiltin {
-        name: "append",
-        detail: "append(layer, value): int",
-    },
-    BareBuiltin {
-        name: "nextId",
-        detail: "nextId(^root): Id",
-    },
-    BareBuiltin {
-        name: "write",
-        detail: "write(value)",
-    },
-    BareBuiltin {
-        name: "print",
-        detail: "print(value)",
-    },
-    BareBuiltin {
-        name: "Error",
-        detail: "Error(code: ErrorCode, message: string): Error",
-    },
-];
-
-const SCALAR_CONVERSION_NAMES: &[&str] = &[
-    "bool",
-    "int",
-    "string",
-    "bytes",
-    "ErrorCode",
-    "date",
-    "instant",
-    "duration",
-    "decimal",
-];
 
 const OPERATOR_FACTS: &[OperatorFact] = &[
     OperatorFact {
@@ -155,21 +83,6 @@ const OPERATOR_FACTS: &[OperatorFact] = &[
         description: "inclusive range.",
     },
 ];
-
-pub(crate) fn bare_function_builtins() -> &'static [BareBuiltin] {
-    BARE_FUNCTION_BUILTINS
-}
-
-pub(crate) fn scalar_conversion_names() -> &'static [&'static str] {
-    SCALAR_CONVERSION_NAMES
-}
-
-pub(crate) fn scalar_conversion_detail(name: &str) -> Option<String> {
-    if name == "ErrorCode" {
-        return Some("ErrorCode(value): ErrorCode".to_string());
-    }
-    scalar_type_from_name(name).map(|scalar| format!("{name}(value): {}", scalar.name()))
-}
 
 pub(crate) fn std_namespace_hover() -> String {
     let modules = std_modules().join(", ");

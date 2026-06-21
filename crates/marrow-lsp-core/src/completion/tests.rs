@@ -499,16 +499,43 @@ fn bare_identifier_lists_statement_keywords_without_reserved_non_statements() {
 #[test]
 fn bare_identifier_lists_checker_single_name_builtins() {
     let (program, file) = project();
-    let labels = complete(
+    let items = complete_items(
         &program,
         &file,
         "module shelf::app\n\npub fn f()\n    return |\n",
     );
+    let labels = items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
 
-    for builtin in ["reversed", "next", "prev", "Error"] {
+    for builtin in ["reversed", "next", "prev", "key", "Error"] {
         assert!(
             labels.contains(&builtin.to_string()),
             "checker builtin {builtin:?} should be offered, got {labels:?}"
+        );
+    }
+    assert!(
+        !labels.contains(&"write".to_string()),
+        "removed builtins must not be offered, got {labels:?}"
+    );
+
+    let key = item_named(&items, "key");
+    assert_eq!(key.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(key.detail.as_deref(), Some("key(id): value"));
+}
+
+#[test]
+fn completion_has_no_local_intrinsic_callable_model() {
+    let source = include_str!("../completion.rs");
+    for forbidden in [
+        "bare_function_builtins",
+        "scalar_conversion_names",
+        "scalar_conversion_detail",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "completion must consume marrow_check intrinsic callable facts instead of {forbidden}"
         );
     }
 }
