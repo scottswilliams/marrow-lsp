@@ -1950,6 +1950,167 @@ fn custom_saved_resource_inspector_refuses_stale_open_source() {
 }
 
 #[test]
+fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
+    let (_dir, file) = native_counter_fixture();
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+                "initializationOptions": { "marrow.liveData": true }
+            }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let text = std::fs::read_to_string(&file).unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": text }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/savedRoots" }),
+    );
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert_eq!(response["result"]["available"], true, "{response}");
+
+    let edited = "module counter\n\npub fn f()\n    return\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": edited }]
+            }
+        }),
+    );
+    let diagnostics = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+    assert_eq!(
+        diagnostics["params"]["diagnostics"],
+        json!([]),
+        "the unsaved edit should recompute cleanly before live data is requested"
+    );
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 3, "method": "marrow/savedRoots" }),
+    );
+    let response = wait_for_response(&mut stdout, 3, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["available"], false, "{response}");
+    assert_eq!(
+        response["result"]["roots"].as_array().map(Vec::len),
+        Some(0),
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["store_snapshot"],
+        serde_json::Value::Null
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "marrow/dataChildren",
+            "params": {
+                "segments": [{ "kind": "root", "value": "counter" }],
+                "limit": 10,
+                "cursor": null
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 4, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["available"], false, "{response}");
+    assert_eq!(
+        response["result"]["children"].as_array().map(Vec::len),
+        Some(0),
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["store_snapshot"],
+        serde_json::Value::Null
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "marrow/dataRead",
+            "params": {
+                "segments": [
+                    { "kind": "root", "value": "counter" },
+                    { "kind": "key", "value": { "kind": "int", "value": 1 } },
+                    { "kind": "field", "value": "value" }
+                ]
+            }
+        }),
+    );
+    let response = wait_for_response(&mut stdout, 5, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["available"], false, "{response}");
+    assert_eq!(response["result"]["presence"], "absent", "{response}");
+    assert_eq!(response["result"]["value"], serde_json::Value::Null);
+    assert_eq!(
+        response["result"]["store_snapshot"],
+        serde_json::Value::Null
+    );
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 6, "method": "marrow/dataIntegrity" }),
+    );
+    let response = wait_for_response(&mut stdout, 6, Duration::from_secs(10));
+    assert!(response.get("error").is_none(), "no error: {response:?}");
+    assert_eq!(response["result"]["available"], false, "{response}");
+    assert_eq!(response["result"]["scanned"], 0, "{response}");
+    assert_eq!(
+        response["result"]["findings"].as_array().map(Vec::len),
+        Some(0),
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["store_snapshot"],
+        serde_json::Value::Null
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
 fn custom_data_requests_reject_invalid_typed_envelopes() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))

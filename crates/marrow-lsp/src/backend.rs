@@ -66,10 +66,11 @@ impl Backend {
         if !self.live_data.load(Ordering::Relaxed) {
             return None;
         }
-        state.workspace.fresh_program(&state.documents)?;
+        let fresh_program = state.workspace.fresh_program(&state.documents)?;
         open_saved_data_session(state.workspace.project()?)
             .ok()
             .flatten()
+            .filter(|session| session.matches_checked_program(fresh_program))
     }
 
     /// `marrow/savedRoots`: the project's saved root views. Requires a fresh
