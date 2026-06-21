@@ -1323,6 +1323,17 @@ fn hover_does_not_own_saved_place_target_traversal() {
 }
 
 #[test]
+fn hover_does_not_own_saved_root_target_traversal() {
+    let source = include_str!("source.rs");
+    for obsolete in ["fn store_root_at", "fn saved_root_span"] {
+        assert!(
+            !source.contains(obsolete),
+            "saved root hover should consume Marrow store-root hover facts, not own `{obsolete}`"
+        );
+    }
+}
+
+#[test]
 fn hover_over_a_single_letter_function_declaration_name_ignores_the_fn_keyword() {
     let source = "\
 module a

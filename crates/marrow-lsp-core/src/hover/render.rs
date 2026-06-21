@@ -1,10 +1,13 @@
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use marrow_check::tooling::{SavedPlaceHoverFact, SavedPlaceHoverKeyParam};
+use marrow_check::tooling::{
+    SavedPlaceHoverFact, SavedPlaceHoverKeyParam, StoreRootHoverFact, StoreRootHoverMember,
+    StoreRootHoverPathSegment,
+};
 use marrow_check::{
     CheckedConst, CheckedFacts, CheckedFunction, CheckedParam, DirectEffectFacts, HostEffect,
     MarrowType, SavedPlaceEffect,
 };
-use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, StoreSchema, stdlib};
+use marrow_schema::{EnumSchema, IndexSchema, NodeKind, ResourceSchema, stdlib};
 use marrow_syntax::FunctionDecl;
 
 use crate::types::{render_schema_leaf_type, render_type};
@@ -21,7 +24,7 @@ pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
         } => function_hover(checked, parsed, effects),
         HoverFact::Parameter { checked, docs } => parameter_hover(checked, docs),
         HoverFact::ModuleConst { checked, docs } => module_const_hover(checked, docs),
-        HoverFact::StoreRoot { store, resource } => store_hover(store, resource),
+        HoverFact::StoreRoot(fact) => store_hover(&fact),
         HoverFact::Resource { schema } => resource_hover(schema),
         HoverFact::Enum { schema } => enum_hover(schema),
         HoverFact::EnumMember { schema, ordinal } => enum_member_hover(schema, ordinal),
@@ -107,14 +110,11 @@ fn resource_hover(schema: &ResourceSchema) -> String {
     value
 }
 
-fn store_hover(store: &StoreSchema, resource: &ResourceSchema) -> String {
-    let mut value = marrow_code_block(&store_signature(store));
-    append_docs(&mut value, join_docs(&store.docs));
-    append_section(&mut value, identity_summary(store));
-    append_section(
-        &mut value,
-        resource_member_summary(resource, &store.indexes),
-    );
+fn store_hover(fact: &StoreRootHoverFact) -> String {
+    let mut value = marrow_code_block(&store_signature(fact));
+    append_docs(&mut value, join_docs(&fact.store_docs));
+    append_section(&mut value, identity_summary(fact));
+    append_section(&mut value, store_member_summary(fact));
     value
 }
 
@@ -319,37 +319,34 @@ fn resource_signature(schema: &ResourceSchema) -> String {
     format!("resource {}", schema.name)
 }
 
-fn store_signature(store: &StoreSchema) -> String {
-    let mut signature = format!("store ^{}", store.root);
-    if !store.identity_keys.is_empty() {
-        signature.push('(');
-        signature.push_str(
-            &store
-                .identity_keys
-                .iter()
-                .map(|key| format!("{}: {}", key.name, key.ty))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        signature.push(')');
+fn store_signature(fact: &StoreRootHoverFact) -> String {
+    let mut signature = format!("store ^{}", fact.root);
+    if !fact.identity_keys.is_empty() {
+        signature.push_str(&hover_key_params(&fact.identity_keys));
     }
     signature.push_str(": ");
-    signature.push_str(&store.resource);
+    signature.push_str(&fact.resource);
     signature
 }
 
-fn identity_summary(store: &StoreSchema) -> Option<String> {
-    if store.identity_keys.is_empty() {
+fn identity_summary(fact: &StoreRootHoverFact) -> Option<String> {
+    if fact.identity_keys.is_empty() {
         return Some("**Identity**\n- keyless singleton; no generated identity type".to_string());
     }
-    let mut lines = vec![format!("- generated identity type: `Id(^{})`", store.root)];
+    let mut lines = vec![format!("- generated identity type: `Id(^{})`", fact.root)];
     lines.extend(
-        store
-            .identity_keys
+        fact.identity_keys
             .iter()
             .map(|key| format!("- `{}: {}`", key.name, key.ty)),
     );
     Some(format!("**Identity**\n{}", lines.join("\n")))
+}
+
+fn store_member_summary(fact: &StoreRootHoverFact) -> Option<String> {
+    bounded_summary(
+        "Members",
+        fact.members.iter().map(store_member_line).collect(),
+    )
 }
 
 fn resource_member_summary(schema: &ResourceSchema, indexes: &[IndexSchema]) -> Option<String> {
@@ -389,10 +386,10 @@ fn resource_member_lines(member: &marrow_schema::Node, prefix: &str, lines: &mut
 }
 
 fn resource_member_path_segment(member: &marrow_schema::Node) -> String {
-    format!("{}{}", member.name, key_params(&member.key_params))
+    format!("{}{}", member.name, schema_key_params(&member.key_params))
 }
 
-fn key_params(keys: &[marrow_schema::KeyDef]) -> String {
+fn schema_key_params(keys: &[marrow_schema::KeyDef]) -> String {
     if keys.is_empty() {
         String::new()
     } else {
@@ -404,6 +401,27 @@ fn key_params(keys: &[marrow_schema::KeyDef]) -> String {
                 .join(", ")
         )
     }
+}
+
+fn store_member_line(member: &StoreRootHoverMember) -> String {
+    match member {
+        StoreRootHoverMember::Field { path, required, ty } => {
+            let required = if *required { "required " } else { "" };
+            format!("{required}{}: {ty}", store_member_path(path))
+        }
+        StoreRootHoverMember::Layer { path } => store_member_path(path),
+        StoreRootHoverMember::Index { name, args, unique } => {
+            let unique = if *unique { " unique" } else { "" };
+            format!("index {name}({}){unique}", args.join(", "))
+        }
+    }
+}
+
+fn store_member_path(path: &[StoreRootHoverPathSegment]) -> String {
+    path.iter()
+        .map(|segment| format!("{}{}", segment.name, hover_key_params(&segment.key_params)))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn enum_member_summary(schema: &EnumSchema) -> Option<String> {
@@ -462,10 +480,7 @@ fn saved_place_signature_and_docs(fact: &SavedPlaceHoverFact) -> (String, &[Stri
         } => {
             let required = if *required { "required " } else { "" };
             (
-                format!(
-                    "{required}{name}{}: {ty}",
-                    saved_place_key_params(key_params)
-                ),
+                format!("{required}{name}{}: {ty}", hover_key_params(key_params)),
                 docs,
             )
         }
@@ -473,10 +488,7 @@ fn saved_place_signature_and_docs(fact: &SavedPlaceHoverFact) -> (String, &[Stri
             name,
             key_params,
             docs,
-        } => (
-            format!("{name}{}", saved_place_key_params(key_params)),
-            docs,
-        ),
+        } => (format!("{name}{}", hover_key_params(key_params)), docs),
         SavedPlaceHoverFact::Index {
             name,
             args,
@@ -489,7 +501,7 @@ fn saved_place_signature_and_docs(fact: &SavedPlaceHoverFact) -> (String, &[Stri
     }
 }
 
-fn saved_place_key_params(keys: &[SavedPlaceHoverKeyParam]) -> String {
+fn hover_key_params(keys: &[SavedPlaceHoverKeyParam]) -> String {
     if keys.is_empty() {
         String::new()
     } else {

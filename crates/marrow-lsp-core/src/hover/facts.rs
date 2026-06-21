@@ -5,11 +5,12 @@ use marrow_check::{
     CheckedParam, DirectEffectFacts, FunctionFact, MarrowType, SymbolKind, SymbolRef, UseSiteKind,
     tooling::{
         self, CallableSignature, CallableSignatureKind, SavedPlaceHoverFact, SourceSymbolDocs,
-        saved_place_hover_fact_at, source_symbol_docs_at,
+        StoreRootHoverFact, saved_place_hover_fact_at, source_symbol_docs_at,
+        store_root_hover_fact_at,
     },
     type_at,
 };
-use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema};
+use marrow_schema::{EnumSchema, ResourceSchema};
 use marrow_syntax::{FunctionDecl, Keyword, Token, TokenKind, lex_source};
 
 use crate::callables::render_callable_signature;
@@ -33,10 +34,7 @@ pub(super) enum HoverFact<'a> {
         checked: &'a CheckedConst,
         docs: &'a [String],
     },
-    StoreRoot {
-        store: &'a StoreSchema,
-        resource: &'a ResourceSchema,
-    },
+    StoreRoot(StoreRootHoverFact),
     Resource {
         schema: &'a ResourceSchema,
     },
@@ -83,8 +81,8 @@ pub(super) fn collect<'a>(
     if blocked_module_prefix_hover(snapshot, index, file, offset) {
         return None;
     }
-    if let Some(fact) = store_root_declaration_fact(snapshot, file, offset) {
-        return Some(fact);
+    if let Some(fact) = store_root_hover_fact_at(snapshot, file, offset) {
+        return Some(HoverFact::StoreRoot(fact));
     }
     if let Some(fact) = enum_annotation_fact(snapshot, file, offset) {
         return Some(fact);
@@ -242,21 +240,6 @@ fn module_const_fact<'a>(
     Some(HoverFact::ModuleConst {
         checked,
         docs: &parsed_const.docs,
-    })
-}
-
-fn store_root_declaration_fact<'a>(
-    snapshot: &'a AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-) -> Option<HoverFact<'a>> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-    let store = source::store_root_at(&analyzed.parsed.file, &analyzed.source, offset)?;
-    let store_resource =
-        marrow_check::resolve::resolve_store_by_root(&snapshot.program, &store.root.root)?;
-    Some(HoverFact::StoreRoot {
-        store: store_resource.store,
-        resource: store_resource.resource,
     })
 }
 

@@ -2,8 +2,8 @@ use std::path::Path;
 
 use marrow_check::{AnalysisSnapshot, BindingIndex, SymbolKind, SymbolRef};
 use marrow_syntax::{
-    Declaration, EnumDecl, EnumMember, FunctionDecl, Keyword, ResourceDecl, SourceSpan, StoreDecl,
-    TokenKind, lex_source,
+    Declaration, EnumDecl, EnumMember, FunctionDecl, Keyword, ResourceDecl, SourceSpan, TokenKind,
+    lex_source,
 };
 
 pub(super) fn is_named_symbol_reference(
@@ -117,25 +117,6 @@ fn declaration_identifier_span(
                 && token.text(source) == name
         })
         .map(|token| (token.span.start_byte, token.span.end_byte))
-}
-
-fn saved_root_span(source: &str, span: SourceSpan, root: &str) -> Option<(usize, usize)> {
-    let tokens = lex_source(source).tokens;
-    tokens.windows(2).find_map(|pair| {
-        let [previous, token] = pair else {
-            return None;
-        };
-        if previous.kind == TokenKind::Caret
-            && token.kind == TokenKind::Identifier
-            && span_covers(span, previous.span.start_byte)
-            && span_covers(span, token.span.end_byte)
-            && token.text(source) == root
-        {
-            Some((previous.span.start_byte, token.span.end_byte))
-        } else {
-            None
-        }
-    })
 }
 
 pub(super) fn is_function_hover_target(
@@ -338,25 +319,6 @@ fn enum_member_in(members: &[EnumMember], span: SourceSpan) -> Option<&EnumMembe
         }
         if let Some(member) = enum_member_in(&member.members, span) {
             return Some(member);
-        }
-    }
-    None
-}
-
-pub(super) fn store_root_at<'a>(
-    source: &'a marrow_syntax::SourceFile,
-    text: &str,
-    offset: usize,
-) -> Option<&'a StoreDecl> {
-    for declaration in &source.declarations {
-        let Declaration::Store(store) = declaration else {
-            continue;
-        };
-        let Some((start, end)) = saved_root_span(text, store.span, &store.root.root) else {
-            continue;
-        };
-        if start <= offset && offset <= end {
-            return Some(store);
         }
     }
     None
