@@ -1158,6 +1158,73 @@ fn symbols_do_not_return_stale_snapshot_names_after_an_edit() {
 }
 
 #[test]
+fn workspace_symbol_smoke_passes_search_text_to_marrow() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let file = src.join("app.mw");
+    let source = "\
+module app
+
+const bookValue: int = 1
+const other: int = 2
+
+resource Book
+    required title: string
+";
+    std::fs::write(&file, source).unwrap();
+
+    let (mut server, mut stdin, mut stdout, _) = initialized_server();
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": source
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "workspace/symbol",
+            "params": { "query": "book" }
+        }),
+    );
+    let workspace_symbols = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    let names: Vec<&str> = workspace_symbols["result"]
+        .as_array()
+        .expect("workspace symbol result")
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["Book", "bookValue", "title"],
+        "workspace symbols should use Marrow search ranking: {workspace_symbols}"
+    );
+
+    let _ = server.0.kill();
+}
+
+#[test]
 fn completion_drops_project_roots_when_checked_program_is_stale() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

@@ -619,8 +619,9 @@ impl LanguageServer for Backend {
 
     async fn symbol(
         &self,
-        _: WorkspaceSymbolParams,
+        params: WorkspaceSymbolParams,
     ) -> jsonrpc::Result<Option<Vec<SymbolInformation>>> {
+        let search_text = params.query;
         let mut state = self.state.lock().await;
         let State {
             documents,
@@ -631,7 +632,7 @@ impl LanguageServer for Backend {
         let Some(file) = documents.urls().filter_map(url_to_path).next() else {
             return Ok(workspace
                 .fresh_latest(documents)
-                .map(symbols::workspace_symbols));
+                .map(|snapshot| symbols::workspace_symbols(snapshot, &search_text)));
         };
         if workspace.latest().is_none() {
             let _ = workspace.recompute(&file, documents);
@@ -639,7 +640,7 @@ impl LanguageServer for Backend {
         let Some(snapshot) = workspace.fresh_latest(documents) else {
             return Ok(None);
         };
-        Ok(Some(symbols::workspace_symbols(snapshot)))
+        Ok(Some(symbols::workspace_symbols(snapshot, &search_text)))
     }
 
     /// Complete at the cursor. Reads only the document's cached lex/parse and the

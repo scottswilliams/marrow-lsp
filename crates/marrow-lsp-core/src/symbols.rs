@@ -13,7 +13,7 @@ use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
 use marrow_check::AnalysisSnapshot;
 use marrow_check::tooling::{
     DocumentSymbol as MarrowDocumentSymbol, DocumentSymbolKind, SourceSymbolKind,
-    document_symbols as marrow_document_symbols, source_symbols,
+    document_symbols as marrow_document_symbols, source_symbols_matching,
 };
 use marrow_syntax::{SourceFile, SourceSpan};
 
@@ -74,9 +74,9 @@ fn document_symbol_kind(kind: DocumentSymbolKind) -> SymbolKind {
 
 /// Checked functions, constants, and catalog declarations as a flat,
 /// project-wide list for "go to symbol in workspace".
-pub fn workspace_symbols(snapshot: &AnalysisSnapshot) -> Vec<SymbolInformation> {
+pub fn workspace_symbols(snapshot: &AnalysisSnapshot, search_text: &str) -> Vec<SymbolInformation> {
     let sources = WorkspaceSources::new(snapshot);
-    source_symbols(snapshot)
+    source_symbols_matching(snapshot, search_text)
         .into_iter()
         .filter_map(|symbol| {
             let source = sources.get(&symbol.file)?;
@@ -397,7 +397,7 @@ pub fn add(title: string): Id(^books)
     return nextId(^books)
 ";
         let snapshot = analyze(source);
-        let symbols = workspace_symbols(&snapshot);
+        let symbols = workspace_symbols(&snapshot, "");
 
         let by_name: std::collections::HashMap<&str, SymbolKind> =
             symbols.iter().map(|s| (s.name.as_str(), s.kind)).collect();
@@ -449,7 +449,7 @@ pub fn add(title: string): Id(^books)
     return nextId(^books)
 ";
         let snapshot = analyze(source);
-        let symbols = workspace_symbols(&snapshot);
+        let symbols = workspace_symbols(&snapshot, "");
         let book = symbols
             .iter()
             .find(|symbol| symbol.name == "Book")
@@ -474,7 +474,7 @@ fn add(): Id(^books)
     return nextId(^books)
 ";
         let snapshot = analyze(source);
-        let symbols = workspace_symbols(&snapshot);
+        let symbols = workspace_symbols(&snapshot, "");
 
         let add = symbols
             .iter()
@@ -512,7 +512,7 @@ enum Status
     active
 ";
         let snapshot = analyze(source);
-        let symbols = workspace_symbols(&snapshot);
+        let symbols = workspace_symbols(&snapshot, "");
 
         let mut title_containers: Vec<&str> = symbols
             .iter()
@@ -536,6 +536,33 @@ enum Status
     }
 
     #[test]
+    fn workspace_symbols_delegate_search_ranking_to_marrow() {
+        let source = "\
+module a
+
+const bookValue: int = 1
+
+resource Book
+    required title: string
+";
+        let snapshot = analyze(source);
+        let symbols = workspace_symbols(&snapshot, "book");
+
+        let observed: Vec<(&str, Option<&str>)> = symbols
+            .iter()
+            .map(|symbol| (symbol.name.as_str(), symbol.container_name.as_deref()))
+            .collect();
+        assert_eq!(
+            observed,
+            [
+                ("Book", Some("a")),
+                ("bookValue", Some("a")),
+                ("title", Some("a::Book")),
+            ]
+        );
+    }
+
+    #[test]
     fn workspace_symbols_do_not_own_catalog_classification() {
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -550,6 +577,8 @@ enum Status
             "struct CatalogContainers",
             "fn declaration_owner",
             "fn catalog_symbol_kind",
+            "fn source_symbol_match",
+            "sort_by_key",
         ] {
             assert!(
                 !production.contains(obsolete),
