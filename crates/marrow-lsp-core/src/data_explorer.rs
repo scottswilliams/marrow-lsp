@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use marrow_check::tooling::{self, ToolingError};
-use marrow_json::DataSnapshotJson;
+use marrow_json::DataGenerationJson;
 pub use marrow_json::saved_data::{
     DataChildJson as DataChildDto, DataChildViewJson as DataChildViewDto,
     DataChildViewsPageJson as DataChildViewsResult, DataChildrenPageJson as DataChildrenResult,
@@ -29,7 +29,7 @@ pub const DATA_CHILDREN_PAGE_LIMIT: usize = 200;
 pub struct SavedRootsResult {
     pub available: bool,
     pub roots: Vec<DataChildViewDto>,
-    pub store_snapshot: Option<DataSnapshotJson>,
+    pub store_snapshot: Option<DataGenerationJson>,
 }
 
 /// Handle `marrow/savedRoots`. A `None` session (no native store configured) or an
@@ -43,7 +43,7 @@ pub fn saved_roots(session: Option<&SavedDataSession>) -> SavedRootsResult {
                 .into_iter()
                 .map(|root| DataChildViewDto::from(tooling::DataChild::Root(root)))
                 .collect(),
-            store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
+            store_snapshot: Some(DataGenerationJson::from(&stamped.stamp)),
         },
         _ => SavedRootsResult {
             available: false,
@@ -59,7 +59,7 @@ pub struct DataChildViewsResponse {
     pub children: Vec<DataChildViewDto>,
     pub truncated: bool,
     pub cursor: Option<DataKeyDto>,
-    pub store_snapshot: Option<DataSnapshotJson>,
+    pub store_snapshot: Option<DataGenerationJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DataChildrenError>,
 }
@@ -71,7 +71,7 @@ pub struct DataReadResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     pub value_truncated: bool,
-    pub store_snapshot: Option<DataSnapshotJson>,
+    pub store_snapshot: Option<DataGenerationJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<DataChildrenError>,
 }
@@ -189,6 +189,7 @@ mod tests {
     use marrow_check::{
         check_project, check_project_against, project_store_lock, read_committed_lock,
     };
+    use marrow_json::{DATA_GENERATION_PROFILE_VERSION, DataGenerationJson};
     use marrow_project::parse_config;
     use marrow_store::key::SavedKey;
     use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
@@ -241,6 +242,22 @@ mod tests {
                 store_snapshot: None,
             }
         );
+    }
+
+    #[test]
+    fn saved_roots_returns_generation_profile() {
+        let fixture = counter_fixture(CounterShape::default().with_ids(1..=1));
+        let roots = saved_roots(Some(&fixture.session));
+
+        assert!(roots.available);
+        assert_eq!(
+            roots.roots,
+            vec![DataChildViewDto {
+                segment: DataPathSegmentDto::Root("counter".into()),
+                label: "counter".into(),
+            }]
+        );
+        assert_generation_profile(&roots.store_snapshot);
     }
 
     #[test]
@@ -349,7 +366,7 @@ mod tests {
                 store_snapshot: page.store_snapshot.clone(),
             }
         );
-        assert!(page.store_snapshot.is_some());
+        assert_generation_profile(&page.store_snapshot);
 
         let page = session_data_children_page(
             &fixture.session,
@@ -372,7 +389,7 @@ mod tests {
                 store_snapshot: page.store_snapshot.clone(),
             }
         );
-        assert!(page.store_snapshot.is_some());
+        assert_generation_profile(&page.store_snapshot);
 
         let page = session_data_children_page(
             &fixture.session,
@@ -392,7 +409,7 @@ mod tests {
                 store_snapshot: page.store_snapshot.clone(),
             }
         );
-        assert!(page.store_snapshot.is_some());
+        assert_generation_profile(&page.store_snapshot);
     }
 
     #[test]
@@ -416,7 +433,7 @@ mod tests {
                 label: "(1)".into(),
             }]
         );
-        assert!(page.store_snapshot.is_some());
+        assert_generation_profile(&page.store_snapshot);
     }
 
     #[test]
@@ -446,7 +463,7 @@ mod tests {
                 store_snapshot: read.store_snapshot.clone(),
             }
         );
-        assert!(read.store_snapshot.is_some());
+        assert_generation_profile(&read.store_snapshot);
     }
 
     #[test]
@@ -480,7 +497,12 @@ mod tests {
                 store_snapshot: read.store_snapshot.clone(),
             }
         );
-        assert!(read.store_snapshot.is_some());
+        assert_generation_profile(&read.store_snapshot);
+    }
+
+    fn assert_generation_profile(snapshot: &Option<DataGenerationJson>) {
+        let snapshot = snapshot.as_ref().expect("response carries generation");
+        assert_eq!(snapshot.profile_version, DATA_GENERATION_PROFILE_VERSION);
     }
 
     struct CounterFixture {

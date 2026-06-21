@@ -12,12 +12,33 @@ const outDir = mkdtempSync(join(tmpdir(), "marrow-vscode-saved-resource-"));
 const tsc = join(extensionDir, "node_modules", ".bin", "tsc");
 const restoreLoad = Module._load;
 const baseSnapshot = {
-  opaque_generation: 1,
-  future_marrow_metadata: { participates_in_view_equality: true },
+  profile_version: "data.generation.v1",
+  store_uid: "store_00000000000000000000000000000001",
+  catalog_digest: "sha256:catalog",
+  commit: {
+    commit_id: 7,
+    catalog_epoch: 3,
+    source_digest: "sha256:source",
+    layout_epoch: 2,
+    engine_profile_digest: "77944eb86c08b665",
+  },
+  open_transaction: null,
+  checked_source_digest: "sha256:checked",
 };
 const staleSnapshot = {
   ...baseSnapshot,
-  future_marrow_metadata: { participates_in_view_equality: false },
+  checked_source_digest: "sha256:stale",
+};
+const unversionedSnapshot = {
+  store_uid: baseSnapshot.store_uid,
+  catalog_digest: baseSnapshot.catalog_digest,
+  commit: baseSnapshot.commit,
+  open_transaction: baseSnapshot.open_transaction,
+  checked_source_digest: baseSnapshot.checked_source_digest,
+};
+const wrongProfileSnapshot = {
+  ...baseSnapshot,
+  profile_version: "data.generation.v0",
 };
 
 function installVscodeStub() {
@@ -125,7 +146,7 @@ function makeClient() {
             ],
             truncated: false,
             cursor: null,
-            store_snapshot: staleSnapshot,
+            store_snapshot: wrongProfileSnapshot,
           };
         }
         if (
@@ -212,7 +233,7 @@ function makeClient() {
             presence: "value_only",
             value: "mixed-generation-value",
             value_truncated: false,
-            store_snapshot: staleSnapshot,
+            store_snapshot: unversionedSnapshot,
           };
         }
         if (deepEqual(params.segments, layerPath)) {
@@ -230,6 +251,22 @@ function makeClient() {
         throw new Error(`unexpected dataRead path ${JSON.stringify(params)}`);
       }
       throw new Error(`unexpected request ${method}`);
+    },
+  };
+}
+
+function makeRootsClient(storeSnapshot) {
+  return {
+    async sendRequest(method, params) {
+      if (method !== "marrow/savedRoots") {
+        throw new Error(`unexpected request ${method}`);
+      }
+      assert.equal(params, undefined);
+      return {
+        available: true,
+        roots: [{ segment: { kind: "root", value: "root-id" }, label: "Root" }],
+        store_snapshot: storeSnapshot,
+      };
     },
   };
 }
@@ -266,6 +303,14 @@ try {
     pathToFileURL(join(outDir, "savedResourceInspector.js"))
   );
 
+  for (const storeSnapshot of [unversionedSnapshot, wrongProfileSnapshot, null]) {
+    const malformedRootsProvider = new SavedResourceProvider();
+    malformedRootsProvider.setClient(makeRootsClient(storeSnapshot));
+    assert.deepEqual(await malformedRootsProvider.getChildren(), [
+      { kind: "unavailable", label: "store unavailable" },
+    ]);
+  }
+
   const provider = new SavedResourceProvider();
   const client = makeClient();
   provider.setClient(client);
@@ -279,6 +324,7 @@ try {
     segment: { kind: "root", value: "root-id" },
     snapshot: baseSnapshot,
   });
+  assert.equal(roots[0].snapshot.profile_version, "data.generation.v1");
   assert.deepEqual(roots[1], {
     kind: "root",
     label: "StaleRoot",

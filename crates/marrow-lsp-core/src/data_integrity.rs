@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use marrow_check::tooling::IntegrityProblem;
-use marrow_json::DataSnapshotJson;
+use marrow_json::DataGenerationJson;
 
 use crate::store::SavedDataSession;
 
@@ -40,7 +40,7 @@ pub struct DataIntegrityResult {
     pub findings: Vec<Finding>,
     pub scanned: usize,
     pub truncated: bool,
-    pub store_snapshot: Option<DataSnapshotJson>,
+    pub store_snapshot: Option<DataGenerationJson>,
 }
 
 impl DataIntegrityResult {
@@ -72,7 +72,7 @@ pub fn data_integrity(session: Option<&SavedDataSession>) -> DataIntegrityResult
             findings: stamped.data.problems.into_iter().map(finding_for).collect(),
             scanned: stamped.data.items_checked,
             truncated: stamped.data.truncated,
-            store_snapshot: Some(DataSnapshotJson::from(&stamped.stamp)),
+            store_snapshot: Some(DataGenerationJson::from(&stamped.stamp)),
         },
         Err(_) => DataIntegrityResult::unavailable(),
     }

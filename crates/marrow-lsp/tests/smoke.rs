@@ -120,6 +120,10 @@ pub fn f()
 
 fn assert_store_snapshot(snapshot: &Value) {
     assert_eq!(
+        snapshot["profile_version"], "data.generation.v1",
+        "snapshot should carry the Marrow data generation profile version: {snapshot}"
+    );
+    assert_eq!(
         snapshot["store_uid"], "store_00000000000000000000000000000001",
         "snapshot should carry the native fixture store UID: {snapshot}"
     );

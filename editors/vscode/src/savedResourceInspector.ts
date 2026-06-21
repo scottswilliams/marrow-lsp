@@ -1,15 +1,36 @@
 import * as vscode from "vscode";
 import { LanguageClient } from "vscode-languageclient/node";
 
+const DATA_GENERATION_PROFILE_VERSION = "data.generation.v1";
+
 interface SavedRootsResult {
   available: boolean;
   roots: SavedRootView[];
   store_snapshot: StoreSnapshot | null;
 }
 
-type StoreSnapshot = JsonObject;
-type JsonObject = { readonly [key: string]: JsonValue };
-type JsonValue = string | number | boolean | null | JsonObject | readonly JsonValue[];
+type StoreSnapshot = DataGeneration;
+
+interface DataGeneration {
+  readonly profile_version: typeof DATA_GENERATION_PROFILE_VERSION;
+  readonly store_uid: string | null;
+  readonly catalog_digest: string | null;
+  readonly commit: DataGenerationCommit | null;
+  readonly open_transaction: DataGenerationTransaction | null;
+  readonly checked_source_digest: string;
+}
+
+interface DataGenerationCommit {
+  readonly commit_id: number;
+  readonly catalog_epoch: number;
+  readonly source_digest: string;
+  readonly layout_epoch: number;
+  readonly engine_profile_digest: string;
+}
+
+interface DataGenerationTransaction {
+  readonly depth: number;
+}
 
 type DataRootSegment = { readonly kind: "root"; readonly value: string };
 
@@ -78,14 +99,14 @@ interface SavedRootNode {
   readonly kind: "root";
   readonly label: string;
   readonly segment: DataRootSegment;
-  readonly snapshot: StoreSnapshot | null;
+  readonly snapshot: StoreSnapshot;
 }
 
 interface SavedSegmentNode {
   readonly kind: "segment";
   readonly label: string;
   readonly segments: DataPathSegment[];
-  readonly snapshot: StoreSnapshot | null;
+  readonly snapshot: StoreSnapshot;
 }
 
 interface SavedValueNode {
@@ -99,7 +120,7 @@ interface SavedMoreNode {
   readonly label: string;
   readonly segments: DataPathSegment[];
   readonly cursor: DataKey;
-  readonly snapshot: StoreSnapshot | null;
+  readonly snapshot: StoreSnapshot;
 }
 
 interface SavedPlaceholderNode {
@@ -169,12 +190,16 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
+    const snapshot = storeSnapshotFromWire(result.store_snapshot);
+    if (snapshot === undefined) {
+      return [unavailableNode()];
+    }
     return result.roots.map(
       (root): SavedRootNode => ({
         kind: "root",
         label: root.label,
         segment: root.segment,
-        snapshot: result.store_snapshot,
+        snapshot,
       }),
     );
   }
@@ -182,7 +207,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
   private async getDataChildren(
     segments: DataPathSegment[],
     cursor: DataKey | null,
-    expectedSnapshot: StoreSnapshot | null,
+    expectedSnapshot: StoreSnapshot,
   ): Promise<SavedResourceNode[]> {
     const client = this.client;
     if (client === undefined) {
@@ -201,7 +226,8 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
-    if (!sameSnapshot(expectedSnapshot, result.store_snapshot)) {
+    const snapshot = storeSnapshotFromWire(result.store_snapshot);
+    if (snapshot === undefined || !sameSnapshot(expectedSnapshot, snapshot)) {
       return [changedNode()];
     }
     if (result.error !== undefined) {
@@ -211,7 +237,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       kind: "segment",
       label: child.label,
       segments: [...segments, child.segment],
-      snapshot: result.store_snapshot,
+      snapshot,
     }));
     if (result.truncated) {
       if (result.cursor !== null) {
@@ -220,7 +246,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
           label: "more children",
           segments: [...segments],
           cursor: result.cursor,
-          snapshot: result.store_snapshot,
+          snapshot,
         });
       } else {
         nodes.push({ kind: "truncated", label: "additional children unavailable" });
@@ -239,7 +265,7 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
 
   private async readData(
     segments: DataPathSegment[],
-    expectedSnapshot: StoreSnapshot | null,
+    expectedSnapshot: StoreSnapshot,
   ): Promise<SavedResourceNode[] | undefined> {
     const client = this.client;
     if (client === undefined) {
@@ -258,7 +284,8 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
-    if (!sameSnapshot(expectedSnapshot, result.store_snapshot)) {
+    const snapshot = storeSnapshotFromWire(result.store_snapshot);
+    if (snapshot === undefined || !sameSnapshot(expectedSnapshot, snapshot)) {
       return [changedNode()];
     }
     if (result.error !== undefined) {
@@ -282,48 +309,129 @@ function changedNode(): SavedPlaceholderNode {
   return { kind: "changed", label: "data changed; refresh" };
 }
 
-function sameSnapshot(left: StoreSnapshot | null, right: StoreSnapshot | null): boolean {
-  return sameJson(left, right);
+function storeSnapshotFromWire(value: unknown): StoreSnapshot | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (value.profile_version !== DATA_GENERATION_PROFILE_VERSION) {
+    return undefined;
+  }
+  if (
+    !isStringOrNull(value.store_uid) ||
+    !isStringOrNull(value.catalog_digest) ||
+    typeof value.checked_source_digest !== "string"
+  ) {
+    return undefined;
+  }
+  const commit = generationCommitFromWire(value.commit);
+  if (commit === undefined) {
+    return undefined;
+  }
+  const transaction = generationTransactionFromWire(value.open_transaction);
+  if (transaction === undefined) {
+    return undefined;
+  }
+  return {
+    profile_version: DATA_GENERATION_PROFILE_VERSION,
+    store_uid: value.store_uid,
+    catalog_digest: value.catalog_digest,
+    commit,
+    open_transaction: transaction,
+    checked_source_digest: value.checked_source_digest,
+  };
 }
 
-function sameJson(left: JsonValue, right: JsonValue): boolean {
+function generationCommitFromWire(value: unknown): DataGenerationCommit | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (
+    !isSafeInteger(value.commit_id) ||
+    !isSafeInteger(value.catalog_epoch) ||
+    typeof value.source_digest !== "string" ||
+    !isSafeInteger(value.layout_epoch) ||
+    typeof value.engine_profile_digest !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    commit_id: value.commit_id,
+    catalog_epoch: value.catalog_epoch,
+    source_digest: value.source_digest,
+    layout_epoch: value.layout_epoch,
+    engine_profile_digest: value.engine_profile_digest,
+  };
+}
+
+function generationTransactionFromWire(
+  value: unknown,
+): DataGenerationTransaction | null | undefined {
+  if (value === null) {
+    return null;
+  }
+  if (!isRecord(value) || !isSafeInteger(value.depth)) {
+    return undefined;
+  }
+  return { depth: value.depth };
+}
+
+function isSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+function isStringOrNull(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sameSnapshot(left: StoreSnapshot, right: StoreSnapshot): boolean {
+  if (left === right) {
+    return true;
+  }
+  return (
+    left.profile_version === right.profile_version &&
+    left.store_uid === right.store_uid &&
+    left.catalog_digest === right.catalog_digest &&
+    sameCommit(left.commit, right.commit) &&
+    sameTransaction(left.open_transaction, right.open_transaction) &&
+    left.checked_source_digest === right.checked_source_digest
+  );
+}
+
+function sameCommit(
+  left: DataGenerationCommit | null,
+  right: DataGenerationCommit | null,
+): boolean {
   if (left === right) {
     return true;
   }
   if (left === null || right === null) {
     return false;
   }
-  if (isJsonArray(left) || isJsonArray(right)) {
-    return sameJsonArray(left, right);
-  }
-  if (isJsonObject(left) && isJsonObject(right)) {
-    return sameJsonObject(left, right);
-  }
-  return false;
-}
-
-function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
-  return Array.isArray(value);
-}
-
-function sameJsonArray(left: JsonValue, right: JsonValue): boolean {
-  if (!isJsonArray(left) || !isJsonArray(right) || left.length !== right.length) {
-    return false;
-  }
-  return left.every((value, index) => sameJson(value, right[index]));
-}
-
-function isJsonObject(value: JsonValue): value is JsonObject {
-  return typeof value === "object" && value !== null && !isJsonArray(value);
-}
-
-function sameJsonObject(left: JsonObject, right: JsonObject): boolean {
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
-  if (leftKeys.length !== rightKeys.length) {
-    return false;
-  }
-  return leftKeys.every((key) =>
-    Object.hasOwn(right, key) && sameJson(left[key], right[key]),
+  return (
+    left.commit_id === right.commit_id &&
+    left.catalog_epoch === right.catalog_epoch &&
+    left.source_digest === right.source_digest &&
+    left.layout_epoch === right.layout_epoch &&
+    left.engine_profile_digest === right.engine_profile_digest
   );
+}
+
+function sameTransaction(
+  left: DataGenerationTransaction | null,
+  right: DataGenerationTransaction | null,
+): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (left === null || right === null) {
+    return false;
+  }
+  return left.depth === right.depth;
 }

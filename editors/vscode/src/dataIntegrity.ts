@@ -1,11 +1,34 @@
 import * as vscode from "vscode";
 import { LanguageClient } from "vscode-languageclient/node";
 
+const DATA_GENERATION_PROFILE_VERSION = "data.generation.v1";
+
 // These types mirror the marrow-lsp custom request contract EXACTLY. They are
 // the wire shapes the server speaks; do not "improve" them or they will drift
 // from the server. The TypeScript side never interprets a path or a finding —
 // it only ferries what the core reports, which owns all store and schema
 // semantics.
+
+interface DataGeneration {
+  readonly profile_version: typeof DATA_GENERATION_PROFILE_VERSION;
+  readonly store_uid: string | null;
+  readonly catalog_digest: string | null;
+  readonly commit: DataGenerationCommit | null;
+  readonly open_transaction: DataGenerationTransaction | null;
+  readonly checked_source_digest: string;
+}
+
+interface DataGenerationCommit {
+  readonly commit_id: number;
+  readonly catalog_epoch: number;
+  readonly source_digest: string;
+  readonly layout_epoch: number;
+  readonly engine_profile_digest: string;
+}
+
+interface DataGenerationTransaction {
+  readonly depth: number;
+}
 
 interface Finding {
   // Root-first store path the finding concerns, rendered by the core.
@@ -23,7 +46,7 @@ interface DataIntegrityResult {
   findings: Finding[];
   scanned: number;
   truncated: boolean;
-  store_snapshot: unknown | null;
+  store_snapshot: DataGeneration | null;
 }
 
 const REQUEST_DATA_INTEGRITY = "marrow/dataIntegrity";

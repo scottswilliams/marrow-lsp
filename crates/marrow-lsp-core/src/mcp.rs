@@ -52,21 +52,18 @@ use crate::workspace::Workspace;
 pub const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
 pub const SAVED_DATA_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-root identity",
-    "versioned source/store generation",
     "watch/refresh facts",
     "integrity and repair facts",
     "serve/attach data boundaries",
 ];
 pub const DATA_CHILDREN_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
-    "versioned source/store generation",
     "watch/refresh facts",
     "integrity and repair facts",
     "serve/attach data boundaries",
 ];
 pub const DATA_READ_MISSING_FACTS: &[&str] = &[
     "catalog-bound saved-place identity",
-    "versioned source/store generation",
     "bounded presence facts",
     "watch/refresh facts",
     "integrity and repair facts",

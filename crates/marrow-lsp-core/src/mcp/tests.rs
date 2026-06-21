@@ -4,6 +4,7 @@ use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
 use marrow_check::{
     CheckedProgram, check_project, check_project_against, project_store_lock, read_committed_lock,
 };
+use marrow_json::DATA_GENERATION_PROFILE_VERSION;
 use marrow_project::{CATALOG_FILE_NAME, parse_config};
 use marrow_store::key::SavedKey;
 use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
@@ -62,6 +63,10 @@ fn assert_production_contract(result: &Json, description: &str) {
 }
 
 fn assert_store_snapshot(snapshot: &Json) {
+    assert_eq!(
+        snapshot["profile_version"], DATA_GENERATION_PROFILE_VERSION,
+        "snapshot should carry the Marrow data generation profile version: {snapshot}"
+    );
     assert_eq!(
         snapshot["store_uid"], "store_00000000000000000000000000000001",
         "snapshot should carry the fixture store UID: {snapshot}"
@@ -1393,7 +1398,6 @@ fn data_tools_refuse_when_not_enabled() {
         "saved-root listing helper",
         &[
             "catalog-bound saved-root identity",
-            "versioned source/store generation",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1432,7 +1436,6 @@ fn data_tools_refuse_when_not_enabled() {
         "bounded typed data helper",
         &[
             "catalog-bound saved-place identity",
-            "versioned source/store generation",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1456,7 +1459,6 @@ fn data_tools_refuse_when_not_enabled() {
         "data value preview helper",
         &[
             "catalog-bound saved-place identity",
-            "versioned source/store generation",
             "bounded presence facts",
             "watch/refresh facts",
             "integrity and repair facts",
@@ -1488,7 +1490,6 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
         "saved-root listing helper",
         &[
             "catalog-bound saved-root identity",
-            "versioned source/store generation",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1601,7 +1602,6 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
         "bounded typed data helper",
         &[
             "catalog-bound saved-place identity",
-            "versioned source/store generation",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1639,7 +1639,6 @@ fn data_read_returns_bounded_value_preview_when_enabled() {
         "data value preview helper",
         &[
             "catalog-bound saved-place identity",
-            "versioned source/store generation",
             "bounded presence facts",
             "watch/refresh facts",
             "integrity and repair facts",
@@ -1678,7 +1677,6 @@ fn data_children_returns_empty_page_for_absent_members() {
         "bounded typed data helper",
         &[
             "catalog-bound saved-place identity",
-            "versioned source/store generation",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",
@@ -1713,7 +1711,6 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
         "bounded typed data helper",
         &[
             "catalog-bound saved-place identity",
-            "versioned source/store generation",
             "watch/refresh facts",
             "integrity and repair facts",
             "serve/attach data boundaries",

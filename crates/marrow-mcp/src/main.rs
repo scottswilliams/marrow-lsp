@@ -820,7 +820,7 @@ mod tests {
                         SAVED_DATA_MISSING_FACTS,
                     ),
                 }),
-                "saved-root listing helper (presentation-only: catalog-bound saved-root identity +4): data unavailable",
+                "saved-root listing helper (presentation-only: catalog-bound saved-root identity +3): data unavailable",
             ),
             (
                 "mw_data_integrity",
@@ -849,7 +849,7 @@ mod tests {
                         DATA_CHILDREN_MISSING_FACTS,
                     ),
                 }),
-                "bounded typed data helper (presentation-only: catalog-bound saved-place identity +4): 2 children (truncated)",
+                "bounded typed data helper (presentation-only: catalog-bound saved-place identity +3): 2 children (truncated)",
             ),
             (
                 "mw_data_read",
@@ -864,7 +864,7 @@ mod tests {
                         DATA_READ_MISSING_FACTS,
                     ),
                 }),
-                "data value preview helper (presentation-only: catalog-bound saved-place identity +5): 42",
+                "data value preview helper (presentation-only: catalog-bound saved-place identity +4): 42",
             ),
             (
                 "mw_surface_read",

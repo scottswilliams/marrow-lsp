@@ -308,7 +308,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Presentation-only saved-root listing helper: list typed saved-root views and Marrow store_snapshot metadata from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-root identity, versioned source/store generation, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable typed production API.",
+            "description": "Presentation-only saved-root listing helper: list typed saved-root views and Marrow versioned data generation DTOs under store_snapshot from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing catalog-bound saved-root identity, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable typed production API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -331,7 +331,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_children",
-            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow store_snapshot metadata under a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, versioned source/store generation, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
+            "description": "Presentation-only bounded typed data helper: return one page of typed child segments and Marrow versioned data generation DTOs under store_snapshot for a saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing catalog-bound saved-place identity, watch/refresh facts, integrity and repair facts, and serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
@@ -372,7 +372,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_read",
-            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview for one typed saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path, clamps `preview_limit`, and reads nothing when data access is disabled. Presence detection remains Marrow-owned presentation behavior, not a bounded production read contract. Missing catalog-bound saved-place identity, versioned source/store generation, watch/refresh facts, integrity and repair facts, bounded presence facts, and serve/attach data boundaries; not a stable production data API.",
+            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview and versioned data generation DTO under store_snapshot for one typed saved-data path from the project's real store when data access is enabled. It accepts a typed saved-data path, clamps `preview_limit`, and reads nothing when data access is disabled. Presence detection remains Marrow-owned presentation behavior, not a bounded production read contract. Missing catalog-bound saved-place identity, watch/refresh facts, integrity and repair facts, bounded presence facts, and serve/attach data boundaries; not a stable production data API.",
             "_meta": marrow_meta(json!({
                 "status": "presentation-only",
                 "stableProductionApi": false,
