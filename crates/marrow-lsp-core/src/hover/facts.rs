@@ -1,16 +1,17 @@
 use std::path::Path;
 
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedFacts, MarrowType, SymbolKind,
+    AnalysisSnapshot, BindingIndex, CheckedFacts, MarrowType,
     tooling::{
         self, CallableSignature, CallableSignatureKind, SavedPlaceHoverFact,
-        SourceCallableHoverFact, SourceSchemaHoverFact, StoreRootHoverFact,
-        saved_place_hover_fact_at, source_callable_hover_fact_at, source_schema_hover_fact_at,
-        source_symbol_docs_at, store_root_hover_fact_at,
+        SourceCallableHoverFact, SourceModulePathHoverFact, SourceSchemaHoverFact,
+        StoreRootHoverFact, saved_place_hover_fact_at, source_callable_hover_fact_at,
+        source_module_path_hover_fact_at, source_schema_hover_fact_at, source_symbol_docs_at,
+        store_root_hover_fact_at,
     },
     type_at,
 };
-use marrow_syntax::{Keyword, Token, TokenKind, lex_source};
+use marrow_syntax::{Keyword, TokenKind, lex_source};
 
 use crate::callables::render_callable_signature;
 use crate::language_facts;
@@ -23,6 +24,7 @@ pub(super) enum HoverFact<'a> {
         fact: SourceCallableHoverFact,
         checked_facts: &'a CheckedFacts,
     },
+    SourceModulePath(SourceModulePathHoverFact),
     StoreRoot(StoreRootHoverFact),
     SourceSchema(SourceSchemaHoverFact),
     SavedPlace(SavedPlaceHoverFact),
@@ -50,8 +52,8 @@ pub(super) fn collect<'a>(
             checked_facts: &snapshot.program.facts,
         });
     }
-    if blocked_module_prefix_hover(snapshot, index, file, offset) {
-        return None;
+    if let Some(fact) = source_module_path_hover_fact_at(snapshot, index, file, offset) {
+        return Some(HoverFact::SourceModulePath(fact));
     }
     if let Some(fact) = store_root_hover_fact_at(snapshot, file, offset) {
         return Some(HoverFact::StoreRoot(fact));
@@ -76,31 +78,6 @@ pub(super) fn checked_type_at(
     type_at(&snapshot.program, file, &analyzed.parsed, offset)
 }
 
-fn blocked_module_prefix_hover(
-    snapshot: &AnalysisSnapshot,
-    index: &BindingIndex,
-    file: &Path,
-    offset: usize,
-) -> bool {
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return false;
-    };
-    let Some((segments, cursor_segment, declaration)) =
-        tokens::module_path_at_with_position(&analyzed.source, offset)
-    else {
-        return false;
-    };
-    if declaration || cursor_segment + 1 == segments.len() {
-        return false;
-    }
-    if let Some(symbol) = index.definition(file, offset)
-        && matches!(symbol.kind, SymbolKind::Enum | SymbolKind::EnumMember)
-    {
-        return false;
-    }
-    true
-}
-
 fn default_library_call_text(
     snapshot: &AnalysisSnapshot,
     file: &Path,
@@ -109,41 +86,10 @@ fn default_library_call_text(
     let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
     let tokens = lex_source(&analyzed.source).tokens;
     let index = tokens::path_segment_index_at(&tokens, offset)?;
-    if let Some(value) = std_library_path_text(snapshot, file, &tokens, &analyzed.source, index) {
-        return Some(value);
-    }
-
     let (segments, leaf_index) = tokens::callable_path_at(&tokens, &analyzed.source, index)?;
     (index == leaf_index)
         .then(|| tooling::intrinsic_callable_signature_for_file(snapshot, file, &segments))?
         .map(|signature| render_callable_text(&signature))
-}
-
-fn std_library_path_text(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    tokens: &[Token],
-    source: &str,
-    index: usize,
-) -> Option<String> {
-    let (module_index, op_index) = tokens::std_operation_call_for_segment(tokens, source, index)?;
-    if index == op_index {
-        return None;
-    }
-    let module = tokens[module_index].text(source);
-    let op = tokens[op_index].text(source);
-    let segments = ["std", module, op]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    tooling::intrinsic_callable_signature_for_file(snapshot, file, &segments)?;
-    if index + 2 == module_index {
-        return Some(language_facts::std_namespace_hover());
-    }
-    if index == module_index {
-        return language_facts::std_module_hover(module);
-    }
-    None
 }
 
 fn render_callable_text(callable: &CallableSignature) -> String {

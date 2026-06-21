@@ -732,7 +732,7 @@ pub fn run(): int
 }
 
 #[test]
-fn hover_over_project_module_leaf_in_use_is_blocked_without_canonical_fact() {
+fn hover_over_project_module_leaf_in_use_shows_canonical_module_fact() {
     let books_source = "\
 module shelf::books
 
@@ -757,8 +757,12 @@ pub fn run(): string
     let index = index_for(&snapshot);
     let leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
     assert!(
-        hover_value_at(&snapshot, &index, &file, leaf + 1).is_none(),
-        "module/use path hover stays unavailable until Marrow exposes canonical module-path facts"
+        hover_value_at(&snapshot, &index, &file, leaf + 1).is_some_and(|value| {
+            value.starts_with("```marrow\nmodule shelf::books\n```")
+                && value.contains("project source module")
+                && !value.contains("titleOf")
+        }),
+        "module/use path hover should render the canonical Marrow module fact"
     );
 }
 
@@ -788,9 +792,15 @@ pub fn run(): string
     );
     let index = index_for(&snapshot);
     let call = offset_of(app_source, "books::titleOf()");
+    let module =
+        hover_value_at(&snapshot, &index, &file, call + 1).expect("a hover over the module prefix");
     assert!(
-        hover_value_at(&snapshot, &index, &file, call + 1).is_none(),
-        "module-prefix hover stays blocked until Marrow exposes canonical prefix facts"
+        module.starts_with("```marrow\nmodule shelf::books\n```"),
+        "module-prefix hover should render the canonical module fact: {module}"
+    );
+    assert!(
+        !module.contains("Formats a book title."),
+        "module-prefix hover should not inherit function docs: {module}"
     );
 
     let leaf = call + "books::".len();
@@ -831,9 +841,11 @@ pub fn run(): string
     let index = index_for(&snapshot);
     let call = offset_of(app_source, "shelf::books::titleOf()");
     let books = call + "shelf::".len();
+    let module = hover_value_at(&snapshot, &index, &file, books + 1)
+        .expect("a hover over the fully qualified module segment");
     assert!(
-        hover_value_at(&snapshot, &index, &file, books + 1).is_none(),
-        "fully qualified module-prefix hover stays blocked until canonical prefix facts exist"
+        module.starts_with("```marrow\nmodule shelf::books\n```"),
+        "fully qualified module-prefix hover should render the canonical module fact: {module}"
     );
 
     let leaf = call + "shelf::books::".len();
@@ -876,9 +888,15 @@ pub fn status(): state::Status
     );
     let index = index_for(&snapshot);
     let qualifier = offset_of(app_source, "state::Status::open");
+    let value = hover_value_at(&snapshot, &index, &file, qualifier + 1)
+        .expect("a hover over the module qualifier");
     assert!(
-        hover_value_at(&snapshot, &index, &file, qualifier + 1).is_none(),
-        "qualified enum module-prefix hover stays blocked until canonical prefix facts exist"
+        value.starts_with("```marrow\nmodule shelf::state\n```"),
+        "qualified enum module-prefix should render the module fact: {value}"
+    );
+    assert!(
+        !value.starts_with("```marrow\nenum Status\n```"),
+        "qualified enum module-prefix should not show the enum hover: {value}"
     );
 }
 
@@ -962,7 +980,7 @@ pub fn load(): book::Id
 }
 
 #[test]
-fn hover_over_project_std_text_module_without_builtin_dispatch_is_blocked() {
+fn hover_over_project_std_text_module_without_builtin_dispatch_shows_project_module() {
     let std_text_source = "\
 module std::text
 
@@ -982,9 +1000,15 @@ pub fn run(): int
     );
     let index = index_for(&snapshot);
     let text = offset_of(app_source, "std::text::custom") + "std::".len();
+    let module = hover_value_at(&snapshot, &index, &file, text + 1)
+        .expect("a hover over the project std::text module segment");
     assert!(
-        hover_value_at(&snapshot, &index, &file, text + 1).is_none(),
-        "project std::text module-prefix hover stays blocked until canonical prefix facts exist"
+        module.starts_with("```marrow\nmodule std::text\n```"),
+        "project std::text module-prefix hover should render the project module fact: {module}"
+    );
+    assert!(
+        !module.contains("default library"),
+        "project std::text module-prefix hover should not get default-library docs: {module}"
     );
 
     let custom = hover_value_at(
@@ -1005,6 +1029,30 @@ pub fn run(): int
     assert!(
         !custom.contains("default library"),
         "project function leaf should not get default-library docs: {custom}"
+    );
+}
+
+#[test]
+fn hover_over_std_text_module_declaration_shows_project_module() {
+    let source = "\
+module std::text
+
+pub fn custom(): int
+    return 1
+";
+    let (snapshot, file) = analyze_files(&[("std/text.mw", source)], "std/text.mw");
+    let index = index_for(&snapshot);
+    let text = offset_of(source, "module std::text") + "module std::".len();
+    let module = hover_value_at(&snapshot, &index, &file, text + 1)
+        .expect("a hover over the std::text declaration segment");
+
+    assert!(
+        module.starts_with("```marrow\nmodule std::text\n```"),
+        "module declaration hover should render the project module fact: {module}"
+    );
+    assert!(
+        !module.contains("default library"),
+        "module declaration hover should not get default-library docs: {module}"
     );
 }
 
@@ -1390,6 +1438,36 @@ fn hover_does_not_own_resource_enum_schema_traversal() {
         assert!(
             !source.contains(obsolete),
             "resource and enum hover should consume Marrow source schema hover facts, not own `{obsolete}`"
+        );
+    }
+}
+
+#[test]
+fn hover_does_not_own_module_path_or_std_module_facts() {
+    let active = hover_active_code();
+    for obsolete in [
+        "std_library_path_text",
+        "blocked_module_prefix_hover",
+        "std_operation_call_for_segment",
+        "module_path_at_with_position",
+    ] {
+        assert!(
+            !active.contains(obsolete),
+            "module path hover should consume Marrow source module-path facts, not own `{obsolete}`"
+        );
+    }
+
+    let language_facts = include_str!("../language_facts.rs");
+    for obsolete in [
+        "std_namespace_hover",
+        "std_module_hover",
+        "fn std_modules",
+        "fn capability_label",
+        "stdlib::all()",
+    ] {
+        assert!(
+            !language_facts.contains(obsolete),
+            "LSP should render std module facts from Marrow DTOs, not own `{obsolete}`"
         );
     }
 }

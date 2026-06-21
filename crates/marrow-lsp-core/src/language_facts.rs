@@ -1,5 +1,3 @@
-use marrow_schema::stdlib;
-
 pub(crate) struct OperatorFact {
     pub(crate) spelling: &'static str,
     pub(crate) description: &'static str,
@@ -84,26 +82,6 @@ const OPERATOR_FACTS: &[OperatorFact] = &[
     },
 ];
 
-pub(crate) fn std_namespace_hover() -> String {
-    let modules = std_modules().join(", ");
-    format!("std\n\ndefault library namespace.\n\nModules: {modules}")
-}
-
-pub(crate) fn std_module_hover(module: &str) -> Option<String> {
-    let ops = stdlib::all()
-        .iter()
-        .filter(|op| op.module == module)
-        .map(|op| format!("{} ({})", op.op, capability_label(op.requires_capability)))
-        .collect::<Vec<_>>();
-    if ops.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "std::{module}\n\ndefault library module.\n\nOperations: {}",
-        ops.join(", ")
-    ))
-}
-
 pub(crate) fn operator_hover(spelling: &str) -> Option<String> {
     OPERATOR_FACTS
         .iter()
@@ -114,25 +92,4 @@ pub(crate) fn operator_hover(spelling: &str) -> Option<String> {
                 fact.spelling, fact.description
             )
         })
-}
-
-fn std_modules() -> Vec<&'static str> {
-    let mut modules = Vec::new();
-    for op in stdlib::all() {
-        if !modules.contains(&op.module) {
-            modules.push(op.module);
-        }
-    }
-    modules
-}
-
-fn capability_label(capability: Option<stdlib::Capability>) -> &'static str {
-    match capability {
-        None => "pure",
-        Some(stdlib::Capability::Clock) => "clock",
-        Some(stdlib::Capability::Context) => "context",
-        Some(stdlib::Capability::Environment) => "environment",
-        Some(stdlib::Capability::Log) => "log",
-        Some(stdlib::Capability::Filesystem) => "filesystem",
-    }
 }

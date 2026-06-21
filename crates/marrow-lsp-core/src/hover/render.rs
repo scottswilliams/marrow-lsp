@@ -2,9 +2,10 @@ use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::tooling::{
     SavedPlaceHoverFact, SavedPlaceHoverKeyParam, SourceCallableFunctionFact,
     SourceCallableHoverFact, SourceCallableParamFact, SourceEnumHoverFact,
-    SourceEnumMemberHoverFact, SourceEnumMemberStatus, SourceResourceHoverFact,
-    SourceResourceHoverMember, SourceResourceHoverMemberKind, SourceResourceHoverPathSegment,
-    SourceSchemaHoverFact, SourceSchemaHoverKeyParam, StoreRootHoverFact, StoreRootHoverMember,
+    SourceEnumMemberHoverFact, SourceEnumMemberStatus, SourceModulePathHoverFact,
+    SourceResourceHoverFact, SourceResourceHoverMember, SourceResourceHoverMemberKind,
+    SourceResourceHoverPathSegment, SourceSchemaHoverFact, SourceSchemaHoverKeyParam,
+    SourceStandardLibraryCapability, StoreRootHoverFact, StoreRootHoverMember,
     StoreRootHoverPathSegment,
 };
 use marrow_check::{CheckedFacts, DirectEffectFacts, HostEffect, MarrowType, SavedPlaceEffect};
@@ -21,6 +22,7 @@ pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
             fact,
             checked_facts,
         } => source_callable_hover(&fact, checked_facts),
+        HoverFact::SourceModulePath(fact) => source_module_path_hover(&fact),
         HoverFact::StoreRoot(fact) => store_hover(&fact),
         HoverFact::SourceSchema(fact) => source_schema_hover(&fact),
         HoverFact::SavedPlace(fact) => saved_place_markdown(&fact),
@@ -102,6 +104,49 @@ fn default_library_hover_markdown(fact: &str) -> String {
     value.push_str("\n\n");
     value.push_str(context);
     value
+}
+
+fn source_module_path_hover(fact: &SourceModulePathHoverFact) -> String {
+    match fact {
+        SourceModulePathHoverFact::StandardLibraryNamespace(namespace) => {
+            let mut value = marrow_code_block("std");
+            append_section(
+                &mut value,
+                Some(format!(
+                    "default library namespace.\n\nModules: {}",
+                    namespace.modules.join(", ")
+                )),
+            );
+            value
+        }
+        SourceModulePathHoverFact::StandardLibraryModule(module) => {
+            let mut value = marrow_code_block(&format!("std::{}", module.module));
+            append_section(
+                &mut value,
+                Some(format!(
+                    "default library module.\n\nOperations: {}",
+                    module
+                        .operations
+                        .iter()
+                        .map(|op| format!(
+                            "{} ({})",
+                            op.name,
+                            op.required_capability
+                                .map(source_std_capability_label)
+                                .unwrap_or("pure")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            );
+            value
+        }
+        SourceModulePathHoverFact::ProjectModule(module) => {
+            let mut value = marrow_code_block(&format!("module {}", module.module));
+            append_section(&mut value, Some("project source module.".to_string()));
+            value
+        }
+    }
 }
 
 fn store_hover(fact: &StoreRootHoverFact) -> String {
@@ -243,6 +288,16 @@ fn capability_label(capability: stdlib::Capability) -> &'static str {
         stdlib::Capability::Environment => "environment",
         stdlib::Capability::Log => "log",
         stdlib::Capability::Filesystem => "filesystem",
+    }
+}
+
+fn source_std_capability_label(capability: SourceStandardLibraryCapability) -> &'static str {
+    match capability {
+        SourceStandardLibraryCapability::Clock => "clock",
+        SourceStandardLibraryCapability::Context => "context",
+        SourceStandardLibraryCapability::Environment => "environment",
+        SourceStandardLibraryCapability::Log => "log",
+        SourceStandardLibraryCapability::Filesystem => "filesystem",
     }
 }
 
