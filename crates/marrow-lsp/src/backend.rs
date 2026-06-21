@@ -805,6 +805,12 @@ fn watched_project_change(
     if let Some(path) = changed_paths.iter().find(|path| *path == &config_path) {
         return Some(WatchedProjectChange::ProjectConfig(path.clone()));
     }
+    let lock_path = project
+        .root
+        .join(marrow_lsp_core::workspace::COMMITTED_LOCK_FILE);
+    if let Some(path) = changed_paths.iter().find(|path| *path == &lock_path) {
+        return Some(WatchedProjectChange::AnalysisFile(path.clone()));
+    }
     changed_paths
         .iter()
         .find(|path| project.analyzes_file(path) || snapshot_has_file(workspace.latest(), path))
@@ -964,5 +970,35 @@ mod tests {
             !workspace.latest_matches_sources(&documents),
             "a new open source-root file absent from the cached snapshot can change project bindings"
         );
+    }
+
+    #[test]
+    fn watched_project_change_invalidates_analysis_for_committed_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        std::fs::write(&file, "module app\n\nfn f(): int\n    return 1\n").unwrap();
+
+        let documents = Documents::new();
+        let mut workspace = Workspace::new();
+        workspace.recompute(&file, &documents).unwrap();
+
+        let lock_path = root.join(marrow_lsp_core::workspace::COMMITTED_LOCK_FILE);
+        let change = watched_project_change(&workspace, std::slice::from_ref(&lock_path));
+
+        match change {
+            Some(WatchedProjectChange::AnalysisFile(path)) => assert_eq!(path, lock_path),
+            Some(WatchedProjectChange::ProjectConfig(path)) => {
+                panic!("committed lock should not invalidate project config: {path:?}")
+            }
+            None => panic!("committed lock should invalidate analysis"),
+        }
     }
 }

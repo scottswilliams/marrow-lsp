@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
 use marrow_check::{
-    AnalysisIdentity, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
+    AnalysisGeneration, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
     read_accepted_catalog_artifact, read_committed_lock,
 };
 use marrow_project::{
@@ -23,6 +23,7 @@ use crate::documents::Documents;
 
 /// The name of a Marrow project's configuration file; its directory is the root.
 const CONFIG_FILE: &str = "marrow.json";
+pub const COMMITTED_LOCK_FILE: &str = marrow_project::CATALOG_FILE_NAME;
 
 /// A resolved project: its root directory and parsed configuration.
 #[derive(Debug, Clone)]
@@ -86,7 +87,7 @@ pub struct Workspace {
     last_program: Option<CheckedProgram>,
     /// The binding index for [`Self::latest`], built lazily on the first
     /// navigation request and reused by go-to-definition, find-references, and
-    /// rename. A recompute keeps this only when the analysis identity and project
+    /// rename. A recompute keeps this only when the analysis generation and project
     /// root still match, so unchanged diagnostics publishes do not rebuild it.
     binding_index: Option<BindingIndex>,
     binding_index_key: Option<BindingIndexKey>,
@@ -99,14 +100,14 @@ pub struct Workspace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BindingIndexKey {
     root: PathBuf,
-    identity: AnalysisIdentity,
+    generation: AnalysisGeneration,
 }
 
 impl BindingIndexKey {
     fn new(project: &Project, snapshot: &AnalysisSnapshot) -> Self {
         Self {
             root: project.root.clone(),
-            identity: snapshot.content_identity().clone(),
+            generation: snapshot.generation(),
         }
     }
 }
@@ -681,7 +682,7 @@ mod tests {
         );
         assert!(
             workspace.binding_index.is_some(),
-            "unchanged analysis identity should keep the derived binding index"
+            "unchanged analysis generation should keep the derived binding index"
         );
     }
 
@@ -715,7 +716,59 @@ mod tests {
         );
         assert!(
             workspace.binding_index.is_none(),
-            "changed analysis identity should discard the derived binding index"
+            "changed analysis generation should discard the derived binding index"
+        );
+    }
+
+    #[test]
+    fn binding_index_clears_when_analysis_generation_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": ".data" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        std::fs::write(
+            &file,
+            "module app\n\nresource Book\n    title: string\n\nstore ^books(id: int): Book\n",
+        )
+        .unwrap();
+
+        let mut workspace = Workspace::new();
+        let documents = Documents::new();
+        workspace.recompute(&file, &documents).unwrap();
+        let first_generation = workspace.latest().unwrap().generation();
+        let proposal = workspace
+            .latest()
+            .unwrap()
+            .program
+            .catalog
+            .proposal
+            .as_ref()
+            .expect("native resource analysis proposes catalog identity")
+            .clone();
+        let source_digest = workspace.latest().unwrap().program.source_digest();
+        workspace.binding_index().unwrap();
+
+        marrow_check::project_store_lock(root, &proposal, &source_digest).unwrap();
+        workspace.recompute(&file, &documents).unwrap();
+        let second_generation = workspace.latest().unwrap().generation();
+
+        assert_eq!(
+            second_generation.content_identity, first_generation.content_identity,
+            "committing catalog generation leaves analyzed source identity unchanged"
+        );
+        assert_ne!(
+            second_generation, first_generation,
+            "committing catalog generation should change canonical analysis generation"
+        );
+        assert!(
+            workspace.binding_index.is_none(),
+            "changed analysis generation should discard the derived binding index"
         );
     }
 
