@@ -216,7 +216,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_complete",
-            "description": "Presentation-only development helper: list current context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing canonical completion-context facts for any production contract; not a stable production completion API.",
+            "description": "Presentation-only development helper: list current context-aware completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing typed production completion DTOs, expected-type context, active saved-path context, and remaining checker-owned candidate facts; not a stable production completion API.",
             "_meta": marrow_meta(presentation_contract(
                 "development helper",
                 COMPLETION_MISSING_FACTS,

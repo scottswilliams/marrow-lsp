@@ -836,7 +836,7 @@ fn complete_in_a_function_body_lists_locals_and_keywords() {
         &result,
         "presentation-only",
         "development helper",
-        &["canonical completion-context facts"],
+        COMPLETION_MISSING_FACTS,
     );
 }
 

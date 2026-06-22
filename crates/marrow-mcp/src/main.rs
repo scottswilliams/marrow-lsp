@@ -840,7 +840,7 @@ mod tests {
                         COMPLETION_MISSING_FACTS,
                     ),
                 }),
-                "development helper (presentation-only: canonical completion-context facts): 3 completions",
+                "development helper (presentation-only: typed production completion DTOs +3): 3 completions",
             ),
             (
                 "mw_saved_roots",

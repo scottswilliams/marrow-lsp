@@ -56,7 +56,12 @@ use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
 use crate::workspace::Workspace;
 
-pub const COMPLETION_MISSING_FACTS: &[&str] = &["canonical completion-context facts"];
+pub const COMPLETION_MISSING_FACTS: &[&str] = &[
+    "typed production completion DTOs",
+    "expected-type context facts",
+    "active saved-path context facts",
+    "remaining checker-owned completion candidate facts",
+];
 pub const SAVED_DATA_MISSING_FACTS: &[&str] =
     &["integrity and repair facts", "serve/attach data boundaries"];
 pub const DATA_CHILDREN_MISSING_FACTS: &[&str] =

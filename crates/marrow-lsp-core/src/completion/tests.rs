@@ -600,6 +600,31 @@ fn completion_has_no_local_std_namespace_completion_model() {
 }
 
 #[test]
+fn completion_consumes_marrow_cursor_context_fact() {
+    let source = include_str!("../completion.rs");
+    for forbidden in [
+        "TokenKind",
+        "marrow_syntax::Token",
+        "lexed.tokens",
+        ".tokens.iter()",
+        "significant_tokens",
+        "matching_open_",
+        "saved_receiver",
+        "qualifier_before",
+        "introduces_type",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "completion must consume Marrow cursor-context facts instead of owning token recovery through {forbidden}"
+        );
+    }
+    assert!(
+        source.contains("match source_completion_context(source, lexed, offset)"),
+        "completion must dispatch through Marrow's cursor-context API"
+    );
+}
+
+#[test]
 fn resource_namespace_does_not_list_identity() {
     let (program, file) = project();
     let labels = complete(
