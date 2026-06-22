@@ -30,9 +30,9 @@ use marrow_store::tree::{CommitMetadata, StoreUid, TreeStore};
 /// The accepted catalog and the first-run lock to drive a source check: the store's
 /// snapshot when a valid stamped store is present, otherwise the first-run `None`
 /// accepted with the committed lock seeding adoption.
-pub struct CatalogBinding {
-    pub accepted: Option<CatalogMetadata>,
-    pub lock: Option<CatalogLock>,
+pub(crate) struct CatalogBinding {
+    pub(crate) accepted: Option<CatalogMetadata>,
+    pub(crate) lock: Option<CatalogLock>,
 }
 
 /// The committed lock to drive first-run adoption, read only when no accepted store
@@ -47,25 +47,6 @@ fn lock_for_adoption(
         return Ok(None);
     }
     read_committed_lock(root)
-}
-
-/// Open the project's native store read-only, when it has one, for an accepted-catalog
-/// read. A memory backend, or a store that cannot be opened right now, yields `None`.
-fn open_store(root: &Path, config: &ProjectConfig) -> Result<Option<TreeStore>, ProjectIoError> {
-    Ok(match native_store_path(root, config)? {
-        Some(path) => TreeStore::open_read_only(&path).ok(),
-        None => None,
-    })
-}
-
-/// Bind the accepted catalog and first-run lock without any caching. Suitable for the
-/// one-shot per-request paths (MCP tools, DAP launch); the editor's per-debounce path
-/// uses [`CatalogBindingCache`] to avoid re-opening the store each time.
-pub fn bind(root: &Path, config: &ProjectConfig) -> Result<CatalogBinding, ProjectIoError> {
-    let store = open_store(root, config)?;
-    let accepted = read_accepted_catalog_with_store_read_only(root, store.as_ref())?;
-    let lock = lock_for_adoption(root, accepted.as_ref())?;
-    Ok(CatalogBinding { accepted, lock })
 }
 
 /// Identifies a store's committed state across recomputes by its path and the store's
@@ -100,12 +81,14 @@ impl StoreCommitIdentity {
 
 /// The outcome of probing the store against the cache for one recompute.
 enum StoreProbe {
-    /// The project has no native store on disk (memory backend, or the file does not
-    /// exist yet): a stable "absent" key whose accepted catalog is the first-run `None`.
+    /// The project has no native store on disk: a memory backend with no store path, or a
+    /// native backend whose store file has not been created yet. A stable "absent" key whose
+    /// accepted catalog is the first-run `None`, cached so a fresh checkout does not re-probe.
     Absent,
-    /// A native store exists but could not be opened or probed right now (a racing writer
-    /// holds the lock, a permissions blip). The cache must not key on or serve identity it
-    /// could not confirm, so this recompute neither updates the cache nor adopts a hit.
+    /// A native store file is present but could not be opened or probed right now (a racing
+    /// writer holds the redb lock, a permissions blip). The cache must not key on or serve
+    /// identity it could not confirm, so this recompute neither updates the cache nor adopts a
+    /// hit; the next recompute re-probes once the file is readable again.
     Unavailable,
     /// The store's commit identity matches the cache; the cached snapshot stands, and the
     /// expensive catalog-snapshot read was skipped. The identity is already the cache's key,
@@ -138,6 +121,13 @@ fn probe_store(
     let Some(path) = native_store_path(root, config)? else {
         return Ok(StoreProbe::Absent);
     };
+    // A native project whose store file has not been created yet is the storeless first run,
+    // not an unreadable store: its accepted catalog is unconditionally the first-run `None`, so
+    // it caches as `Absent` rather than re-opening (and failing to open) the path every debounce.
+    // Only a present file that will not open right now is `Unavailable`.
+    if !path.exists() {
+        return Ok(StoreProbe::Absent);
+    }
     let Ok(store) = TreeStore::open_read_only(&path) else {
         return Ok(StoreProbe::Unavailable);
     };
@@ -427,6 +417,125 @@ store ^counter(id: int): Counter
             cache.binds(),
             1,
             "a storeless project must not re-bind on every recompute"
+        );
+    }
+
+    /// A native-store project source tree whose store file has not been created yet. Returns
+    /// the root, config, and the store path that does not yet exist on disk.
+    fn native_project_without_store_file() -> (tempfile::TempDir, ProjectConfig, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src/app");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("counter.mw"),
+            "\
+module app::counter
+
+resource Counter
+    required value: int
+
+store ^counter(id: int): Counter
+",
+        )
+        .unwrap();
+        let config = marrow_check::load_config(&root).unwrap();
+        let store_path = root.join("data/marrow.redb");
+        (dir, config, store_path)
+    }
+
+    #[test]
+    fn a_native_project_without_a_store_file_caches_the_storeless_first_run() {
+        let (dir, config, store_path) = native_project_without_store_file();
+        let root = dir.path();
+        assert!(
+            !store_path.exists(),
+            "this test exercises a native project whose store file has not been created yet"
+        );
+
+        let mut cache = CatalogBindingCache::new();
+        let binding = cache.bind(root, &config).unwrap();
+        assert!(
+            binding.accepted.is_none(),
+            "a native project with no store file yet has no accepted store catalog"
+        );
+        assert_eq!(
+            cache.binds(),
+            1,
+            "the first recompute records the absent key"
+        );
+        cache.bind(root, &config).unwrap();
+        assert_eq!(
+            cache.binds(),
+            1,
+            "a missing store file is the cached storeless first run, not an unavailable store \
+             re-probed on every recompute"
+        );
+    }
+
+    #[test]
+    fn a_store_locked_by_a_writer_binds_the_first_run_without_caching_then_re_binds() {
+        let (dir, config, store_path) = stamped_native_project();
+        let root = dir.path();
+        let mut cache = CatalogBindingCache::new();
+
+        let first = cache.bind(root, &config).unwrap();
+        assert!(
+            first.accepted.is_some(),
+            "a stamped store binds its committed accepted catalog"
+        );
+        assert_eq!(cache.binds(), 1, "the first recompute reads the store");
+
+        // A racing writer holding the redb file lock mid-debounce makes the read-only open fail
+        // over a store file that genuinely exists, and advances the committed identity before it
+        // releases. The locked recompute must accept the first-run `None` without poisoning the
+        // cache: the writer's commit is the authority, so the cache must neither serve the first
+        // bind's snapshot as confirmed nor stick on the `None` once the lock releases.
+        let writer = TreeStore::open(&store_path).unwrap();
+        let previous = writer
+            .read_commit_metadata()
+            .unwrap()
+            .expect("a stamped store carries a baseline commit");
+        writer
+            .write_commit_metadata(&CommitMetadata {
+                commit_id: previous.commit_id + 1,
+                ..previous
+            })
+            .unwrap();
+
+        let blocked = cache.bind(root, &config).unwrap();
+        assert!(
+            blocked.accepted.is_none(),
+            "an unconfirmable store binds the first-run None for this recompute"
+        );
+        assert_eq!(
+            cache.binds(),
+            1,
+            "a present-but-locked store must not update or poison the cache"
+        );
+        assert_eq!(
+            cache.accepted, first.accepted,
+            "the cached accepted snapshot from before the lock is left untouched"
+        );
+
+        // The writer releases its lock; the next recompute re-probes, sees the advanced commit
+        // identity, and re-binds the real committed catalog rather than serving the first-run
+        // None it returned while the store was unreadable or the now-superseded first snapshot.
+        drop(writer);
+        let after = cache.bind(root, &config).unwrap();
+        assert!(
+            after.accepted.is_some(),
+            "once the writer releases the lock the store rebinds its committed accepted catalog"
+        );
+        assert_eq!(
+            cache.binds(),
+            2,
+            "the recompute after the lock releases re-reads and re-binds the advanced identity"
         );
     }
 }

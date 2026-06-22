@@ -5,7 +5,7 @@
 //! and never reimplements the parser, checker, or type system.
 
 mod callables;
-pub mod catalog_binding;
+mod catalog_binding;
 pub mod completion;
 pub mod data_explorer;
 pub mod data_integrity;
