@@ -231,6 +231,11 @@ fn from_project_io_error(error: ProjectIoError) -> LaunchError {
         ProjectIoError::DataDirCreate { path, error } => {
             LaunchError::Session(format!("{}: {error}", path.display()))
         }
+        ProjectIoError::ConfigMissing { dir } => LaunchError::Config(format!(
+            "no {CONFIG_FILE} in {}; run `marrow init {}` or open a directory containing {CONFIG_FILE}",
+            dir.display(),
+            dir.display()
+        )),
         ProjectIoError::Config { message, .. } => LaunchError::Config(message),
         ProjectIoError::Catalog { message, .. } => LaunchError::Session(message),
         ProjectIoError::Check { report } => LaunchError::CheckErrors(check_errors(&report)),
@@ -502,5 +507,18 @@ pub fn main()
             error.to_string(),
             "could not open the debug session: data: denied"
         );
+    }
+
+    #[test]
+    fn config_missing_error_names_the_directory_and_remedy() {
+        let error = from_project_io_error(ProjectIoError::ConfigMissing {
+            dir: PathBuf::from("/projects/demo"),
+        });
+
+        assert!(matches!(error, LaunchError::Config(_)), "{error}");
+        assert_eq!(error.code(), "dap.launchProject.invalid");
+        let message = error.to_string();
+        assert!(message.contains("/projects/demo"), "{message}");
+        assert!(message.contains("marrow init"), "{message}");
     }
 }
