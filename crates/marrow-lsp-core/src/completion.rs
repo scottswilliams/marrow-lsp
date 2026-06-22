@@ -18,12 +18,13 @@ use marrow_check::{
         DeclaredDataChild, DeclaredDataChildKind, SourceEnumNamespaceCompletionFact,
         SourceModuleNamespaceCompletionFact, SourceNamespaceCompletionFact,
         SourceNamespaceFunctionCompletion, SourceSavedRootCompletionCandidate,
-        SourceTypeCompletionCandidate, declared_source_receiver_data_children,
-        intrinsic_completion_callables, source_namespace_completion_fact,
-        source_saved_root_completion_fact, source_type_completion_fact,
+        SourceStandardLibraryModuleNamespaceCompletionFact,
+        SourceStandardLibraryRootNamespaceCompletionFact, SourceTypeCompletionCandidate,
+        declared_source_receiver_data_children, intrinsic_completion_callables,
+        source_namespace_completion_fact, source_saved_root_completion_fact,
+        source_type_completion_fact,
     },
 };
-use marrow_schema::stdlib;
 use marrow_syntax::{LexedSource, ParsedSource, SourceFile, SourceSpan, Token, TokenKind};
 
 use crate::{callables::render_callable_signature, types::render_type};
@@ -553,44 +554,41 @@ fn namespace_completions(
     source_file: &marrow_syntax::SourceFile,
     qualifier: &[String],
 ) -> Vec<CompletionItem> {
-    // `std::` exposes modules; known `std::<module>::` paths expose std ops.
-    // Unknown `std::<name>::` paths may still be project modules.
-    if qualifier.first().map(String::as_str) == Some("std") {
-        match qualifier {
-            [_] => return std_root_module_completions(),
-            [_, module] if std_module_exists(module) => return std_module_completions(module),
-            _ => {}
-        }
-    }
-
     match source_namespace_completion_fact(program, file, source_file, qualifier) {
         Some(SourceNamespaceCompletionFact::Module(fact)) => module_namespace_completions(&fact),
         Some(SourceNamespaceCompletionFact::Enum(fact)) => enum_member_completions(&fact),
+        Some(SourceNamespaceCompletionFact::StandardLibraryRoot(fact)) => {
+            standard_library_root_completions(&fact)
+        }
+        Some(SourceNamespaceCompletionFact::StandardLibraryModule(fact)) => {
+            standard_library_module_completions(&fact)
+        }
         None => Vec::new(),
     }
 }
 
-/// The modules exposed at `std::`, in stdlib table order.
-fn std_root_module_completions() -> Vec<CompletionItem> {
-    dedup(
-        stdlib::all()
-            .iter()
-            .map(|op| item(op.module, CompletionItemKind::MODULE).detail("std module".to_string()))
-            .collect(),
-    )
-}
-
-/// The ops of `std::<module>::`, each with its rendered signature as detail.
-fn std_module_completions(module: &str) -> Vec<CompletionItem> {
-    stdlib::all()
+fn standard_library_root_completions(
+    fact: &SourceStandardLibraryRootNamespaceCompletionFact,
+) -> Vec<CompletionItem> {
+    fact.modules
         .iter()
-        .filter(|op| op.module == module)
-        .map(|op| item(op.op, CompletionItemKind::FUNCTION).detail(std_signature(op)))
+        .map(|module| {
+            item(&module.name, CompletionItemKind::MODULE).detail("std module".to_string())
+        })
         .collect()
 }
 
-fn std_module_exists(module: &str) -> bool {
-    stdlib::all().iter().any(|op| op.module == module)
+fn standard_library_module_completions(
+    fact: &SourceStandardLibraryModuleNamespaceCompletionFact,
+) -> Vec<CompletionItem> {
+    fact.operations
+        .iter()
+        .map(|operation| {
+            item(&operation.name, CompletionItemKind::FUNCTION)
+                .detail(render_callable_signature(&operation.signature))
+                .docs_from(&operation.signature.docs)
+        })
+        .collect()
 }
 
 fn module_namespace_completions(fact: &SourceModuleNamespaceCompletionFact) -> Vec<CompletionItem> {
@@ -707,38 +705,6 @@ fn type_completion_item(candidate: &SourceTypeCompletionCandidate) -> Completion
 
 fn source_type_path_label(path: &[String]) -> String {
     path.join("::")
-}
-
-/// A one-line rendering of a std op's signature, e.g. `(string, string): bool`.
-fn std_signature(op: &stdlib::StdOp) -> String {
-    let params = op
-        .params
-        .iter()
-        .map(param_type_name)
-        .collect::<Vec<_>>()
-        .join(", ");
-    match return_type_name(&op.ret) {
-        Some(ret) => format!("({params}): {ret}"),
-        None => format!("({params})"),
-    }
-}
-
-fn param_type_name(param: &stdlib::ParamType) -> String {
-    match param {
-        stdlib::ParamType::Scalar(scalar) => scalar.name().to_string(),
-        stdlib::ParamType::ScalarAny => "scalar".to_string(),
-        stdlib::ParamType::Sequence(scalar) => format!("sequence[{}]", scalar.name()),
-        stdlib::ParamType::Error => "Error".to_string(),
-        stdlib::ParamType::Path => "path".to_string(),
-    }
-}
-
-fn return_type_name(ret: &stdlib::ReturnType) -> Option<String> {
-    match ret {
-        stdlib::ReturnType::Scalar(scalar) => Some(scalar.name().to_string()),
-        stdlib::ReturnType::Sequence(scalar) => Some(format!("sequence[{}]", scalar.name())),
-        stdlib::ReturnType::Void => None,
-    }
 }
 
 /// The significant tokens of a lex: everything but layout trivia and the EOF, in

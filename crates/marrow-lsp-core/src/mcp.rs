@@ -369,6 +369,10 @@ pub fn namespace_complete(file: &Path, qualifier: &[String]) -> Json {
     ) {
         Some(SourceNamespaceCompletionFact::Module(fact)) => module_namespace_fact_json(&fact),
         Some(SourceNamespaceCompletionFact::Enum(fact)) => enum_namespace_fact_json(&fact),
+        Some(
+            SourceNamespaceCompletionFact::StandardLibraryRoot(_)
+            | SourceNamespaceCompletionFact::StandardLibraryModule(_),
+        ) => empty_namespace_completion_result(None),
         None => empty_namespace_completion_result(None),
     };
     with_contract(result, contract)

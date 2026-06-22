@@ -581,6 +581,25 @@ fn completion_has_no_local_type_completion_candidate_model() {
 }
 
 #[test]
+fn completion_has_no_local_std_namespace_completion_model() {
+    let source = include_str!("../completion.rs");
+    for forbidden in [
+        "marrow_schema::stdlib",
+        "std_root_module_completions",
+        "std_module_completions",
+        "std_module_exists",
+        "ParamType",
+        "ReturnType",
+        "fn std_signature(",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "completion must consume Marrow std namespace completion facts instead of {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn resource_namespace_does_not_list_identity() {
     let (program, file) = project();
     let labels = complete(
