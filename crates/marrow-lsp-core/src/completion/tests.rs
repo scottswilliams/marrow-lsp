@@ -1,6 +1,7 @@
 use super::*;
 use marrow_check::{CheckedModule, ProjectSources, analyze_project};
 use marrow_project::parse_config;
+use marrow_schema::EnumSchema;
 use marrow_syntax::{lex_source, parse_source};
 
 /// A two-file project: `shelf::books` declares the `Book` resource, a store,
@@ -21,6 +22,7 @@ fn project() -> (CheckedProgram, std::path::PathBuf) {
         "\
 module shelf::books
 
+;; Book resource docs.
 resource Book
     ;; Display title.
     required title: string
@@ -67,6 +69,13 @@ const LIMIT: int = 100
 module shelf::app
 
 use shelf::books
+
+;; Draft resource docs.
+resource Draft
+    required title: string
+
+enum LocalSecret
+    draft
 
 pub fn run(count: int): int
     const total: int = count
@@ -547,6 +556,17 @@ fn completion_has_no_local_intrinsic_callable_model() {
 }
 
 #[test]
+fn completion_has_no_local_type_completion_candidate_model() {
+    let source = include_str!("../completion.rs");
+    for forbidden in ["TYPE_NAMES", "fn resources(", "fn stores(", "fn enums("] {
+        assert!(
+            !source.contains(forbidden),
+            "completion must consume marrow_check type completion facts instead of {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn resource_namespace_does_not_list_identity() {
     let (program, file) = project();
     let labels = complete(
@@ -778,14 +798,38 @@ fn partial_project_module_prefix_returns_no_namespace_items() {
 #[test]
 fn type_position_lists_resources_and_builtin_types() {
     let (program, file) = project();
-    let labels = complete(&program, &file, "module shelf::app\n\npub fn f(x: |\n");
+    let items = complete_items(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f(x: |\n",
+    );
+    let labels = items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
     assert!(
         labels.contains(&"int".to_string()),
         "a builtin type, got {labels:?}"
     );
     assert!(
-        labels.contains(&"Book".to_string()),
-        "a resource, got {labels:?}"
+        labels.contains(&"ErrorCode".to_string()),
+        "the error-code scalar spelling, got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Error".to_string()),
+        "the builtin error type, got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Draft".to_string()),
+        "a same-module resource, got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"books::Book".to_string()),
+        "an imported resource, got {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"Book".to_string()),
+        "a foreign resource must not be offered bare, got {labels:?}"
     );
     assert!(
         labels.contains(&"Id(^books)".to_string()),
@@ -793,8 +837,52 @@ fn type_position_lists_resources_and_builtin_types() {
     );
     assert!(
         labels.contains(&"Status".to_string()),
-        "an enum type, got {labels:?}"
+        "a unique visible foreign enum type, got {labels:?}"
     );
+    assert!(
+        labels.contains(&"books::Status".to_string()),
+        "an imported enum type, got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"LocalSecret".to_string()),
+        "a same-module private enum type, got {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"Secret".to_string()),
+        "a private foreign enum must not be offered bare, got {labels:?}"
+    );
+
+    let int = item_named(&items, "int");
+    assert_eq!(int.kind, Some(CompletionItemKind::KEYWORD));
+    assert_eq!(int.detail.as_deref(), Some("type"));
+
+    let error_code = item_named(&items, "ErrorCode");
+    assert_eq!(error_code.kind, Some(CompletionItemKind::KEYWORD));
+    assert_eq!(error_code.detail.as_deref(), Some("type"));
+
+    let error = item_named(&items, "Error");
+    assert_eq!(error.kind, Some(CompletionItemKind::KEYWORD));
+    assert_eq!(error.detail.as_deref(), Some("type"));
+
+    let draft = item_named(&items, "Draft");
+    assert_eq!(draft.kind, Some(CompletionItemKind::STRUCT));
+    assert_eq!(draft.detail.as_deref(), Some("resource"));
+    assert_eq!(documentation_value(draft), "Draft resource docs.");
+
+    let book = item_named(&items, "books::Book");
+    assert_eq!(book.kind, Some(CompletionItemKind::STRUCT));
+    assert_eq!(book.detail.as_deref(), Some("resource"));
+    assert_eq!(documentation_value(book), "Book resource docs.");
+
+    let identity = item_named(&items, "Id(^books)");
+    assert_eq!(identity.kind, Some(CompletionItemKind::CLASS));
+    assert_eq!(identity.detail.as_deref(), Some("identity of ^books"));
+    assert_eq!(documentation_value(identity), "Books saved by id.");
+
+    let status = item_named(&items, "Status");
+    assert_eq!(status.kind, Some(CompletionItemKind::ENUM));
+    assert_eq!(status.detail.as_deref(), Some("enum"));
+    assert_eq!(documentation_value(status), "Lifecycle state.");
 }
 
 #[test]

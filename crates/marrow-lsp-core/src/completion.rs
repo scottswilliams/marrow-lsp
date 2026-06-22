@@ -17,12 +17,13 @@ use marrow_check::{
     tooling::{
         DeclaredDataChild, DeclaredDataChildKind, SourceEnumNamespaceCompletionFact,
         SourceModuleNamespaceCompletionFact, SourceNamespaceCompletionFact,
-        SourceNamespaceFunctionCompletion, declared_source_receiver_data_children,
-        intrinsic_completion_callables, source_namespace_completion_fact,
+        SourceNamespaceFunctionCompletion, SourceTypeCompletionCandidate,
+        declared_source_receiver_data_children, intrinsic_completion_callables,
+        source_namespace_completion_fact, source_type_completion_fact,
     },
 };
-use marrow_schema::{EnumSchema, ResourceSchema, StoreSchema, stdlib};
-use marrow_syntax::{LexedSource, ParsedSource, SourceSpan, Token, TokenKind};
+use marrow_schema::stdlib;
+use marrow_syntax::{LexedSource, ParsedSource, SourceFile, SourceSpan, Token, TokenKind};
 
 use crate::{callables::render_callable_signature, types::render_type};
 
@@ -52,12 +53,6 @@ const KEYWORDS: &[&str] = &[
     "or",
 ];
 
-/// The built-in type names offered in type position.
-const TYPE_NAMES: &[&str] = &[
-    "int", "decimal", "bool", "string", "bytes", "date", "instant", "duration", "sequence",
-    "unknown",
-];
-
 /// The completions for byte `offset` in `file`, classified from the cached lex
 /// and drawn from the cached snapshot program.
 ///
@@ -83,7 +78,7 @@ pub fn completion(
         Context::Namespace { qualifier } => {
             namespace_completions(program, file, &parsed.file, &qualifier)
         }
-        Context::Type => type_completions(program),
+        Context::Type => type_completions(program, file, &parsed.file),
         Context::Bare => bare_completions(program, file, parsed, offset),
     }
 }
@@ -478,7 +473,7 @@ fn introduces_type(tokens: &[Token], colon_index: usize) -> bool {
 /// The durable saved roots declared across every module: one item per store.
 fn root_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
     let mut items = Vec::new();
-    for store in stores(program) {
+    for store in saved_root_stores(program) {
         items.push(
             item(&store.root, CompletionItemKind::STRUCT)
                 .detail(format!("saved root of {}", store.resource))
@@ -486,6 +481,15 @@ fn root_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
         );
     }
     dedup(items)
+}
+
+fn saved_root_stores(
+    program: &CheckedProgram,
+) -> impl Iterator<Item = &marrow_schema::StoreSchema> {
+    program
+        .modules
+        .iter()
+        .flat_map(|module| module.stores.iter())
 }
 
 fn saved_path_completions(
@@ -646,28 +650,16 @@ fn source_function_signature(function: &SourceNamespaceFunctionCompletion) -> St
 
 /// Type-position completions: the built-in type names plus every resource name,
 /// keyed store identity, and enum name.
-fn type_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
-    let mut items: Vec<CompletionItem> = TYPE_NAMES
+fn type_completions(
+    program: &CheckedProgram,
+    file: &Path,
+    source_file: &SourceFile,
+) -> Vec<CompletionItem> {
+    source_type_completion_fact(program, file, source_file)
+        .candidates
         .iter()
-        .map(|name| item(name, CompletionItemKind::KEYWORD).detail("type".to_string()))
-        .collect();
-    for resource in resources(program) {
-        items.push(item(&resource.name, CompletionItemKind::STRUCT).detail("resource".to_string()));
-    }
-    for store in stores(program).filter(|store| !store.identity_keys.is_empty()) {
-        items.push(
-            item(&format!("Id(^{})", store.root), CompletionItemKind::CLASS)
-                .detail(format!("identity of ^{}", store.root)),
-        );
-    }
-    for enum_schema in enums(program) {
-        items.push(
-            item(&enum_schema.name, CompletionItemKind::ENUM)
-                .detail("enum".to_string())
-                .docs_from(&enum_schema.docs),
-        );
-    }
-    dedup(items)
+        .map(type_completion_item)
+        .collect()
 }
 
 /// Bare-identifier completions: the in-scope bindings (typed by the checker),
@@ -696,28 +688,31 @@ fn bare_completions(
     items
 }
 
-/// Every resource schema declared across all modules of the program.
-fn resources(program: &CheckedProgram) -> impl Iterator<Item = &ResourceSchema> {
-    program
-        .modules
-        .iter()
-        .flat_map(|module| module.resources.iter())
+fn type_completion_item(candidate: &SourceTypeCompletionCandidate) -> CompletionItem {
+    match candidate {
+        SourceTypeCompletionCandidate::Builtin { spelling } => {
+            item(spelling.spelling(), CompletionItemKind::KEYWORD).detail("type".to_string())
+        }
+        SourceTypeCompletionCandidate::Resource { path, docs, .. } => {
+            item(&source_type_path_label(path), CompletionItemKind::STRUCT)
+                .detail("resource".to_string())
+                .docs_from(docs)
+        }
+        SourceTypeCompletionCandidate::StoreIdentity { root, docs } => {
+            item(&format!("Id(^{root})"), CompletionItemKind::CLASS)
+                .detail(format!("identity of ^{root}"))
+                .docs_from(docs)
+        }
+        SourceTypeCompletionCandidate::Enum { path, docs, .. } => {
+            item(&source_type_path_label(path), CompletionItemKind::ENUM)
+                .detail("enum".to_string())
+                .docs_from(docs)
+        }
+    }
 }
 
-/// Every store schema declared across all modules of the program.
-fn stores(program: &CheckedProgram) -> impl Iterator<Item = &StoreSchema> {
-    program
-        .modules
-        .iter()
-        .flat_map(|module| module.stores.iter())
-}
-
-/// Every enum schema declared across all modules of the program.
-fn enums(program: &CheckedProgram) -> impl Iterator<Item = &EnumSchema> {
-    program
-        .modules
-        .iter()
-        .flat_map(|module| module.enums.iter())
+fn source_type_path_label(path: &[String]) -> String {
+    path.join("::")
 }
 
 /// A one-line rendering of a std op's signature, e.g. `(string, string): bool`.
