@@ -1,23 +1,23 @@
-//! Classify a cached lex into LSP semantic tokens.
+//! Map Marrow semantic token facts into LSP semantic tokens.
 //!
 //! The server registers a [`legend`] at initialize and answers
-//! `textDocument/semanticTokens/full` by mapping the document's cached
-//! [`LexedSource`] into the LSP's delta-encoded token stream. The lexer is
-//! error-recovering, so this produces tokens even while the buffer has errors.
+//! `textDocument/semanticTokens/full` by mapping transport-neutral Marrow facts
+//! into the LSP's delta-encoded token stream.
 
-mod builtins;
-mod declarations;
 mod encoding;
-mod references;
-mod syntax;
-mod type_annotations;
 
 use std::path::Path;
 
 use encoding::push;
 use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend};
-use marrow_check::{AnalysisSnapshot, BindingIndex};
-use marrow_syntax::{LexedSource, ParsedSource, TokenKind};
+use marrow_check::{
+    AnalysisSnapshot, BindingIndex,
+    tooling::{
+        SourceSemanticTokenModifiers, SourceSemanticTokenRole, source_semantic_token_facts,
+        source_semantic_token_facts_for_file,
+    },
+};
+use marrow_syntax::{LexedSource, ParsedSource};
 
 use crate::positions::LineIndex;
 
@@ -101,115 +101,85 @@ pub fn semantic_tokens(
     parsed: &ParsedSource,
     index: &LineIndex,
 ) -> Vec<SemanticToken> {
-    semantic_tokens_with_project_facts(lexed, parsed, index, None, None)
+    encode_facts(
+        source_semantic_token_facts(index.text(), lexed, parsed),
+        index,
+    )
 }
 
-/// Like [`semantic_tokens`], with optional project facts for default-library
-/// callables and resolved identifier uses. Callers supply cached facts so
-/// semantic-token requests never rebuild project analysis.
-pub fn semantic_tokens_with_project_facts(
-    lexed: &LexedSource,
-    parsed: &ParsedSource,
+/// Like [`semantic_tokens`], but uses snapshot-bound checked facts for a fresh
+/// analyzed file. Callers must only pass an index for the same source text the
+/// snapshot holds for `file`.
+pub fn semantic_tokens_for_file(
+    snapshot: &AnalysisSnapshot,
+    binding_index: &BindingIndex,
+    file: &Path,
     index: &LineIndex,
-    analysis: Option<(&AnalysisSnapshot, &Path)>,
-    binding_index: Option<(&BindingIndex, &Path)>,
-) -> Vec<SemanticToken> {
-    let file = &parsed.file;
-    let source = index.text();
-    let const_declaration_overrides =
-        declarations::const_declaration_overrides(lexed, file, source);
-    let declaration_overrides = declarations::declaration_overrides(lexed, file, source);
-    let builtin_overrides = builtins::builtin_overrides(lexed, parsed, source, analysis);
-    let reference_overrides = binding_index
-        .map(|(binding_index, path)| {
-            references::reference_overrides(lexed, source, binding_index, path)
-        })
-        .unwrap_or_default();
-    let type_annotation_overrides = type_annotations::type_annotation_overrides(analysis);
+) -> Option<Vec<SemanticToken>> {
+    source_semantic_token_facts_for_file(snapshot, binding_index, file)
+        .map(|facts| encode_facts(facts, index))
+}
 
+fn encode_facts(
+    facts: Vec<marrow_check::tooling::SourceSemanticTokenFact>,
+    index: &LineIndex,
+) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     let mut prev_line = 0u32;
     let mut prev_start = 0u32;
 
-    let mut i = 0;
-    while i < lexed.tokens.len() {
-        let token = &lexed.tokens[i];
-
-        if token.kind == TokenKind::Caret {
-            push(
-                &mut tokens,
-                token,
-                TYPE_SAVED_ROOT,
-                MOD_MODIFICATION,
-                index,
-                &mut prev_line,
-                &mut prev_start,
-            );
-            if let Some(name) = lexed.tokens.get(i + 1)
-                && name.kind == TokenKind::Identifier
-            {
-                push(
-                    &mut tokens,
-                    name,
-                    TYPE_SAVED_ROOT,
-                    MOD_MODIFICATION,
-                    index,
-                    &mut prev_line,
-                    &mut prev_start,
-                );
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        let span = (token.span.start_byte, token.span.end_byte);
-        if let Some(style) = const_declaration_overrides
-            .get(&span)
-            .copied()
-            .or_else(|| {
-                declaration_overrides
-                    .get(&span)
-                    .copied()
-                    .map(TokenStyle::plain)
-            })
-            .or_else(|| builtin_overrides.get(&span).copied())
-            .or_else(|| reference_overrides.get(&span).copied())
-            .or_else(|| type_annotation_overrides.get(&span).copied())
-            .or_else(|| syntax::token_type(token.kind).map(TokenStyle::plain))
-        {
-            push(
-                &mut tokens,
-                token,
-                style.token_type,
-                style.modifiers,
-                index,
-                &mut prev_line,
-                &mut prev_start,
-            );
-        }
-        i += 1;
+    for fact in facts {
+        push(
+            &mut tokens,
+            fact.span,
+            token_type_for_role(fact.role),
+            modifier_bits(fact.modifiers),
+            index,
+            &mut prev_line,
+            &mut prev_start,
+        );
     }
 
     tokens
 }
 
-type ByteSpan = (usize, usize);
-
-#[derive(Debug, Clone, Copy)]
-struct TokenStyle {
-    token_type: u32,
-    modifiers: u32,
-}
-
-impl TokenStyle {
-    fn plain(token_type: u32) -> Self {
-        Self {
-            token_type,
-            modifiers: 0,
+fn token_type_for_role(role: SourceSemanticTokenRole) -> u32 {
+    match role {
+        SourceSemanticTokenRole::Keyword => TYPE_KEYWORD,
+        SourceSemanticTokenRole::TypeKeyword => TYPE_TYPE,
+        SourceSemanticTokenRole::StringLiteral => TYPE_STRING,
+        SourceSemanticTokenRole::NumberLiteral => TYPE_NUMBER,
+        SourceSemanticTokenRole::BooleanLiteral => TYPE_BOOLEAN_LITERAL,
+        SourceSemanticTokenRole::Comment => TYPE_COMMENT,
+        SourceSemanticTokenRole::Operator => TYPE_OPERATOR,
+        SourceSemanticTokenRole::Namespace => TYPE_NAMESPACE,
+        SourceSemanticTokenRole::Variable => TYPE_VARIABLE,
+        SourceSemanticTokenRole::SavedRoot => TYPE_SAVED_ROOT,
+        SourceSemanticTokenRole::Function => TYPE_FUNCTION,
+        SourceSemanticTokenRole::Resource
+        | SourceSemanticTokenRole::Surface
+        | SourceSemanticTokenRole::IdentityTypeConstructor => TYPE_STRUCT,
+        SourceSemanticTokenRole::Enum => TYPE_ENUM,
+        SourceSemanticTokenRole::EnumMember => TYPE_ENUM_MEMBER,
+        SourceSemanticTokenRole::ResourceMember | SourceSemanticTokenRole::Index => TYPE_PROPERTY,
+        SourceSemanticTokenRole::Parameter | SourceSemanticTokenRole::KeyParameter => {
+            TYPE_PARAMETER
         }
     }
+}
+
+fn modifier_bits(modifiers: SourceSemanticTokenModifiers) -> u32 {
+    let mut bits = 0;
+    if modifiers.modification {
+        bits |= MOD_MODIFICATION;
+    }
+    if modifiers.default_library {
+        bits |= MOD_DEFAULT_LIBRARY;
+    }
+    if modifiers.readonly {
+        bits |= MOD_READONLY;
+    }
+    bits
 }
 
 #[cfg(test)]

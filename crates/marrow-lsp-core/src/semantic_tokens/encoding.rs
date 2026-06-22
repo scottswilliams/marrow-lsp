@@ -1,5 +1,5 @@
 use lsp_types::SemanticToken;
-use marrow_syntax::Token;
+use marrow_syntax::SourceSpan;
 
 use crate::positions::LineIndex;
 
@@ -9,19 +9,19 @@ use crate::positions::LineIndex;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push(
     out: &mut Vec<SemanticToken>,
-    token: &Token,
+    span: SourceSpan,
     token_type: u32,
     token_modifiers_bitset: u32,
     index: &LineIndex,
     prev_line: &mut u32,
     prev_start: &mut u32,
 ) {
-    let start = index.position(token.span.start_byte);
-    let end = index.position(token.span.end_byte);
+    let start = index.position(span.start_byte);
+    let end = index.position(span.end_byte);
     let length = if end.line == start.line {
         end.character.saturating_sub(start.character)
     } else {
-        first_line_length(token, index, start.character)
+        first_line_length(span, index, start.character)
     };
 
     let delta_line = start.line - *prev_line;
@@ -41,13 +41,13 @@ pub(super) fn push(
     *prev_start = start.character;
 }
 
-fn first_line_length(token: &Token, index: &LineIndex, start_character: u32) -> u32 {
+fn first_line_length(span: SourceSpan, index: &LineIndex, start_character: u32) -> u32 {
     let text = index.text();
-    let token_text = &text[token.span.start_byte..token.span.end_byte.min(text.len())];
+    let token_text = &text[span.start_byte..span.end_byte.min(text.len())];
     let line_end = token_text
         .find('\n')
-        .map(|offset| token.span.start_byte + offset)
-        .unwrap_or(token.span.end_byte);
+        .map(|offset| span.start_byte + offset)
+        .unwrap_or(span.end_byte);
     let end = index.position(line_end);
     end.character.saturating_sub(start_character).max(1)
 }

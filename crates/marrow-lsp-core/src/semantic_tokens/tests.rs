@@ -72,19 +72,11 @@ fn decoded_for_checked(source: &str) -> (LineIndex, DecodedTokens) {
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     let binding_index = build_binding_index(&snapshot);
-    let parsed = snapshot
-        .files
-        .iter()
-        .find(|analyzed| analyzed.path == file)
-        .expect("analyzed source file");
     let index = LineIndex::new(source);
-    let decoded = absolute(&semantic_tokens_with_project_facts(
-        &lex_source(source),
-        &parsed.parsed,
-        &index,
-        Some((&snapshot, &file)),
-        Some((&binding_index, &file)),
-    ));
+    let decoded = absolute(
+        &semantic_tokens_for_file(&snapshot, &binding_index, &file, &index)
+            .expect("checked semantic tokens"),
+    );
     assert!(
         !snapshot.program.modules.is_empty(),
         "checked fixture should provide binding facts"
@@ -122,19 +114,11 @@ fn decoded_for_checked_file(
         parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
     let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
     let binding_index = build_binding_index(&snapshot);
-    let parsed = snapshot
-        .files
-        .iter()
-        .find(|analyzed| analyzed.path == active_file)
-        .expect("analyzed active source file");
     let index = LineIndex::new(active_source);
-    let decoded = absolute(&semantic_tokens_with_project_facts(
-        &lex_source(active_source),
-        &parsed.parsed,
-        &index,
-        Some((&snapshot, &active_file)),
-        Some((&binding_index, &active_file)),
-    ));
+    let decoded = absolute(
+        &semantic_tokens_for_file(&snapshot, &binding_index, &active_file, &index)
+            .expect("checked semantic tokens"),
+    );
     assert!(
         !snapshot.program.modules.is_empty(),
         "checked fixture should provide binding facts"
@@ -1240,33 +1224,40 @@ fn f()
 }
 
 #[test]
-fn semantic_tokens_have_no_local_intrinsic_callable_model() {
-    let source = include_str!("builtins.rs");
-    for forbidden in [
-        "marrow_schema::stdlib",
-        "language_facts::bare_builtin_kind",
-        "BareBuiltinKind",
-        "active_callable_context",
+fn semantic_tokens_do_not_own_marrow_role_classification() {
+    let semantic_tokens_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/semantic_tokens");
+    for file_name in [
+        "builtins.rs",
+        "declarations.rs",
+        "references.rs",
+        "syntax.rs",
+        "type_annotations.rs",
     ] {
+        let path = semantic_tokens_dir.join(file_name);
         assert!(
-            !source.contains(forbidden),
-            "semantic tokens must consume marrow_check callable facts instead of {forbidden}"
+            !path.exists(),
+            "semantic token role classification belongs in marrow-check tooling, not {path:?}"
         );
     }
-}
 
-#[test]
-fn semantic_tokens_have_no_local_identity_type_annotation_model() {
-    let source = include_str!("type_annotations.rs");
+    let entry = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/semantic_tokens.rs"),
+    )
+    .expect("semantic token entry module");
     for forbidden in [
-        "add_declaration_type_annotation_overrides",
-        "add_type_annotation_overrides",
-        "ResourceMember",
-        "TypeRef",
+        "TokenKind",
+        "TokenStyle",
+        "SymbolKind",
+        "declaration_overrides",
+        "builtin_overrides",
+        "reference_overrides",
+        "type_annotation_overrides",
+        "token_type(",
     ] {
         assert!(
-            !source.contains(forbidden),
-            "semantic tokens must consume marrow_check identity type annotation facts instead of {forbidden}"
+            !entry.contains(forbidden),
+            "marrow-lsp-core semantic tokens should map Marrow facts, not own {forbidden}"
         );
     }
 }
@@ -1784,7 +1775,7 @@ fn multi_line_tokens_are_clamped_to_the_first_line_remainder() {
 
     push(
         &mut tokens,
-        &token,
+        token.span,
         TYPE_STRING,
         0,
         &index,

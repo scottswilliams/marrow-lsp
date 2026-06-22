@@ -742,17 +742,24 @@ impl LanguageServer for Backend {
         if has_fresh_analysis {
             let _ = workspace.binding_index();
         }
-        let snapshot = has_fresh_analysis.then(|| workspace.latest()).flatten();
-        let binding_index = has_fresh_analysis
-            .then(|| workspace.binding_index_cached())
-            .flatten();
-        let data = semantic_tokens::semantic_tokens_with_project_facts(
-            &document.lexed,
-            &document.parsed,
-            &document.index,
-            snapshot.map(|snapshot| (snapshot, path.as_path())),
-            binding_index.map(|index| (index, path.as_path())),
-        );
+        let data = if let (Some(snapshot), Some(binding_index)) = (
+            has_fresh_analysis.then(|| workspace.latest()).flatten(),
+            has_fresh_analysis
+                .then(|| workspace.binding_index_cached())
+                .flatten(),
+        ) {
+            semantic_tokens::semantic_tokens_for_file(
+                snapshot,
+                binding_index,
+                path.as_path(),
+                &document.index,
+            )
+            .unwrap_or_else(|| {
+                semantic_tokens::semantic_tokens(&document.lexed, &document.parsed, &document.index)
+            })
+        } else {
+            semantic_tokens::semantic_tokens(&document.lexed, &document.parsed, &document.index)
+        };
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
             data,
