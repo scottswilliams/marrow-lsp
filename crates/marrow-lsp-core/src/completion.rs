@@ -17,9 +17,10 @@ use marrow_check::{
     tooling::{
         DeclaredDataChild, DeclaredDataChildKind, SourceEnumNamespaceCompletionFact,
         SourceModuleNamespaceCompletionFact, SourceNamespaceCompletionFact,
-        SourceNamespaceFunctionCompletion, SourceTypeCompletionCandidate,
-        declared_source_receiver_data_children, intrinsic_completion_callables,
-        source_namespace_completion_fact, source_type_completion_fact,
+        SourceNamespaceFunctionCompletion, SourceSavedRootCompletionCandidate,
+        SourceTypeCompletionCandidate, declared_source_receiver_data_children,
+        intrinsic_completion_callables, source_namespace_completion_fact,
+        source_saved_root_completion_fact, source_type_completion_fact,
     },
 };
 use marrow_schema::stdlib;
@@ -472,24 +473,17 @@ fn introduces_type(tokens: &[Token], colon_index: usize) -> bool {
 
 /// The durable saved roots declared across every module: one item per store.
 fn root_completions(program: &CheckedProgram) -> Vec<CompletionItem> {
-    let mut items = Vec::new();
-    for store in saved_root_stores(program) {
-        items.push(
-            item(&store.root, CompletionItemKind::STRUCT)
-                .detail(format!("saved root of {}", store.resource))
-                .docs_from(&store.docs),
-        );
-    }
-    dedup(items)
+    source_saved_root_completion_fact(program)
+        .candidates
+        .iter()
+        .map(saved_root_completion_item)
+        .collect()
 }
 
-fn saved_root_stores(
-    program: &CheckedProgram,
-) -> impl Iterator<Item = &marrow_schema::StoreSchema> {
-    program
-        .modules
-        .iter()
-        .flat_map(|module| module.stores.iter())
+fn saved_root_completion_item(candidate: &SourceSavedRootCompletionCandidate) -> CompletionItem {
+    item(&candidate.root, CompletionItemKind::STRUCT)
+        .detail(format!("saved root of {}", candidate.resource_name))
+        .docs_from(&candidate.docs)
 }
 
 fn saved_path_completions(
@@ -799,8 +793,6 @@ fn item(label: &str, kind: CompletionItemKind) -> CompletionItem {
     }
 }
 
-/// Drop items with a duplicate label, keeping the first. Saved roots and type
-/// names can repeat across modules; the editor wants each once.
 fn dedup(items: Vec<CompletionItem>) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     items

@@ -213,6 +213,20 @@ fn after_caret_lists_durable_roots() {
 }
 
 #[test]
+fn root_completion_consumes_marrow_saved_root_fact() {
+    let source = include_str!("../completion.rs");
+
+    assert!(
+        !source.contains("saved_root_stores"),
+        "root completion must not keep a local saved-root store walker"
+    );
+    assert!(
+        !source.contains("module.stores"),
+        "root completion must not model saved-root candidates by walking checked modules"
+    );
+}
+
+#[test]
 fn after_keyed_root_dot_lists_declared_saved_path_members() {
     let (program, file) = project();
     let items = complete_items(
