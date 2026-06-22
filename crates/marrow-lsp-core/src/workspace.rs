@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use lsp_types::Url;
 use marrow_check::{
     AnalysisGeneration, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
-    read_accepted_catalog_artifact, read_committed_lock,
 };
 use marrow_project::{
     DiscoverError, ProjectConfig, discover_modules, discover_test_modules, parse_config,
@@ -19,6 +18,7 @@ use marrow_project::{
 
 pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
 
+use crate::catalog_binding::CatalogBindingCache;
 use crate::documents::Documents;
 
 /// The name of a Marrow project's configuration file; its directory is the root.
@@ -95,6 +95,12 @@ pub struct Workspace {
     /// open project-file set changes, the cached snapshot no longer names the
     /// same source world even when the remaining open buffers still match.
     latest_open_analysis_paths: Vec<PathBuf>,
+    /// Binds the accepted catalog and first-run lock from the project's committed
+    /// store, so analysis checks source against the committed identity rather than
+    /// always re-deriving fresh first-run ids. Keyed on the store's monotonic commit
+    /// fact, it skips the full catalog-snapshot read when the store has not advanced,
+    /// keeping the per-debounce recompute cheap.
+    catalog_binding: CatalogBindingCache,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,24 +229,22 @@ impl Workspace {
             .is_some_and(|project| file.starts_with(&project.root))
         {
             self.project = Some(resolve_project(file)?);
+            self.catalog_binding = CatalogBindingCache::new();
         }
         let project = self.project.as_ref().expect("project resolved just above");
 
         let latest_open_analysis_paths = open_analysis_paths(project, documents);
         let sources = overlay(&project.root, documents);
-        let accepted = read_accepted_catalog_artifact(&project.root)
+        let binding = self
+            .catalog_binding
+            .bind(&project.root, &project.config)
             .map_err(WorkspaceError::AnalysisContext)?;
-        let lock = if accepted.is_none() {
-            read_committed_lock(&project.root).map_err(WorkspaceError::AnalysisContext)?
-        } else {
-            None
-        };
         let snapshot = analyze_project(
             &project.root,
             &project.config,
             &sources,
-            accepted.as_ref(),
-            lock.as_ref(),
+            binding.accepted.as_ref(),
+            binding.lock.as_ref(),
         )
         .map_err(WorkspaceError::Discover)?;
         let binding_index_key = BindingIndexKey::new(project, &snapshot);
@@ -368,6 +372,65 @@ pub fn url_to_path(url: &Url) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::diagnostics::{path_to_url, snapshot_to_diagnostics};
+    use marrow_store::tree::{StoreUid, TreeStore};
+
+    /// A native-store project carrying a stamped store with a committed catalog
+    /// baseline. Returns the project root path inside the kept `TempDir` so a recompute
+    /// observes the committed accepted identity.
+    fn stamped_native_project() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("counter.mw"),
+            "module counter\n\nresource Counter\n    required value: int\n\n\
+             store ^counter(id: int): Counter\n",
+        )
+        .unwrap();
+
+        let config = marrow_check::load_config(&root).unwrap();
+        let program = marrow_check::check_project_against(&root, &config, None, None).unwrap();
+
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+        store
+            .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
+            .unwrap();
+        marrow_run::evolution::commit_catalog_baseline(&store, &program).unwrap();
+        drop(store);
+
+        (dir, root)
+    }
+
+    /// The editor must check against the store's committed accepted identity, not a
+    /// fresh first run. A stamped store carries an accepted catalog epoch; the storeless
+    /// bug analyzed every project as a first run, leaving the accepted catalog `None`.
+    #[test]
+    fn recompute_reflects_the_committed_accepted_identity_of_a_stamped_store() {
+        let (_dir, root) = stamped_native_project();
+        let file = root.join("src/counter.mw");
+
+        let mut workspace = Workspace::new();
+        let documents = Documents::new();
+        let snapshot = workspace.recompute(&file, &documents).unwrap();
+
+        assert!(
+            snapshot.generation().accepted_catalog.is_some(),
+            "a stamped store must bind its committed accepted catalog, not be analyzed as a \
+             fresh first run"
+        );
+        assert!(
+            snapshot.program.catalog.accepted_epoch.is_some(),
+            "the checked program must carry the store's committed accepted epoch"
+        );
+    }
 
     /// A project whose one library file is clean on disk; an open buffer overlays a
     /// version with a type error. Analysis must report the error against the buffer

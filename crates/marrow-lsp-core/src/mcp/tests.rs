@@ -779,6 +779,64 @@ fn check_of_a_clean_file_has_no_diagnostics() {
     );
 }
 
+/// A native-store project stamped with a committed catalog baseline and no
+/// `marrow.lock`, so the store is the sole accepted authority. Returns the source file.
+fn stamped_store_no_lock_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src/app");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("counter.mw"),
+        "module app::counter\n\nresource Counter\n    required value: int\n\n\
+         store ^counter(id: int): Counter\n",
+    )
+    .unwrap();
+
+    let config = parse_config(&std::fs::read_to_string(root.join("marrow.json")).unwrap()).unwrap();
+    let program = check_project_against(root, &config, None, None).unwrap();
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    store
+        .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
+        .unwrap();
+    marrow_run::evolution::commit_catalog_baseline(&store, &program).unwrap();
+    drop(store);
+    assert!(
+        !root.join(CATALOG_FILE_NAME).exists(),
+        "the fixture must have no committed lock, so only the store carries accepted identity"
+    );
+
+    (dir, src.join("counter.mw"))
+}
+
+/// `mw_check` must check against the store's committed accepted identity, not a fresh
+/// first run. Adding a required field to a resource whose identity the store already
+/// committed is an unrecorded-identity change the checker flags only when the accepted
+/// catalog is bound. The storeless bug analyzed every project as a first run, which
+/// baselines the new shape silently and surfaces nothing.
+#[test]
+fn check_reflects_the_committed_accepted_identity_of_a_stamped_store() {
+    let (_dir, file) = stamped_store_no_lock_project();
+    let evolved = "module app::counter\n\nresource Counter\n    required value: int\n    \
+                   required label: string\n\nstore ^counter(id: int): Counter\n";
+    let result = check(Some(&file), Some(evolved));
+    let diagnostics = result["diagnostics"].as_array().unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d["code"] == "check.catalog_intent"),
+        "a stamped store's committed identity must drive the check, surfacing the added \
+         required field as an unrecorded-identity change, got {result}"
+    );
+}
+
 #[test]
 fn check_snippet_reports_a_syntax_error() {
     // A bare snippet with a broken declaration: no project, parser diagnostics.
