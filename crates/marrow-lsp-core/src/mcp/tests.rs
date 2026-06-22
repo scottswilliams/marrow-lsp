@@ -1878,7 +1878,7 @@ fn data_tools_refuse_when_not_enabled() {
             "source/store compatibility verdicts",
             "drift witnesses",
             "typed repair facts",
-            "stable production integrity DTOs",
+            "production validation contracts",
         ],
     );
 
@@ -2021,7 +2021,7 @@ fn data_integrity_returns_snapshot_metadata_when_enabled() {
             "source/store compatibility verdicts",
             "drift witnesses",
             "typed repair facts",
-            "stable production integrity DTOs",
+            "production validation contracts",
         ],
     );
 }

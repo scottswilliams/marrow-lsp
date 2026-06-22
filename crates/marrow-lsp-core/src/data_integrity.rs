@@ -5,11 +5,7 @@
 //! The scan is bounded and on demand only. It delegates integrity semantics to
 //! Marrow's canonical tooling sample.
 
-use serde::Serialize;
-
-use marrow_check::tooling::IntegrityProblem;
-use marrow_json::DataGenerationJson;
-use marrow_json::saved_data::{DataViewBoundaryJson, data_view_boundary_to_json};
+pub use marrow_json::saved_data::DataIntegrityResultJson as DataIntegrityResult;
 
 use crate::store::SavedDataSession;
 
@@ -17,47 +13,6 @@ use crate::store::SavedDataSession;
 /// `truncated`. The advisory is a fast, on-demand health check, not a full audit,
 /// so it walks a bounded prefix of the tree rather than an unbounded store.
 const INTEGRITY_SCAN_LIMIT: usize = 5000;
-
-/// One stored record the current schema cannot account for: the human path text,
-/// Marrow tooling problem code, message, and optional help text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Finding {
-    /// The canonical Marrow path text (`^books(1).title`), or `?<hex>` of the raw
-    /// key when it does not decode, so a corrupt key stays visible.
-    pub path: String,
-    pub code: String,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub help: Option<String>,
-}
-
-/// `marrow/dataIntegrity` reply: whether the store could be read, plus the scan's
-/// findings, the count scanned, and whether the store held more past the cap. When
-/// `available` is false the findings are empty and the editor shows an unavailable
-/// state rather than an error — the same soft-degrade the data-roots view uses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DataIntegrityResult {
-    pub available: bool,
-    pub findings: Vec<Finding>,
-    pub scanned: usize,
-    pub truncated: bool,
-    pub store_snapshot: Option<DataGenerationJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_view_boundary: Option<DataViewBoundaryJson>,
-}
-
-impl DataIntegrityResult {
-    fn unavailable() -> Self {
-        Self {
-            available: false,
-            findings: Vec::new(),
-            scanned: 0,
-            truncated: false,
-            store_snapshot: None,
-            data_view_boundary: None,
-        }
-    }
-}
 
 /// Run the schema-change-impact advisory for the LSP custom request,
 /// soft-degrading a missing session or unreadable store to an `available: false`
@@ -71,23 +26,34 @@ pub fn data_integrity(session: Option<&SavedDataSession>) -> DataIntegrityResult
         .surface_read()
         .saved_data_integrity_sample(INTEGRITY_SCAN_LIMIT)
     {
-        Ok(stamped) => DataIntegrityResult {
-            available: true,
-            findings: stamped.data.problems.into_iter().map(finding_for).collect(),
-            scanned: stamped.data.items_checked,
-            truncated: stamped.data.truncated,
-            store_snapshot: Some(DataGenerationJson::from(&stamped.stamp)),
-            data_view_boundary: Some(data_view_boundary_to_json(session.surface_read())),
-        },
+        Ok(stamped) => DataIntegrityResult::from(stamped)
+            .with_data_view_boundary(session.surface_read().data_view_boundary()),
         Err(_) => DataIntegrityResult::unavailable(),
     }
 }
 
-fn finding_for(problem: IntegrityProblem) -> Finding {
-    Finding {
-        path: problem.path,
-        code: problem.code.to_string(),
-        message: problem.message,
-        help: problem.help.map(str::to_string),
+#[cfg(test)]
+mod tests {
+    use marrow_json::saved_data::DataIntegrityResultJson;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn data_integrity_unavailable_uses_shared_result_shape() {
+        fn assert_marrow_json_result(_: &DataIntegrityResultJson) {}
+
+        let result = data_integrity(None);
+        assert_marrow_json_result(&result);
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "available": false,
+                "findings": [],
+                "scanned": 0,
+                "truncated": false,
+                "store_snapshot": null,
+            })
+        );
     }
 }

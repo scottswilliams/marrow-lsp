@@ -67,7 +67,7 @@ pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "source/store compatibility verdicts",
     "drift witnesses",
     "typed repair facts",
-    "stable production integrity DTOs",
+    "production validation contracts",
 ];
 const SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION: &str = "source.namespace.completion.v1";
 
@@ -149,7 +149,9 @@ fn data_read_contract() -> Json {
 }
 
 fn data_integrity_contract() -> Json {
-    presentation_contract("debug/admin advisory", DATA_INTEGRITY_MISSING_FACTS)
+    let mut contract = presentation_contract("debug/admin advisory", DATA_INTEGRITY_MISSING_FACTS);
+    contract["basis"] = json!("Marrow integrity sample DTO");
+    contract
 }
 
 fn run_contract() -> Json {

@@ -30,15 +30,41 @@ interface DataGenerationTransaction {
   readonly depth: number;
 }
 
-interface Finding {
+interface IntegritySourceSpan {
   // Root-first store path the finding concerns, rendered by the core.
   readonly path: string;
+}
+
+type IntegritySavedKey =
+  | { readonly type: "int"; readonly value: number }
+  | { readonly type: "bool"; readonly value: boolean }
+  | { readonly type: "string"; readonly value: string }
+  | { readonly type: "date"; readonly days_since_epoch: number }
+  | { readonly type: "duration"; readonly nanos: string }
+  | { readonly type: "instant"; readonly nanos_since_epoch: string }
+  | { readonly type: "bytes"; readonly value_b64: string };
+
+type IntegrityPathSegment =
+  | { readonly member_catalog_id: string }
+  | { readonly key: IntegritySavedKey };
+
+interface Finding {
   // Canonical Marrow tooling problem code, owned by the core.
   readonly code: string;
+  readonly kind: string;
   // Human-readable explanation, owned by the core.
   readonly message: string;
+  readonly source_span: IntegritySourceSpan;
   // Optional remediation help from the core.
-  readonly help?: string;
+  readonly help?: string | null;
+  readonly store_catalog_id?: string;
+  readonly record_identity?: readonly IntegritySavedKey[];
+  readonly parent_path?: readonly IntegrityPathSegment[];
+  readonly missing_member_catalog_id?: string;
+  readonly containing_identity?: readonly IntegritySavedKey[];
+  readonly field_catalog_id?: string;
+  readonly referenced_root?: string;
+  readonly referenced_identity?: readonly IntegritySavedKey[];
 }
 
 interface DataIntegrityResult {
@@ -47,6 +73,7 @@ interface DataIntegrityResult {
   scanned: number;
   truncated: boolean;
   store_snapshot: DataGeneration | null;
+  data_view_boundary?: unknown;
 }
 
 const REQUEST_DATA_INTEGRITY = "marrow/dataIntegrity";
@@ -140,6 +167,9 @@ export class MarrowDataIntegrity {
 // One report line per finding. Display only — the core owns the semantics behind
 // each field.
 function formatFinding(finding: Finding): string {
-  const help = finding.help === undefined ? "" : ` Help: ${finding.help}`;
-  return `[${finding.code}] ${finding.path}: ${finding.message}${help}`;
+  const help =
+    finding.help === undefined || finding.help === null
+      ? ""
+      : ` Help: ${finding.help}`;
+  return `[${finding.code}] ${finding.source_span.path}: ${finding.message}${help}`;
 }
