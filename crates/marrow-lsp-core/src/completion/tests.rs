@@ -742,6 +742,29 @@ fn used_module_namespace_lists_schema_members_from_marrow_fact() {
 }
 
 #[test]
+fn used_module_namespace_ignores_local_alias_collision_in_sibling_function() {
+    let (program, file) = project();
+    let items = complete_items(
+        &program,
+        &file,
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn shadow(): int
+    const books = 5
+    return books
+
+pub fn f()
+    const x = books::|
+",
+    );
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["Book", "Pair", "Status", "titleOf"]);
+}
+
+#[test]
 fn partial_project_module_prefix_returns_no_namespace_items() {
     let (program, file) = project();
     let labels = complete(

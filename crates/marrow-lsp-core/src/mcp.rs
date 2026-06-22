@@ -22,7 +22,14 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use marrow_check::type_at;
+use marrow_check::{
+    tooling::{
+        SourceEnumNamespaceCompletionFact, SourceModuleNamespaceCompletionFact,
+        SourceNamespaceCompletionFact, SourceNamespaceEnumMemberStatus,
+        SourceNamespaceFunctionCompletion, source_namespace_completion_file_fact,
+    },
+    type_at,
+};
 use marrow_json::resource_schema::{
     RESOURCE_SCHEMA_PROFILE_VERSION, resource_schema_for_name as marrow_resource_schema_for_name,
 };
@@ -62,6 +69,7 @@ pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "typed repair facts",
     "stable production integrity DTOs",
 ];
+const SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION: &str = "source.namespace.completion.v1";
 
 fn production_contract(description: &str) -> Json {
     json!({
@@ -83,6 +91,12 @@ fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
 
 fn completion_contract() -> Json {
     presentation_contract("development helper", COMPLETION_MISSING_FACTS)
+}
+
+fn namespace_completion_contract() -> Json {
+    let mut contract = production_contract("source namespace completion fact");
+    contract["basis"] = json!("Marrow source namespace completion facts");
+    contract
 }
 
 fn resource_schema_contract() -> Json {
@@ -329,6 +343,111 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     })
     .collect();
     with_contract(json!({ "items": items }), contract)
+}
+
+/// `mw_namespace_complete`: Marrow's source namespace completion fact for a
+/// concrete module or enum qualifier. This is a production fact surface, not the
+/// broad editor completion helper: no cursor recovery, source overlay, stdlib
+/// fallback, or `CompletionItem` presentation is accepted here.
+pub fn namespace_complete(file: &Path, qualifier: &[String]) -> Json {
+    let contract = namespace_completion_contract();
+    let (workspace, file) = match load_project(file, None) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return with_contract(empty_namespace_completion_result(Some(error)), contract);
+        }
+    };
+    let snapshot = workspace.latest().expect("recompute stored a snapshot");
+    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
+        return with_contract(empty_namespace_completion_result(None), contract);
+    };
+    let result = match source_namespace_completion_file_fact(
+        &snapshot.program,
+        &file,
+        &analyzed.parsed.file,
+        qualifier,
+    ) {
+        Some(SourceNamespaceCompletionFact::Module(fact)) => module_namespace_fact_json(&fact),
+        Some(SourceNamespaceCompletionFact::Enum(fact)) => enum_namespace_fact_json(&fact),
+        None => empty_namespace_completion_result(None),
+    };
+    with_contract(result, contract)
+}
+
+fn empty_namespace_completion_result(error: Option<String>) -> Json {
+    let mut result = json!({
+        "profile_version": SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION,
+        "kind": Json::Null,
+        "module": Json::Null,
+        "resources": [],
+        "enums": [],
+        "functions": [],
+        "enum_name": Json::Null,
+        "members": [],
+    });
+    if let Some(error) = error {
+        result["error"] = json!(error);
+    }
+    result
+}
+
+fn module_namespace_fact_json(fact: &SourceModuleNamespaceCompletionFact) -> Json {
+    json!({
+        "profile_version": SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION,
+        "kind": "module",
+        "module": &fact.module,
+        "resources": fact.resources.iter().map(|resource| {
+            json!({ "name": &resource.name, "docs": &resource.docs })
+        }).collect::<Vec<_>>(),
+        "enums": fact.enums.iter().map(|enum_schema| {
+            json!({ "name": &enum_schema.name, "docs": &enum_schema.docs })
+        }).collect::<Vec<_>>(),
+        "functions": fact.functions.iter().map(namespace_function_json).collect::<Vec<_>>(),
+        "enum_name": Json::Null,
+        "members": [],
+    })
+}
+
+fn namespace_function_json(function: &SourceNamespaceFunctionCompletion) -> Json {
+    json!({
+        "name": &function.name,
+        "params": function.params.iter().map(|param| {
+            json!({
+                "name": &param.name,
+                "type": render_type(&param.ty),
+                "docs": &param.docs,
+            })
+        }).collect::<Vec<_>>(),
+        "return_type": function.return_type.as_ref().map(render_type),
+        "docs": &function.docs,
+    })
+}
+
+fn enum_namespace_fact_json(fact: &SourceEnumNamespaceCompletionFact) -> Json {
+    json!({
+        "profile_version": SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION,
+        "kind": "enum",
+        "module": Json::Null,
+        "resources": [],
+        "enums": [],
+        "functions": [],
+        "enum_name": &fact.enum_name,
+        "members": fact.members.iter().map(|member| {
+            json!({
+                "name": &member.name,
+                "docs": &member.docs,
+                "status": enum_member_status_json(member.status),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn enum_member_status_json(status: SourceNamespaceEnumMemberStatus) -> &'static str {
+    match status {
+        SourceNamespaceEnumMemberStatus::Selectable => "selectable",
+        SourceNamespaceEnumMemberStatus::Category => "category",
+        SourceNamespaceEnumMemberStatus::Group => "group",
+    }
 }
 
 /// `mw_resource_schema`: Marrow's canonical JSON DTO for one resource schema.

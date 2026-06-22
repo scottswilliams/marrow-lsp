@@ -54,6 +54,15 @@ fn int_prop(description: &str) -> Json {
     json!({ "type": "integer", "description": description })
 }
 
+fn namespace_qualifier_schema() -> Json {
+    json!({
+        "type": "array",
+        "description": "One or more namespace/name segments such as [\"shelf\", \"books\"] or [\"books\"] for an imported module alias.",
+        "items": { "type": "string", "minLength": 1 },
+        "minItems": 1,
+    })
+}
+
 fn data_key_schema(description: &str) -> Json {
     json!({
         "description": description,
@@ -149,6 +158,12 @@ fn production_contract(description: &str) -> Json {
     })
 }
 
+fn namespace_completion_contract() -> Json {
+    let mut contract = production_contract("source namespace completion fact");
+    contract["basis"] = json!("Marrow source namespace completion facts");
+    contract
+}
+
 fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
     json!({
         "status": "presentation-only",
@@ -214,6 +229,19 @@ pub fn tools() -> Json {
                     "character": int_prop("Zero-based UTF-16 character offset on the line."),
                 },
                 "required": ["file", "line", "character"],
+            },
+        },
+        {
+            "name": "mw_namespace_complete",
+            "description": "Return Marrow's source.namespace.completion.v1 fact for a concrete project module or enum qualifier. This production tool accepts only a file and namespace/name segments; broad editor completion remains mw_complete.",
+            "_meta": marrow_meta(namespace_completion_contract()),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": string_prop("Absolute path to any .mw file inside the project."),
+                    "qualifier": namespace_qualifier_schema(),
+                },
+                "required": ["file", "qualifier"],
             },
         },
         {
@@ -482,6 +510,11 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
             let character = required_u32(arguments, "character")?;
             Ok(mcp::complete(&file, line, character))
         }
+        "mw_namespace_complete" => {
+            let file = required_path(arguments, "file")?;
+            let qualifier = namespace_qualifier(arguments)?;
+            Ok(mcp::namespace_complete(&file, &qualifier))
+        }
         "mw_resource_schema" => {
             let file = required_path(arguments, "file")?;
             let name = required_str(arguments, "name")?;
@@ -577,6 +610,27 @@ fn optional_array(arguments: &Json, key: &str) -> Result<Vec<Json>, String> {
     }
 }
 
+fn namespace_qualifier(arguments: &Json) -> Result<Vec<String>, String> {
+    let invalid = || {
+        "invalid mw_namespace_complete arguments: `qualifier` must be a non-empty array of non-empty string segments".to_string()
+    };
+    let Some(Json::Array(values)) = arguments.get("qualifier") else {
+        return Err(invalid());
+    };
+    if values.is_empty() {
+        return Err(invalid());
+    }
+    values
+        .iter()
+        .map(|value| match value.as_str() {
+            Some(segment) if !segment.is_empty() && !segment.contains("::") => {
+                Ok(segment.to_string())
+            }
+            _ => Err(invalid()),
+        })
+        .collect()
+}
+
 fn required_object(arguments: &Json, key: &str) -> Result<Json, String> {
     match arguments.get(key) {
         Some(value @ Json::Object(_)) => Ok(value.clone()),
@@ -637,6 +691,7 @@ mod tests {
             "mw_check",
             "mw_type_at",
             "mw_complete",
+            "mw_namespace_complete",
             "mw_resource_schema",
             "mw_surface_routes",
             "mw_surface_read",
@@ -718,6 +773,31 @@ mod tests {
         assert_eq!(
             tool(tools, "mw_resource_schema")["inputSchema"]["required"],
             json!(["file", "name"])
+        );
+
+        let namespace_complete = contract(tools, "mw_namespace_complete");
+        assert_eq!(namespace_complete["status"], "ready");
+        assert_eq!(namespace_complete["stableProductionApi"], true);
+        assert_eq!(
+            namespace_complete["description"],
+            "source namespace completion fact"
+        );
+        assert_eq!(
+            namespace_complete["basis"],
+            "Marrow source namespace completion facts"
+        );
+        assert_eq!(
+            strings(&namespace_complete["missingFacts"]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            tool(tools, "mw_namespace_complete")["inputSchema"]["required"],
+            json!(["file", "qualifier"])
+        );
+        assert_eq!(
+            tool(tools, "mw_namespace_complete")["inputSchema"]["properties"]["qualifier"]["items"]
+                ["type"],
+            "string"
         );
 
         let surface_routes = contract(tools, "mw_surface_routes");
@@ -1069,6 +1149,30 @@ mod tests {
             error.contains("name"),
             "missing resource name should be a protocol argument error: {error}"
         );
+    }
+
+    #[test]
+    fn mw_namespace_complete_rejects_malformed_qualifier_before_project_loading() {
+        let policy = Policy { allow_data: false };
+        for arguments in [
+            json!({ "file": "/nope/project/src/main.mw" }),
+            json!({ "file": "/nope/project/src/main.mw", "qualifier": null }),
+            json!({ "file": "/nope/project/src/main.mw", "qualifier": "books" }),
+            json!({ "file": "/nope/project/src/main.mw", "qualifier": [] }),
+            json!({ "file": "/nope/project/src/main.mw", "qualifier": ["books", 7] }),
+            json!({ "file": "/nope/project/src/main.mw", "qualifier": ["books", ""] }),
+        ] {
+            let error = call("mw_namespace_complete", &arguments, policy)
+                .expect_err("mw_namespace_complete must validate qualifier arguments");
+            assert!(
+                error.contains("mw_namespace_complete") && error.contains("qualifier"),
+                "invalid namespace completion qualifier should name the tool and argument: {error}"
+            );
+            assert!(
+                !error.contains("marrow.json") && !error.contains("project"),
+                "invalid qualifier should fail before project loading: {error}"
+            );
+        }
     }
 
     #[test]

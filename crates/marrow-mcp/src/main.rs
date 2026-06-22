@@ -205,6 +205,7 @@ fn summarize(name: &str, result: &Json) -> String {
                 None => "no type".to_string(),
             },
             "mw_complete" => count_summary(result, "items", "no completions", "completion"),
+            "mw_namespace_complete" => namespace_complete_summary(result),
             "mw_resource_schema" => count_summary(result, "resources", "no resources", "resource"),
             "mw_surface_routes" => count_summary(result, "routes", "no routes", "route"),
             "mw_surface_read" | "mw_surface_write" => surface_read_summary(result),
@@ -421,6 +422,38 @@ fn count_summary(result: &Json, field: &str, empty: &str, noun: &str) -> String 
         empty.to_string()
     } else {
         format!("{count} {noun}{}", plural(count as u64))
+    }
+}
+
+fn namespace_complete_summary(result: &Json) -> String {
+    match result.get("kind").and_then(Json::as_str) {
+        Some("module") => {
+            let count = array_len(result, "resources")
+                + array_len(result, "enums")
+                + array_len(result, "functions");
+            let module = result
+                .get("module")
+                .and_then(Json::as_str)
+                .unwrap_or("module");
+            if count == 0 {
+                format!("{module}: no namespace items")
+            } else {
+                format!("{module}: {count} namespace item{}", plural(count as u64))
+            }
+        }
+        Some("enum") => {
+            let enum_name = result
+                .get("enum_name")
+                .and_then(Json::as_str)
+                .unwrap_or("enum");
+            let count = array_len(result, "members");
+            if count == 0 {
+                format!("{enum_name}: no enum members")
+            } else {
+                format!("{enum_name}: {count} enum member{}", plural(count as u64))
+            }
+        }
+        _ => "no namespace fact".to_string(),
     }
 }
 

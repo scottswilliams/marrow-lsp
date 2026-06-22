@@ -199,6 +199,165 @@ pub fn explode()
     (dir, file)
 }
 
+fn namespace_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" }, "tests": ["tests"] }"#,
+    )
+    .unwrap();
+    let src = root.join("src/shelf");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("books.mw"),
+        "\
+module shelf::books
+
+;; Books stored in the public shelf.
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+;; Public reading status.
+pub enum Status
+    ;; Ready for use.
+    active
+    ;; Historical status.
+    category archived
+        ;; Out of print.
+        retired
+
+;; Resolves the display title for a book.
+pub fn titleOf(
+    ;; Book identity to resolve.
+    id: Id(^books),
+    ;; Title to use when the book is missing.
+    fallback: string,
+): string
+    return fallback
+
+pub fn shout()
+    print(\"loud\")
+
+fn privateTitle(): string
+    return \"hidden\"
+",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("app.mw"),
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): int
+    return 1
+",
+    )
+    .unwrap();
+    let file = src.join("app.mw");
+    (dir, file)
+}
+
+fn namespace_project_with_local_alias_collision() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" }, "tests": ["tests"] }"#,
+    )
+    .unwrap();
+    let src = root.join("src/shelf");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("books.mw"),
+        "\
+module shelf::books
+
+resource Book
+    required title: string
+
+pub enum Status
+    active
+
+pub fn titleOf(): string
+    return \"title\"
+",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("app.mw"),
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): int
+    const books = 5
+    return books
+",
+    )
+    .unwrap();
+    let file = src.join("app.mw");
+    (dir, file)
+}
+
+fn namespace_project_with_evolve_alias_collision() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" }, "tests": ["tests"] }"#,
+    )
+    .unwrap();
+    let src = root.join("src/shelf");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("books.mw"),
+        "\
+module shelf::books
+
+resource Book
+    required title: string
+
+pub enum Status
+    active
+
+pub fn titleOf(): string
+    return \"title\"
+",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("app.mw"),
+        "\
+module shelf::app
+
+use shelf::books
+
+resource Draft
+    required source: string
+    title: string
+
+store ^drafts(id: int): Draft
+
+evolve
+    transform Draft.title
+        const books = old.source
+        return books
+
+pub fn run(): int
+    return 1
+",
+    )
+    .unwrap();
+    let file = src.join("app.mw");
+    (dir, file)
+}
+
 fn position_in_file(file: &Path, needle: &str) -> Position {
     let source = std::fs::read_to_string(file).unwrap();
     let offset = source
@@ -679,6 +838,159 @@ fn complete_in_a_function_body_lists_locals_and_keywords() {
         "development helper",
         &["canonical completion-context facts"],
     );
+}
+
+#[test]
+fn namespace_complete_for_imported_module_returns_marrow_fact_shape() {
+    let (_dir, file) = namespace_project();
+    let result = namespace_complete(&file, &["books".to_string()]);
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], "module");
+    assert_production_contract(&result, "source namespace completion fact");
+    assert_eq!(
+        result["contract"]["basis"],
+        "Marrow source namespace completion facts"
+    );
+    assert_eq!(result["module"], "shelf::books");
+
+    let resources = result["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 1, "{result}");
+    assert_eq!(resources[0]["name"], "Book");
+    assert_eq!(
+        resources[0]["docs"],
+        json!(["Books stored in the public shelf."])
+    );
+
+    let enums = result["enums"].as_array().unwrap();
+    assert_eq!(enums.len(), 1, "{result}");
+    assert_eq!(enums[0]["name"], "Status");
+    assert_eq!(enums[0]["docs"], json!(["Public reading status."]));
+
+    let functions = result["functions"].as_array().unwrap();
+    let names: Vec<&str> = functions
+        .iter()
+        .map(|function| function["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["titleOf", "shout"]);
+    let title = functions
+        .iter()
+        .find(|function| function["name"] == "titleOf")
+        .unwrap();
+    assert_eq!(title["docs"], json!([]));
+    assert_eq!(title["return_type"], "string");
+    assert_eq!(title["params"][0]["name"], "id");
+    assert_eq!(title["params"][0]["type"], "Id(^books)");
+    assert_eq!(title["params"][0]["docs"], json!([]));
+    assert_eq!(title["params"][1]["name"], "fallback");
+    assert_eq!(title["params"][1]["type"], "string");
+    assert_eq!(title["params"][1]["docs"], json!([]));
+}
+
+#[test]
+fn namespace_complete_for_enum_returns_member_statuses_and_docs() {
+    let (_dir, file) = namespace_project();
+    let result = namespace_complete(&file, &["books".to_string(), "Status".to_string()]);
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], "enum");
+    assert_production_contract(&result, "source namespace completion fact");
+    assert_eq!(result["enum_name"], "Status");
+
+    let members = result["members"].as_array().unwrap();
+    let member = |name: &str| {
+        members
+            .iter()
+            .find(|member| member["name"] == name)
+            .unwrap_or_else(|| panic!("missing enum member {name}: {result}"))
+    };
+    assert_eq!(member("active")["status"], "selectable");
+    assert_eq!(member("active")["docs"], json!(["Ready for use."]));
+    assert_eq!(member("archived")["status"], "category");
+    assert_eq!(member("archived")["docs"], json!(["Historical status."]));
+    assert_eq!(member("retired")["status"], "selectable");
+    assert_eq!(member("retired")["docs"], json!(["Out of print."]));
+}
+
+#[test]
+fn namespace_complete_for_unknown_qualifier_returns_empty_ready_result() {
+    let (_dir, file) = namespace_project();
+    let result = namespace_complete(&file, &["books".to_string(), "Missing".to_string()]);
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], Json::Null);
+    assert_eq!(result["resources"], json!([]));
+    assert_eq!(result["enums"], json!([]));
+    assert_eq!(result["functions"], json!([]));
+    assert_eq!(result["members"], json!([]));
+    assert_production_contract(&result, "source namespace completion fact");
+}
+
+#[test]
+fn namespace_complete_for_import_alias_shadowed_by_local_binding_returns_empty_ready_result() {
+    let (_dir, file) = namespace_project_with_local_alias_collision();
+    let result = namespace_complete(&file, &["books".to_string()]);
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], Json::Null);
+    assert_eq!(result["resources"], json!([]));
+    assert_eq!(result["enums"], json!([]));
+    assert_eq!(result["functions"], json!([]));
+    assert_eq!(result["members"], json!([]));
+    assert_production_contract(&result, "source namespace completion fact");
+
+    let result = namespace_complete(&file, &["books".to_string(), "Status".to_string()]);
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], Json::Null);
+    assert_eq!(result["resources"], json!([]));
+    assert_eq!(result["enums"], json!([]));
+    assert_eq!(result["functions"], json!([]));
+    assert_eq!(result["members"], json!([]));
+    assert_production_contract(&result, "source namespace completion fact");
+
+    let result = namespace_complete(
+        &file,
+        &[
+            "shelf".to_string(),
+            "books".to_string(),
+            "Status".to_string(),
+        ],
+    );
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], "enum");
+    assert_eq!(result["enum_name"], "Status");
+    assert_production_contract(&result, "source namespace completion fact");
+}
+
+#[test]
+fn namespace_complete_for_import_alias_shadowed_by_evolve_body_returns_empty_ready_result() {
+    let (_dir, file) = namespace_project_with_evolve_alias_collision();
+    let result = namespace_complete(&file, &["books".to_string()]);
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], Json::Null);
+    assert_eq!(result["resources"], json!([]));
+    assert_eq!(result["enums"], json!([]));
+    assert_eq!(result["functions"], json!([]));
+    assert_eq!(result["members"], json!([]));
+    assert_production_contract(&result, "source namespace completion fact");
+
+    let result = namespace_complete(&file, &["books".to_string(), "Status".to_string()]);
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], Json::Null);
+    assert_eq!(result["resources"], json!([]));
+    assert_eq!(result["enums"], json!([]));
+    assert_eq!(result["functions"], json!([]));
+    assert_eq!(result["members"], json!([]));
+    assert_production_contract(&result, "source namespace completion fact");
+
+    let result = namespace_complete(
+        &file,
+        &[
+            "shelf".to_string(),
+            "books".to_string(),
+            "Status".to_string(),
+        ],
+    );
+    assert_eq!(result["profile_version"], "source.namespace.completion.v1");
+    assert_eq!(result["kind"], "enum");
+    assert_eq!(result["enum_name"], "Status");
+    assert_production_contract(&result, "source namespace completion fact");
 }
 
 #[test]
