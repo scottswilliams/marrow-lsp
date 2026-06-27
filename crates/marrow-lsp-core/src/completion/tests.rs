@@ -56,6 +56,10 @@ enum Secret
 pub fn titleOf(id: Id(^books)): string
     return ^books(id).title
 
+;; Keeps a lifecycle state.
+pub fn chooseStatus(label: string, state: Status): Status
+    return state
+
 fn privateTitle(): string
     return \"hidden\"
 
@@ -74,6 +78,7 @@ use shelf::books
 ;; Draft resource docs.
 resource Draft
     required title: string
+    required state: books::Status
 
 enum LocalSecret
     draft
@@ -792,6 +797,16 @@ fn expected_enum_value_completion_consumes_marrow_completion_fact_items() {
             "module shelf::app\n\nuse shelf::books\n\npub fn f(): Status\n    if true\n        return a|\n    return Status::active\n",
             "Status",
         ),
+        (
+            "function enum argument",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const state = books::chooseStatus(\"current\", a|)\n",
+            "Status",
+        ),
+        (
+            "resource constructor enum field",
+            "module shelf::app\n\nuse shelf::books\n\nresource Draft\n    required title: string\n    required state: books::Status\n\npub fn f()\n    const draft = Draft(title: \"draft\", state: a|)\n",
+            "Status",
+        ),
     ] {
         let items = complete_items(&program, &file, source);
         let active = item_named(&items, &format!("{prefix}::active"));
@@ -830,6 +845,34 @@ fn expected_enum_value_completion_consumes_marrow_completion_fact_items() {
             "{label}: expected enum completion should remain additive with bare completions"
         );
     }
+
+    let first_arg_items = complete_items(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const state = books::chooseStatus(a|, Status::active)\n",
+    );
+    let first_arg_labels = first_arg_items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !first_arg_labels.contains(&"Status::active"),
+        "string arguments must not receive enum value completions: {first_arg_labels:?}"
+    );
+
+    let constructor_field_name_items = complete_items(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const draft = Draft(st|)\n",
+    );
+    let constructor_field_name_labels = constructor_field_name_items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !constructor_field_name_labels.contains(&"Status::active"),
+        "constructor field-name positions must not receive enum value completions: {constructor_field_name_labels:?}"
+    );
 }
 
 #[test]
@@ -910,7 +953,10 @@ fn used_module_namespace_lists_schema_members_from_marrow_fact() {
         "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x = books::|\n",
     );
     let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-    assert_eq!(labels, ["Book", "Pair", "Status", "titleOf"]);
+    assert_eq!(
+        labels,
+        ["Book", "Pair", "Status", "titleOf", "chooseStatus"]
+    );
 
     let book = item_named(&items, "Book");
     assert_eq!(book.kind, Some(CompletionItemKind::STRUCT));
@@ -942,7 +988,10 @@ pub fn f()
 ",
     );
     let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-    assert_eq!(labels, ["Book", "Pair", "Status", "titleOf"]);
+    assert_eq!(
+        labels,
+        ["Book", "Pair", "Status", "titleOf", "chooseStatus"]
+    );
 }
 
 #[test]

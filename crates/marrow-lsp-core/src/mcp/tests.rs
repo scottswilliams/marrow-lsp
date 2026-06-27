@@ -238,6 +238,10 @@ pub fn titleOf(
 ): string
     return fallback
 
+;; Keeps a lifecycle state.
+pub fn chooseStatus(label: string, state: Status): Status
+    return state
+
 pub fn shout()
     print(\"loud\")
 
@@ -901,8 +905,7 @@ fn complete_in_a_function_body_lists_locals_and_keywords() {
 #[test]
 fn complete_expected_enum_values_uses_marrow_completion_fact_items() {
     let (_dir, file) = namespace_project();
-    std::fs::write(
-        &file,
+    for source in [
         "\
 module shelf::app
 
@@ -911,37 +914,58 @@ use shelf::books
 pub fn run()
     const state: Status = candidate
 ",
-    )
-    .unwrap();
-    let position = position_in_file(&file, "candidate");
-    let result = complete(&file, position.line, position.character);
-    let items = result["items"].as_array().unwrap();
-    assert!(
-        items.iter().any(|item| {
-            item["label"] == "Status::active"
-                && item["kind"] == "enum-member"
-                && item["detail"] == "Status"
-        }),
-        "expected enum value completion should include the selectable member, got {result}"
-    );
-    assert!(
-        items.iter().any(|item| {
-            item["label"] == "Status::archived::retired"
-                && item["kind"] == "enum-member"
-                && item["detail"] == "Status"
-        }),
-        "expected enum value completion should include nested selectable leaves, got {result}"
-    );
-    assert!(
-        items.iter().all(|item| item["label"] != "Status::archived"),
-        "expected enum value completion must not offer the category member, got {result}"
-    );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "development helper",
-        COMPLETION_MISSING_FACTS,
-    );
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run()
+    const state = books::chooseStatus(\"current\", candidate)
+",
+        "\
+module shelf::app
+
+use shelf::books
+
+resource Draft
+    required title: string
+    required state: books::Status
+
+pub fn run()
+    const draft = Draft(title: \"draft\", state: candidate)
+",
+    ] {
+        std::fs::write(&file, source).unwrap();
+        let position = position_in_file(&file, "candidate");
+        let result = complete(&file, position.line, position.character);
+        let items = result["items"].as_array().unwrap();
+        assert!(
+            items.iter().any(|item| {
+                item["label"] == "Status::active"
+                    && item["kind"] == "enum-member"
+                    && item["detail"] == "Status"
+            }),
+            "expected enum value completion should include the selectable member, got {result}"
+        );
+        assert!(
+            items.iter().any(|item| {
+                item["label"] == "Status::archived::retired"
+                    && item["kind"] == "enum-member"
+                    && item["detail"] == "Status"
+            }),
+            "expected enum value completion should include nested selectable leaves, got {result}"
+        );
+        assert!(
+            items.iter().all(|item| item["label"] != "Status::archived"),
+            "expected enum value completion must not offer the category member, got {result}"
+        );
+        assert_contract(
+            &result,
+            "presentation-only",
+            "development helper",
+            COMPLETION_MISSING_FACTS,
+        );
+    }
 }
 
 #[test]
@@ -1022,7 +1046,7 @@ fn namespace_complete_for_imported_module_returns_marrow_fact_shape() {
         .iter()
         .map(|function| function["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["titleOf", "shout"]);
+    assert_eq!(names, ["titleOf", "chooseStatus", "shout"]);
     let title = functions
         .iter()
         .find(|function| function["name"] == "titleOf")
