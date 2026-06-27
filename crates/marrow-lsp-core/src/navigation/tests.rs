@@ -107,22 +107,50 @@ fn saved_root_navigation_suppression_consumes_marrow_cursor_fact() {
 }
 
 #[test]
-fn enum_type_navigation_filter_consumes_marrow_type_annotation_cursor_fact() {
+fn catalog_navigation_does_not_keep_lsp_type_annotation_classifier() {
     let crate_root = include_str!("../lib.rs");
     let catalog_uses_source = include_str!("catalog_uses.rs");
 
-    assert!(
-        catalog_uses_source.contains("source_type_annotation_cursor_fact_at"),
-        "enum type-annotation filtering must consume Marrow's source type-annotation cursor fact"
-    );
     assert!(
         !catalog_uses_source.contains("crate::type_context"),
         "navigation must not call an LSP-local type-annotation syntax classifier"
     );
     assert!(
+        !catalog_uses_source.contains("source_type_annotation_cursor_fact_at"),
+        "catalog navigation type-annotation filtering must be owned by Marrow facts"
+    );
+    assert!(
         !crate_root.contains("mod type_context"),
         "marrow-lsp-core must not keep the LSP-local type-annotation syntax classifier module"
     );
+}
+
+#[test]
+fn catalog_navigation_consumes_marrow_navigation_facts() {
+    let catalog_uses_source = include_str!("catalog_uses.rs");
+
+    assert!(
+        catalog_uses_source.contains("source_catalog_definition_fact_at"),
+        "catalog definitions must consume Marrow source catalog navigation facts"
+    );
+    assert!(
+        catalog_uses_source.contains("source_catalog_reference_facts_at"),
+        "catalog references must consume Marrow source catalog navigation facts"
+    );
+    for forbidden in [
+        "CatalogEntryKind",
+        "UseSiteKind",
+        ".use_sites()",
+        ".catalog_declarations()",
+        "source_type_annotation_cursor_fact_at",
+        "supported_use_site",
+        "supported_declaration",
+    ] {
+        assert!(
+            !catalog_uses_source.contains(forbidden),
+            "catalog navigation must not decide catalog semantics in the LSP: {forbidden}"
+        );
+    }
 }
 
 #[test]
