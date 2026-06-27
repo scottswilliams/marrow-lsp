@@ -126,6 +126,36 @@ fn enum_type_navigation_filter_consumes_marrow_type_annotation_cursor_fact() {
 }
 
 #[test]
+fn rename_navigation_consumes_marrow_source_rename_facts() {
+    let symbols_source = include_str!("symbols.rs");
+    let source_names_source = include_str!("source_names.rs");
+
+    assert!(
+        symbols_source.contains("source_only_rename_occurrence_at"),
+        "prepare_rename must consume Marrow's source-only rename occurrence fact"
+    );
+    assert!(
+        symbols_source.contains("source_only_rename_action_at"),
+        "rename edits must consume Marrow's source-only rename action fact"
+    );
+    for forbidden in [
+        "is_valid_rename",
+        "name_in_span_at",
+        "lex_source",
+        "TokenKind",
+    ] {
+        assert!(
+            !symbols_source.contains(forbidden),
+            "rename navigation must not decide identifier syntax or cursor windows locally: {forbidden}"
+        );
+        assert!(
+            !source_names_source.contains(forbidden),
+            "navigation source-name helpers must not keep local rename syntax/window classifiers: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn definition_of_a_local_use_jumps_to_its_binding() {
     let source = "module a\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
     let (snapshot, file, indices) = analyze(source);

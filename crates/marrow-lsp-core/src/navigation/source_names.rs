@@ -1,5 +1,5 @@
 use marrow_check::{SymbolKind, SymbolRef};
-use marrow_syntax::{SourceSpan, TokenKind, lex_source};
+use marrow_syntax::SourceSpan;
 
 use super::indices::FileIndex;
 
@@ -92,26 +92,6 @@ fn last_identifier_in(text: &str, start: usize, end: usize) -> Option<String> {
     best.map(str::to_string)
 }
 
-/// The byte range of the occurrence of `name` near `offset`.
-pub(super) fn name_in_span_at(text: &str, offset: usize, name: &str) -> Option<(usize, usize)> {
-    let window_start = offset.saturating_sub(name.len());
-    let window_end = (offset + name.len()).min(text.len());
-    let slice = text.get(window_start..window_end)?;
-    let mut search_from = 0;
-    while let Some(found) = slice[search_from..].find(name) {
-        let start = window_start + search_from + found;
-        let end = start + name.len();
-        if start <= offset && offset <= end && is_whole_word(text, start, end) {
-            return Some((start, end));
-        }
-        search_from += found + 1;
-        if search_from >= slice.len() {
-            break;
-        }
-    }
-    None
-}
-
 /// The byte range of the first whole-word occurrence of `name` in `[start, end)`.
 pub(super) fn name_in_span(
     text: &str,
@@ -164,24 +144,4 @@ fn is_keyword(word: &str) -> bool {
         word,
         "pub" | "fn" | "const" | "var" | "resource" | "use" | "module" | "required"
     )
-}
-
-pub(super) fn is_valid_rename(name: &str) -> bool {
-    let lexed = lex_source(name);
-    if !lexed.diagnostics.is_empty() {
-        return false;
-    }
-
-    let mut tokens = lexed
-        .tokens
-        .iter()
-        .filter(|token| token.kind != TokenKind::Eof);
-    let Some(token) = tokens.next() else {
-        return false;
-    };
-
-    tokens.next().is_none()
-        && token.kind == TokenKind::Identifier
-        && token.span.start_byte == 0
-        && token.span.end_byte == name.len()
 }

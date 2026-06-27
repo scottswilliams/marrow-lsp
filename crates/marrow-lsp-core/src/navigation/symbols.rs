@@ -4,12 +4,12 @@ use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
 use marrow_check::tooling::{
     source_module_path_definition_fact_at, source_saved_root_cursor_fact_at,
 };
-use marrow_check::{BindingIndex, RenameAction, RenameSafety, SymbolRef};
+use marrow_check::{BindingIndex, SourceRenameError, SymbolRef};
 
 use super::{
     catalog_uses,
     indices::FileIndex,
-    source_names::{is_valid_rename, name_in_span, name_in_span_at, symbol_name},
+    source_names::{name_in_span, symbol_name},
 };
 
 /// Why a rename could not be carried out, for the caller to turn into a JSON-RPC
@@ -93,12 +93,12 @@ pub fn prepare_rename(
     file: &Path,
     offset: usize,
 ) -> Option<Range> {
-    let definition = index.definition(file, offset)?;
-    source_only_rename_action(index, &definition, "rename").ok()?;
-    let name = symbol_name(&definition, indices)?;
-    let line_index = indices.index_for(file)?;
-    let (start, end) = name_in_span_at(line_index.text(), offset, &name)?;
-    Some(line_index.range(start, end))
+    let occurrence = index.source_only_rename_occurrence_at(file, offset).ok()?;
+    let line_index = indices.index_for(&occurrence.reference.file)?;
+    Some(line_index.range(
+        occurrence.reference.span.start_byte,
+        occurrence.reference.span.end_byte,
+    ))
 }
 
 /// A workspace edit renaming the symbol at `offset` in `file` to `new_name`.
@@ -109,13 +109,9 @@ pub fn rename(
     offset: usize,
     new_name: &str,
 ) -> Result<WorkspaceEdit, RenameError> {
-    if !is_valid_rename(new_name) {
-        return Err(RenameError::InvalidName);
-    }
-    let definition = index
-        .definition(file, offset)
-        .ok_or(RenameError::NoSymbol)?;
-    let action = source_only_rename_action(index, &definition, new_name)?;
+    let action = index
+        .source_only_rename_action_at(file, offset, new_name)
+        .map_err(RenameError::from)?;
 
     let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     for edit in action.edits {
@@ -138,21 +134,15 @@ pub fn rename(
     })
 }
 
-fn source_only_rename_action(
-    index: &BindingIndex,
-    definition: &SymbolRef,
-    new_name: &str,
-) -> Result<RenameAction, RenameError> {
-    if let RenameSafety::SavedDataBacked = index.rename_safety(definition) {
-        return Err(RenameError::SavedDataBacked);
+impl From<SourceRenameError> for RenameError {
+    fn from(error: SourceRenameError) -> Self {
+        match error {
+            SourceRenameError::NoSymbol => Self::NoSymbol,
+            SourceRenameError::NotRenameable => Self::NotRenameable,
+            SourceRenameError::InvalidName => Self::InvalidName,
+            SourceRenameError::SavedDataBacked => Self::SavedDataBacked,
+        }
     }
-    let action = index
-        .rename_action(definition, new_name)
-        .ok_or(RenameError::NotRenameable)?;
-    if action.evolve_rename.is_some() {
-        return Err(RenameError::SavedDataBacked);
-    }
-    Ok(action)
 }
 
 fn symbol_location(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<Location> {
