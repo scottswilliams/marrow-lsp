@@ -1,29 +1,9 @@
-//! The `.mw` spelling of Marrow types, shared by every feature that shows a type
-//! to a human.
-//!
-//! Hover, completion detail, resource summaries, and MCP answers must agree when
-//! they spell the same fact, so the renderers live here rather than copied per
-//! feature.
+//! LSP-local wrapper around Marrow's source-facing type spelling.
 
-use marrow_check::MarrowType;
+use marrow_check::{MarrowType, tooling::render_marrow_type};
 
-/// The canonical `.mw` spelling of a checker type. Mirrors `marrow_schema::Type`'s
-/// `Display` for the storable types and names the checker-only forms (`Error`, a
-/// same-module resource or enum, `unknown`) as they are written in source.
 pub(crate) fn render_type(ty: &MarrowType) -> String {
-    match ty {
-        MarrowType::Primitive(scalar) => scalar.name().to_string(),
-        MarrowType::Error => "Error".to_string(),
-        MarrowType::Resource(name) => name.clone(),
-        MarrowType::GroupEntry { resource, .. } => resource.clone(),
-        MarrowType::Identity(root) => format!("Id(^{root})"),
-        MarrowType::Enum { module, name } if module.is_empty() => name.clone(),
-        MarrowType::Enum { module, name } => format!("{module}::{name}"),
-        MarrowType::Sequence(element) => format!("sequence[{}]", render_type(element)),
-        MarrowType::LocalTree { value, .. } => format!("tree[{}]", render_type(value)),
-        MarrowType::Invalid => "unknown".to_string(),
-        MarrowType::Unknown => "unknown".to_string(),
-    }
+    render_marrow_type(ty)
 }
 
 #[cfg(test)]

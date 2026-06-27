@@ -213,7 +213,7 @@ fn after_caret_lists_durable_roots() {
 }
 
 #[test]
-fn root_completion_consumes_marrow_saved_root_fact() {
+fn root_completion_has_no_local_saved_root_model() {
     let source = include_str!("../completion.rs");
 
     assert!(
@@ -564,7 +564,7 @@ fn completion_has_no_local_intrinsic_callable_model() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "completion must consume marrow_check intrinsic callable facts instead of {forbidden}"
+            "completion must not keep a local intrinsic callable model through {forbidden}"
         );
     }
 }
@@ -575,7 +575,7 @@ fn completion_has_no_local_type_completion_candidate_model() {
     for forbidden in ["TYPE_NAMES", "fn resources(", "fn stores(", "fn enums("] {
         assert!(
             !source.contains(forbidden),
-            "completion must consume marrow_check type completion facts instead of {forbidden}"
+            "completion must not keep a local type completion model through {forbidden}"
         );
     }
 }
@@ -594,13 +594,13 @@ fn completion_has_no_local_std_namespace_completion_model() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "completion must consume Marrow std namespace completion facts instead of {forbidden}"
+            "completion must not keep a local std namespace completion model through {forbidden}"
         );
     }
 }
 
 #[test]
-fn completion_consumes_marrow_cursor_context_fact() {
+fn completion_has_no_local_cursor_recovery_model() {
     let source = include_str!("../completion.rs");
     for forbidden in [
         "TokenKind",
@@ -615,12 +615,44 @@ fn completion_consumes_marrow_cursor_context_fact() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "completion must consume Marrow cursor-context facts instead of owning token recovery through {forbidden}"
+            "completion must not own cursor recovery through {forbidden}"
         );
     }
     assert!(
-        source.contains("match source_completion_context(source, lexed, offset)"),
-        "completion must dispatch through Marrow's cursor-context API"
+        source.contains("source_completion_fact"),
+        "completion must request Marrow's aggregate completion fact"
+    );
+}
+
+#[test]
+fn completion_consumes_marrow_completion_item_fact() {
+    let source = include_str!("../completion.rs");
+    for forbidden in [
+        "const KEYWORDS",
+        "SourceSavedRootCompletionCandidate",
+        "SourceTypeCompletionCandidate",
+        "SourceNamespaceCompletionFact",
+        "DeclaredDataChild",
+        "source_saved_root_completion_fact",
+        "source_type_completion_fact",
+        "source_namespace_completion_fact",
+        "declared_source_receiver_data_children",
+        "intrinsic_completion_callables",
+        "scope_at",
+        "fn root_completions",
+        "fn saved_path_completions",
+        "fn namespace_completions",
+        "fn type_completions",
+        "fn bare_completions",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "completion must consume Marrow completion item facts instead of assembling candidates through {forbidden}"
+        );
+    }
+    assert!(
+        source.contains("source_completion_fact"),
+        "completion must request Marrow's completion item fact"
     );
 }
 

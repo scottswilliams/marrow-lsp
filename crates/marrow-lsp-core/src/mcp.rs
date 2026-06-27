@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 
 use marrow_check::{
     tooling::{
-        SourceEnumNamespaceCompletionFact, SourceModuleNamespaceCompletionFact,
-        SourceNamespaceCompletionFact, SourceNamespaceEnumMemberStatus,
-        SourceNamespaceFunctionCompletion, source_namespace_completion_file_fact,
+        SourceCompletionItemKind, SourceEnumNamespaceCompletionFact,
+        SourceModuleNamespaceCompletionFact, SourceNamespaceCompletionFact,
+        SourceNamespaceEnumMemberStatus, SourceNamespaceFunctionCompletion, source_completion_fact,
+        source_namespace_completion_file_fact,
     },
     type_at,
 };
@@ -45,7 +46,6 @@ use marrow_run::{
 };
 use serde_json::{Value as Json, json};
 
-use crate::completion::completion;
 use crate::data_explorer::{
     DataChildrenRequest, DataReadRequest, session_data_child_views_page, session_data_read,
 };
@@ -57,10 +57,10 @@ use crate::types::render_type;
 use crate::workspace::Workspace;
 
 pub const COMPLETION_MISSING_FACTS: &[&str] = &[
-    "typed production completion DTOs",
     "expected-type context facts",
     "active saved-path context facts",
     "remaining checker-owned completion candidate facts",
+    "production completion stability contract",
 ];
 pub const SAVED_DATA_MISSING_FACTS: &[&str] =
     &["integrity and repair facts", "serve/attach data boundaries"];
@@ -311,11 +311,9 @@ pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
     json!({ "type": ty.map(|ty| render_type(&ty)) })
 }
 
-/// `mw_complete`: the completion items at a position in `file`, via the core
-/// [`completion`] classifier — the same context-aware list the editor offers
-/// (in-scope names, resource fields, saved roots, `std::` ops, keywords). Each item
-/// is `{ label, kind, detail? }`. The file is checked so the snapshot's program
-/// backs schema- and scope-aware modes.
+/// `mw_complete`: the Marrow source completion items at a position in `file`.
+/// Each item is `{ label, kind, detail? }`. The file is checked so the
+/// snapshot's program backs schema- and scope-aware modes.
 pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     let contract = completion_contract();
     let (workspace, file) = match load_project(file, None) {
@@ -332,7 +330,7 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     let index = crate::positions::LineIndex::new(&source);
     let offset = index.offset(Position { line, character });
     let lexed = marrow_syntax::lex_source(&source);
-    let items: Vec<Json> = completion(
+    let items: Vec<Json> = source_completion_fact(
         &snapshot.program,
         &file,
         &source,
@@ -340,11 +338,12 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
         &lexed,
         offset,
     )
+    .items
     .into_iter()
     .map(|item| {
         json!({
             "label": item.label,
-            "kind": item.kind.map(completion_kind_name),
+            "kind": completion_kind_name(item.kind),
             "detail": item.detail,
         })
     })
@@ -1097,21 +1096,20 @@ fn merge(mut base: Json, extra: Json) -> Json {
     base
 }
 
-/// The lowercase name of a completion item kind, so the agent reads `variable`,
-/// `function`, `field`, … rather than an LSP enum number.
-fn completion_kind_name(kind: lsp_types::CompletionItemKind) -> &'static str {
-    use lsp_types::CompletionItemKind as K;
+/// The lowercase semantic item kind exposed by `mw_complete`.
+fn completion_kind_name(kind: SourceCompletionItemKind) -> &'static str {
     match kind {
-        K::VARIABLE => "variable",
-        K::FUNCTION => "function",
-        K::FIELD => "field",
-        K::METHOD => "method",
-        K::MODULE => "module",
-        K::STRUCT => "struct",
-        K::CLASS => "class",
-        K::CONSTANT => "constant",
-        K::KEYWORD => "keyword",
-        _ => "other",
+        SourceCompletionItemKind::Keyword => "keyword",
+        SourceCompletionItemKind::Local => "variable",
+        SourceCompletionItemKind::Function => "function",
+        SourceCompletionItemKind::Resource => "resource",
+        SourceCompletionItemKind::SavedRoot => "saved-root",
+        SourceCompletionItemKind::Field => "field",
+        SourceCompletionItemKind::Layer => "layer",
+        SourceCompletionItemKind::Enum => "enum",
+        SourceCompletionItemKind::EnumMember => "enum-member",
+        SourceCompletionItemKind::Module => "module",
+        SourceCompletionItemKind::StoreIdentity => "store-identity",
     }
 }
 
