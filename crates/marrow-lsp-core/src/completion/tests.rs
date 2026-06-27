@@ -45,8 +45,9 @@ store ^pairs(left: int, right: int): Pair
 pub enum Status
     ;; Ready for use.
     active
-    ;; No longer active.
-    archived
+    category archived
+        ;; No longer active.
+        retired
 
 enum Secret
     hidden
@@ -738,7 +739,7 @@ fn used_module_qualified_enum_namespace_lists_members_from_marrow_fact() {
         "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const x = books::Status::|\n",
     );
     let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-    assert_eq!(labels, ["active", "archived"]);
+    assert_eq!(labels, ["active", "archived", "retired"]);
     let active = item_named(&items, "active");
     assert_eq!(active.kind, Some(CompletionItemKind::ENUM_MEMBER));
     assert_eq!(active.detail.as_deref(), Some("Status"));
@@ -754,11 +755,81 @@ fn fully_qualified_enum_namespace_lists_members_from_marrow_fact() {
         "module shelf::app\n\npub fn f()\n    const x = shelf::books::Status::|\n",
     );
     let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-    assert_eq!(labels, ["active", "archived"]);
-    let archived = item_named(&items, "archived");
-    assert_eq!(archived.kind, Some(CompletionItemKind::ENUM_MEMBER));
-    assert_eq!(archived.detail.as_deref(), Some("Status"));
-    assert_eq!(documentation_value(archived), "No longer active.");
+    assert_eq!(labels, ["active", "archived", "retired"]);
+    let retired = item_named(&items, "retired");
+    assert_eq!(retired.kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(retired.detail.as_deref(), Some("Status"));
+    assert_eq!(documentation_value(retired), "No longer active.");
+}
+
+#[test]
+fn expected_enum_value_completion_consumes_marrow_completion_fact_items() {
+    let (program, file) = project();
+
+    for (label, source, prefix) in [
+        (
+            "annotated const initializer",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const state: Status = a|\n",
+            "Status",
+        ),
+        (
+            "annotated var initializer",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    var state: Status = a|\n",
+            "Status",
+        ),
+        (
+            "qualified annotated const initializer",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const state: books::Status = a|\n",
+            "books::Status",
+        ),
+        (
+            "enum return expression",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f(): Status\n    return a|\n",
+            "Status",
+        ),
+        (
+            "nested enum return expression",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f(): Status\n    if true\n        return a|\n    return Status::active\n",
+            "Status",
+        ),
+    ] {
+        let items = complete_items(&program, &file, source);
+        let active = item_named(&items, &format!("{prefix}::active"));
+        assert_eq!(
+            active.kind,
+            Some(CompletionItemKind::ENUM_MEMBER),
+            "{label}"
+        );
+        assert_eq!(active.detail.as_deref(), Some("Status"), "{label}");
+        assert_eq!(documentation_value(active), "Ready for use.", "{label}");
+
+        let retired = item_named(&items, &format!("{prefix}::archived::retired"));
+        assert_eq!(
+            retired.kind,
+            Some(CompletionItemKind::ENUM_MEMBER),
+            "{label}"
+        );
+        assert_eq!(retired.detail.as_deref(), Some("Status"), "{label}");
+        assert_eq!(documentation_value(retired), "No longer active.", "{label}");
+
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        let category_label = format!("{prefix}::archived");
+        assert!(
+            !labels.contains(&category_label.as_str()),
+            "{label}: expected enum completion must not offer category members: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|label| label.ends_with("hidden")),
+            "{label}: expected enum completion must not leak another enum's members: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"return"),
+            "{label}: expected enum completion should remain additive with bare completions"
+        );
+    }
 }
 
 #[test]

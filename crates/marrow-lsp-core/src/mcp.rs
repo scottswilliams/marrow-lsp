@@ -57,7 +57,7 @@ use crate::types::render_type;
 use crate::workspace::Workspace;
 
 pub const COMPLETION_MISSING_FACTS: &[&str] = &[
-    "expected-type context facts",
+    "expected-type contexts outside annotated local const/var enum initializers and enum return expressions",
     "active saved-path context facts",
     "remaining checker-owned completion candidate facts",
     "production completion stability contract",
