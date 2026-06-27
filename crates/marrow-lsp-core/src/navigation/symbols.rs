@@ -1,13 +1,14 @@
 use std::{collections::HashMap, path::Path};
 
 use lsp_types::{Location, Range, TextEdit, Url, WorkspaceEdit};
-use marrow_check::tooling::source_module_path_definition_fact_at;
+use marrow_check::tooling::{
+    source_module_path_definition_fact_at, source_saved_root_cursor_fact_at,
+};
 use marrow_check::{BindingIndex, RenameAction, RenameSafety, SymbolRef};
 
 use super::{
     catalog_uses,
     indices::FileIndex,
-    saved_roots,
     source_names::{is_valid_rename, name_in_span, name_in_span_at, symbol_name},
 };
 
@@ -52,7 +53,7 @@ pub fn definition(
     if let Some(location) = catalog_uses::definition(snapshot, indices, file, offset) {
         return Some(location);
     }
-    if saved_roots::root_syntax_at(snapshot, file, offset) {
+    if source_saved_root_cursor_fact_at(snapshot, file, offset).is_some() {
         return None;
     }
     if let Some(symbol) = index.definition(file, offset) {

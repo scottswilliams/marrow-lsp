@@ -9,7 +9,6 @@
 
 mod catalog_uses;
 mod indices;
-mod saved_roots;
 mod source_names;
 mod symbols;
 

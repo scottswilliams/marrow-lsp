@@ -82,6 +82,31 @@ fn range_for(source: &str, start: usize, end: usize) -> Range {
 }
 
 #[test]
+fn saved_root_navigation_suppression_consumes_marrow_cursor_fact() {
+    let navigation_source = include_str!("../navigation.rs");
+    let symbols_source = include_str!("symbols.rs");
+
+    assert!(
+        symbols_source.contains("source_saved_root_cursor_fact_at"),
+        "saved-root fallback suppression must consume Marrow's cursor fact"
+    );
+    assert!(
+        !symbols_source.contains("root_syntax_at"),
+        "navigation must not call an LSP-local saved-root syntax classifier"
+    );
+    assert!(
+        !navigation_source.contains("mod saved_roots"),
+        "navigation must not keep the LSP-local saved-root syntax classifier module"
+    );
+    for forbidden in ["lex_source", "TokenKind"] {
+        assert!(
+            !symbols_source.contains(forbidden),
+            "saved-root fallback suppression must not inspect Marrow tokens in the LSP"
+        );
+    }
+}
+
+#[test]
 fn definition_of_a_local_use_jumps_to_its_binding() {
     let source = "module a\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
     let (snapshot, file, indices) = analyze(source);
