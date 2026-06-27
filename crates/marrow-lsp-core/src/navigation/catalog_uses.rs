@@ -7,7 +7,7 @@ use marrow_check::{
 };
 use marrow_syntax::SourceSpan;
 
-use super::{indices::FileIndex, source_names::span_covers};
+use super::indices::FileIndex;
 
 pub(super) fn definition(
     snapshot: &AnalysisSnapshot,
@@ -148,6 +148,10 @@ fn location(file: &Path, span: SourceSpan, indices: &impl FileIndex) -> Option<L
 
 fn span_len(span: SourceSpan) -> usize {
     span.end_byte.saturating_sub(span.start_byte)
+}
+
+fn span_covers(span: SourceSpan, offset: usize) -> bool {
+    span.start_byte <= offset && offset <= span.end_byte
 }
 
 fn push_unique_location(locations: &mut Vec<Location>, location: Location) {

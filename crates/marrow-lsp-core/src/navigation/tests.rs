@@ -127,8 +127,8 @@ fn enum_type_navigation_filter_consumes_marrow_type_annotation_cursor_fact() {
 
 #[test]
 fn rename_navigation_consumes_marrow_source_rename_facts() {
+    let navigation_source = include_str!("../navigation.rs");
     let symbols_source = include_str!("symbols.rs");
-    let source_names_source = include_str!("source_names.rs");
 
     assert!(
         symbols_source.contains("source_only_rename_occurrence_at"),
@@ -148,11 +148,69 @@ fn rename_navigation_consumes_marrow_source_rename_facts() {
             !symbols_source.contains(forbidden),
             "rename navigation must not decide identifier syntax or cursor windows locally: {forbidden}"
         );
-        assert!(
-            !source_names_source.contains(forbidden),
-            "navigation source-name helpers must not keep local rename syntax/window classifiers: {forbidden}"
-        );
     }
+    assert!(
+        !navigation_source.contains("mod source_names"),
+        "navigation must not keep an LSP-local source-name classifier module"
+    );
+}
+
+#[test]
+fn symbol_locations_match_marrow_binding_spans() {
+    let source = "\
+module a
+
+fn add(count: int): int
+    return count
+
+fn call(): int
+    const local: int = add(1)
+    return local
+";
+    let (snapshot, file, indices) = analyze(source);
+    let index = build_binding_index(&snapshot);
+
+    let function_use = offset_of(source, "add(1)") + 1;
+    let function_definition = index
+        .definition(&file, function_use)
+        .expect("function use resolves through Marrow binding facts");
+    let location = definition(&snapshot, &index, &indices, &file, function_use)
+        .expect("LSP definition exists for function use");
+    let line_index = indices.index_for(&function_definition.file).unwrap();
+    assert_eq!(
+        location.range,
+        line_index.range(
+            function_definition.span.start_byte,
+            function_definition.span.end_byte,
+        ),
+        "definition location range should be the Marrow SymbolRef span"
+    );
+    assert_eq!(range_text(source, line_index, location.range), "add");
+
+    let local_use = offset_of(source, "return local") + "return ".len();
+    let local_definition = index
+        .definition(&file, local_use)
+        .expect("local use resolves through Marrow binding facts");
+    let expected: Vec<_> = index
+        .references(&local_definition)
+        .into_iter()
+        .map(|reference| {
+            let line_index = indices.index_for(&reference.file).unwrap();
+            (
+                reference.file,
+                line_index.range(reference.span.start_byte, reference.span.end_byte),
+            )
+        })
+        .collect();
+    let actual: Vec<_> = references(&snapshot, &index, &indices, &file, local_use, true)
+        .expect("LSP references exist for local use")
+        .into_iter()
+        .map(|location| (location.uri.to_file_path().unwrap(), location.range))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "reference locations should be the Marrow SymbolRef spans"
+    );
 }
 
 #[test]

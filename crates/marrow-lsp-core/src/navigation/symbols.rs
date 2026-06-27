@@ -6,11 +6,7 @@ use marrow_check::tooling::{
 };
 use marrow_check::{BindingIndex, SourceRenameError, SymbolRef};
 
-use super::{
-    catalog_uses,
-    indices::FileIndex,
-    source_names::{name_in_span, symbol_name},
-};
+use super::{catalog_uses, indices::FileIndex};
 
 /// Why a rename could not be carried out, for the caller to turn into a JSON-RPC
 /// error or a quiet refusal as its transport requires.
@@ -148,20 +144,7 @@ impl From<SourceRenameError> for RenameError {
 fn symbol_location(symbol: &SymbolRef, indices: &impl FileIndex) -> Option<Location> {
     let line_index = indices.index_for(&symbol.file)?;
     let url = Url::from_file_path(&symbol.file).ok()?;
-    let range = match symbol_name(symbol, indices) {
-        Some(name) => {
-            match name_in_span(
-                line_index.text(),
-                symbol.span.start_byte,
-                symbol.span.end_byte,
-                &name,
-            ) {
-                Some((start, end)) => line_index.range(start, end),
-                None => line_index.range(symbol.span.start_byte, symbol.span.end_byte),
-            }
-        }
-        None => line_index.range(symbol.span.start_byte, symbol.span.end_byte),
-    };
+    let range = line_index.range(symbol.span.start_byte, symbol.span.end_byte);
     Some(Location { uri: url, range })
 }
 

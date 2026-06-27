@@ -9,7 +9,6 @@
 
 mod catalog_uses;
 mod indices;
-mod source_names;
 mod symbols;
 
 pub use indices::{FileIndex, SnapshotIndices};
