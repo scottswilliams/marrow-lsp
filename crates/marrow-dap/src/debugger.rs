@@ -75,6 +75,7 @@ pub struct DataVar {
 pub struct DataVariablesSnapshot {
     pub entries: Vec<DataVar>,
     pub children_truncated: bool,
+    pub store_snapshot: tooling::DataSnapshotStamp,
 }
 
 /// Where the run stopped, sent to the protocol thread so it can raise a DAP
@@ -401,6 +402,7 @@ impl Debugger {
         Ok(DataVariablesSnapshot {
             entries,
             children_truncated,
+            store_snapshot: page.stamp,
         })
     }
 

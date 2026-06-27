@@ -6,7 +6,6 @@
 use serde::{Deserialize, Serialize};
 
 use marrow_check::tooling::ToolingError;
-use marrow_json::DataGenerationJson;
 pub use marrow_json::saved_data::{
     DataChildViewJson as DataChildViewDto, DataChildViewsPageJson as DataChildViewsResult,
     DataChildrenRequestJson as DataChildrenRequest, DataKeyJson as DataKeyDto,
@@ -17,6 +16,7 @@ pub use marrow_json::saved_data::{
     MemberFlavorJson as MemberFlavorDto, ScalarTypeJson as ScalarTypeDto,
     data_view_boundary_to_json,
 };
+pub use marrow_json::{DataGenerationJson, data_generation_stamp_to_json};
 
 use crate::store::SavedDataSession;
 

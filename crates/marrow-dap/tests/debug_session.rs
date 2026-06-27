@@ -468,6 +468,41 @@ fn assert_runtime_debug_value(value: &Json) {
     );
 }
 
+fn assert_runtime_store_snapshot(snapshot: &Json) {
+    let object = snapshot
+        .as_object()
+        .unwrap_or_else(|| panic!("store snapshot should be an object: {snapshot}"));
+    assert_eq!(
+        snapshot["profile_version"], "data.generation.v1",
+        "runtime data variables should carry Marrow data generation metadata: {snapshot}"
+    );
+    assert!(
+        object.contains_key("store_uid"),
+        "runtime data variables should carry the optional store UID field: {snapshot}"
+    );
+    assert!(
+        object.contains_key("catalog_digest"),
+        "runtime data variables should carry the optional catalog digest field: {snapshot}"
+    );
+    assert!(
+        snapshot["checked_source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "runtime data variables should carry the checked source digest: {snapshot}"
+    );
+    assert!(
+        snapshot["commit"]["commit_id"].is_u64(),
+        "stopped-frame data reads should identify the runtime store commit: {snapshot}"
+    );
+    assert!(
+        snapshot["commit"]["source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "runtime store commit should carry the committed source digest: {snapshot}"
+    );
+    assert!(object.contains_key("open_transaction"));
+}
+
 fn assert_evaluate_runtime_debug_value(response: &Json, result: &str, variables_reference: i64) {
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["body"]["result"], result, "{response}");
@@ -3268,6 +3303,7 @@ fn durable_data_scope_expands_frame_data_paths() {
 
     let roots = client.request("variables", json!({ "variablesReference": durable_ref }));
     let roots = client.response_for(roots);
+    assert_runtime_store_snapshot(&roots["body"]["marrowDebug"]["storeSnapshot"]);
     let books = roots["body"]["variables"]
         .as_array()
         .unwrap()

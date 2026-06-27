@@ -1099,6 +1099,8 @@ impl<W: Write> Session<W> {
         };
         let snapshot = snapshot?;
         let children_truncated = snapshot.children_truncated;
+        let store_snapshot =
+            marrow_lsp_core::data_explorer::data_generation_stamp_to_json(&snapshot.store_snapshot);
         let variables = snapshot
             .entries
             .into_iter()
@@ -1120,6 +1122,7 @@ impl<W: Write> Session<W> {
         let mut body = variables_body(variables);
         body["marrowDebug"] = json!({
             "childrenTruncated": children_truncated,
+            "storeSnapshot": store_snapshot,
         });
         Ok(body)
     }
