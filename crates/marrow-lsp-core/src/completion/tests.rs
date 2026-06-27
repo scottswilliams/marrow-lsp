@@ -807,6 +807,16 @@ fn expected_enum_value_completion_consumes_marrow_completion_fact_items() {
             "module shelf::app\n\nuse shelf::books\n\nresource Draft\n    required title: string\n    required state: books::Status\n\npub fn f()\n    const draft = Draft(title: \"draft\", state: a|)\n",
             "Status",
         ),
+        (
+            "local enum assignment",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    var state: Status = Status::active\n    state = a|\n",
+            "Status",
+        ),
+        (
+            "resource field enum assignment",
+            "module shelf::app\n\nuse shelf::books\n\nresource Draft\n    required title: string\n    required state: books::Status\n\npub fn f()\n    var draft: Draft\n    draft.state = a|\n",
+            "Status",
+        ),
     ] {
         let items = complete_items(&program, &file, source);
         let active = item_named(&items, &format!("{prefix}::active"));
@@ -860,6 +870,79 @@ fn expected_enum_value_completion_consumes_marrow_completion_fact_items() {
         "string arguments must not receive enum value completions: {first_arg_labels:?}"
     );
 
+    let assignment_first_arg_items = complete_items(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    var state: Status = Status::active\n    state = books::chooseStatus(a|, Status::active)\n",
+    );
+    let assignment_first_arg_labels = assignment_first_arg_items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !assignment_first_arg_labels.contains(&"Status::active"),
+        "outer assignment expected types must not leak into string call arguments: {assignment_first_arg_labels:?}"
+    );
+
+    for (label, source) in [
+        (
+            "empty string argument in annotated const initializer",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const state: Status = books::chooseStatus(|, Status::active)\n",
+        ),
+        (
+            "empty string argument in assignment value",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    var state: Status = Status::active\n    state = books::chooseStatus(|, Status::active)\n",
+        ),
+        (
+            "empty string argument in return value",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f(): Status\n    return books::chooseStatus(|, Status::active)\n",
+        ),
+    ] {
+        let items = complete_items(&program, &file, source);
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !labels.contains(&"Status::active"),
+            "{label}: outer expected enum values must not leak into empty string call arguments: {labels:?}"
+        );
+    }
+
+    for (label, source) in [
+        (
+            "empty annotated const initializer",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    const state: Status = |\n",
+        ),
+        (
+            "empty assignment value",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f()\n    var state: Status = Status::active\n    state = |\n",
+        ),
+        (
+            "empty return expression",
+            "module shelf::app\n\nuse shelf::books\n\npub fn f(): Status\n    return |\n",
+        ),
+        (
+            "empty resource constructor enum field",
+            "module shelf::app\n\nuse shelf::books\n\nresource Draft\n    required title: string\n    required state: books::Status\n\npub fn f()\n    const draft = Draft(state: |)\n",
+        ),
+    ] {
+        let items = complete_items(&program, &file, source);
+        assert_eq!(
+            item_named(&items, "Status::active").kind,
+            Some(CompletionItemKind::ENUM_MEMBER),
+            "{label}"
+        );
+        let labels = items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !labels.contains(&"Status::archived"),
+            "{label}: value positions must not offer category members: {labels:?}"
+        );
+    }
+
     let constructor_field_name_items = complete_items(
         &program,
         &file,
@@ -872,6 +955,58 @@ fn expected_enum_value_completion_consumes_marrow_completion_fact_items() {
     assert!(
         !constructor_field_name_labels.contains(&"Status::active"),
         "constructor field-name positions must not receive enum value completions: {constructor_field_name_labels:?}"
+    );
+}
+
+#[test]
+fn expected_enum_match_arm_completion_consumes_marrow_completion_fact_items() {
+    let (program, file) = project();
+
+    let items = complete_items(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f(state: Status)\n    match state\n        a|\n            return\n",
+    );
+    let active = item_named(&items, "active");
+    assert_eq!(active.kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(active.detail.as_deref(), Some("Status match arm"));
+    assert_eq!(documentation_value(active), "Ready for use.");
+
+    let archived = item_named(&items, "archived");
+    assert_eq!(archived.kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(archived.detail.as_deref(), Some("Status match arm"));
+
+    let retired = item_named(&items, "archived::retired");
+    assert_eq!(retired.kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(retired.detail.as_deref(), Some("Status match arm"));
+    assert_eq!(documentation_value(retired), "No longer active.");
+
+    let labels = items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !labels.contains(&"Status::active"),
+        "match arm completions are relative to the scrutinee enum: {labels:?}"
+    );
+
+    let empty_items = complete_items(
+        &program,
+        &file,
+        "module shelf::app\n\nuse shelf::books\n\npub fn f(state: Status)\n    match state\n        |\n",
+    );
+    assert_eq!(
+        item_named(&empty_items, "active").kind,
+        Some(CompletionItemKind::ENUM_MEMBER),
+        "empty match arm header should offer relative enum members"
+    );
+    let empty_labels = empty_items
+        .iter()
+        .map(|item| item.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !empty_labels.contains(&"Status::active"),
+        "empty match arm completions stay relative: {empty_labels:?}"
     );
 }
 

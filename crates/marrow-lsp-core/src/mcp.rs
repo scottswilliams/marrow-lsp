@@ -57,7 +57,6 @@ use crate::types::render_type;
 use crate::workspace::Workspace;
 
 pub const COMPLETION_MISSING_FACTS: &[&str] = &[
-    "remaining expected enum value contexts such as assignments and match arms",
     "remaining checker-owned completion candidate facts",
     "production completion stability contract",
 ];

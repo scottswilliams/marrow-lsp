@@ -370,6 +370,15 @@ fn position_in_file(file: &Path, needle: &str) -> Position {
     crate::positions::LineIndex::new(source).position(offset)
 }
 
+fn position_after_in_file(file: &Path, needle: &str) -> Position {
+    let source = std::fs::read_to_string(file).unwrap();
+    let offset = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("fixture source should contain {needle:?}"))
+        + needle.len();
+    crate::positions::LineIndex::new(source).position(offset)
+}
+
 fn commit_project_lock(root: &Path) -> CheckedProgram {
     let config = parse_config(&std::fs::read_to_string(root.join("marrow.json")).unwrap()).unwrap();
     let (report, proposed) = check_project(root, &config).unwrap();
@@ -934,6 +943,15 @@ resource Draft
 pub fn run()
     const draft = Draft(title: \"draft\", state: candidate)
 ",
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run()
+    var state: Status = Status::active
+    state = candidate
+",
     ] {
         std::fs::write(&file, source).unwrap();
         let position = position_in_file(&file, "candidate");
@@ -966,6 +984,246 @@ pub fn run()
             COMPLETION_MISSING_FACTS,
         );
     }
+
+    std::fs::write(
+        &file,
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run()
+    var state: Status = Status::active
+    state =
+",
+    )
+    .unwrap();
+    let position = position_after_in_file(&file, "    state =");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "Status::active"
+                && item["kind"] == "enum-member"
+                && item["detail"] == "Status"
+        }),
+        "empty assignment completion should include enum values, got {result}"
+    );
+    assert!(
+        items.iter().all(|item| item["label"] != "Status::archived"),
+        "empty assignment completion must not offer category members, got {result}"
+    );
+
+    std::fs::write(
+        &file,
+        "\
+module shelf::app
+
+use shelf::books
+
+resource Local
+    required state: books::Status
+
+pub fn run()
+    const draft = Local(state: )
+",
+    )
+    .unwrap();
+    let position = position_after_in_file(&file, "Local(state: ");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "Status::active"
+                && item["kind"] == "enum-member"
+                && item["detail"] == "Status"
+        }),
+        "empty resource constructor enum field should include enum values, got {result}"
+    );
+    assert!(
+        items.iter().all(|item| item["label"] != "Status::archived"),
+        "empty resource constructor enum field must not offer category members, got {result}"
+    );
+
+    std::fs::write(
+        &file,
+        "\
+module shelf::app
+
+use shelf::books
+
+resource Local
+    required state: books::Status
+
+resource Local
+    required title: string
+
+pub fn run()
+    const draft = Local(state: )
+",
+    )
+    .unwrap();
+    let position = position_after_in_file(&file, "Local(state: ");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().all(|item| item["label"] != "Status::active"),
+        "duplicate current-source resources must fail closed instead of offering enum completions, got {result}"
+    );
+
+    std::fs::write(
+        &file,
+        "\
+module shelf::app
+
+use shelf::books
+
+resource Local
+    required state: books::Status
+
+fn Local(value: string): string
+    return value
+
+pub fn run()
+    const draft = Local(state: )
+",
+    )
+    .unwrap();
+    let position = position_after_in_file(&file, "Local(state: ");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().all(|item| item["label"] != "Status::active"),
+        "current-source resource names colliding with another top-level declaration must fail closed, got {result}"
+    );
+
+    for (label, source, marker) in [
+        (
+            "annotated const initializer empty string argument",
+            "\
+module shelf::app
+
+use shelf::books
+
+pub fn run()
+    const state: Status = books::chooseStatus(, Status::active)
+",
+            "chooseStatus(",
+        ),
+        (
+            "assignment empty string argument",
+            "\
+module shelf::app
+
+use shelf::books
+
+pub fn run()
+    var state: Status = Status::active
+    state = books::chooseStatus(, Status::active)
+",
+            "chooseStatus(",
+        ),
+        (
+            "return empty string argument",
+            "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): Status
+    return books::chooseStatus(, Status::active)
+",
+            "chooseStatus(",
+        ),
+    ] {
+        std::fs::write(&file, source).unwrap();
+        let position = position_after_in_file(&file, marker);
+        let result = complete(&file, position.line, position.character);
+        let items = result["items"].as_array().unwrap();
+        assert!(
+            items.iter().all(|item| item["label"] != "Status::active"),
+            "{label}: outer expected enum values must not leak into empty string call arguments, got {result}"
+        );
+    }
+
+    std::fs::write(
+        &file,
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(state: Status)
+    match state
+        candidate
+            return
+",
+    )
+    .unwrap();
+    let position = position_in_file(&file, "candidate");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "active"
+                && item["kind"] == "enum-member"
+                && item["detail"] == "Status match arm"
+        }),
+        "match arm completion should include relative selectable members, got {result}"
+    );
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "archived"
+                && item["kind"] == "enum-member"
+                && item["detail"] == "Status match arm"
+        }),
+        "match arm completion should include category arms, got {result}"
+    );
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "archived::retired"
+                && item["kind"] == "enum-member"
+                && item["detail"] == "Status match arm"
+        }),
+        "match arm completion should include nested relative members, got {result}"
+    );
+    assert!(
+        items.iter().all(|item| item["label"] != "Status::active"),
+        "match arm completions must stay relative to the scrutinee enum, got {result}"
+    );
+    assert_contract(
+        &result,
+        "presentation-only",
+        "development helper",
+        COMPLETION_MISSING_FACTS,
+    );
+
+    let empty_match_arm_source = concat!(
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(state: Status)
+    match state
+",
+        "        ",
+        "\n",
+    );
+    std::fs::write(&file, empty_match_arm_source).unwrap();
+    let position = position_after_in_file(&file, "    match state\n        ");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items
+            .iter()
+            .any(|item| item["label"] == "active" && item["kind"] == "enum-member"),
+        "empty match arm completion should include relative selectable members, got {result}"
+    );
+    assert!(
+        items.iter().all(|item| item["label"] != "Status::active"),
+        "empty match arm completions must stay relative, got {result}"
+    );
 }
 
 #[test]

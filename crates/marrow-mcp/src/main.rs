@@ -840,7 +840,7 @@ mod tests {
                         COMPLETION_MISSING_FACTS,
                     ),
                 }),
-                "development helper (presentation-only: remaining expected enum value contexts such as assignments and match arms +2): 3 completions",
+                "development helper (presentation-only: remaining checker-owned completion candidate facts +1): 3 completions",
             ),
             (
                 "mw_saved_roots",
