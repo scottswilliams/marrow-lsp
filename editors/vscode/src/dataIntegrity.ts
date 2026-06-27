@@ -1,34 +1,18 @@
 import * as vscode from "vscode";
 import { LanguageClient } from "vscode-languageclient/node";
-
-const DATA_GENERATION_PROFILE_VERSION = "data.generation.v1";
+import {
+  dataViewBoundaryFromWire,
+  sameStoreSnapshot,
+  storeSnapshotFromWire,
+  type DataViewBoundary,
+  type SourceAnalysisCatalog,
+} from "./dataViewBoundary";
 
 // These types mirror the marrow-lsp custom request contract EXACTLY. They are
 // the wire shapes the server speaks; do not "improve" them or they will drift
 // from the server. The TypeScript side never interprets a path or a finding —
 // it only ferries what the core reports, which owns all store and schema
 // semantics.
-
-interface DataGeneration {
-  readonly profile_version: typeof DATA_GENERATION_PROFILE_VERSION;
-  readonly store_uid: string | null;
-  readonly catalog_digest: string | null;
-  readonly commit: DataGenerationCommit | null;
-  readonly open_transaction: DataGenerationTransaction | null;
-  readonly checked_source_digest: string;
-}
-
-interface DataGenerationCommit {
-  readonly commit_id: number;
-  readonly catalog_epoch: number;
-  readonly source_digest: string;
-  readonly layout_epoch: number;
-  readonly engine_profile_digest: string;
-}
-
-interface DataGenerationTransaction {
-  readonly depth: number;
-}
 
 interface IntegritySourceSpan {
   // Root-first store path the finding concerns, rendered by the core.
@@ -72,7 +56,7 @@ interface DataIntegrityResult {
   findings: Finding[];
   scanned: number;
   truncated: boolean;
-  store_snapshot: DataGeneration | null;
+  store_snapshot: unknown;
   data_view_boundary?: unknown;
 }
 
@@ -111,19 +95,43 @@ export class MarrowDataIntegrity {
       return;
     }
 
-    this.report(result);
+    const boundary = dataViewBoundaryFromWire(result.data_view_boundary);
+    if (boundary === undefined) {
+      this.showUnavailable();
+      return;
+    }
+    const storeSnapshot = storeSnapshotFromWire(result.store_snapshot);
+    if (
+      storeSnapshot === undefined ||
+      !sameStoreSnapshot(storeSnapshot, boundary.storeSnapshot)
+    ) {
+      this.showUnavailable();
+      return;
+    }
+
+    this.report(result, boundary);
   }
 
   private showUnavailable(): void {
+    this.clearReport();
     void vscode.window.showInformationMessage(
       "Advisory data-integrity check needs opt-in live data and a readable native dev-store " +
         "(enable marrow.liveData / ensure marrow.json points at a native store)",
     );
   }
 
-  private report(result: DataIntegrityResult): void {
+  private clearReport(): void {
+    if (this.channel === undefined) {
+      return;
+    }
+    this.channel.clear();
+    this.channel.appendLine("Data view unavailable");
+  }
+
+  private report(result: DataIntegrityResult, boundary: DataViewBoundary): void {
     const channel = this.getChannel();
     channel.clear();
+    channel.appendLine(formatBoundary(boundary));
 
     const truncatedNote = result.truncated
       ? " (truncated; scan limit reached)"
@@ -172,4 +180,31 @@ function formatFinding(finding: Finding): string {
       ? ""
       : ` Help: ${finding.help}`;
   return `[${finding.code}] ${finding.source_span.path}: ${finding.message}${help}`;
+}
+
+function formatBoundary(boundary: DataViewBoundary): string {
+  const analysis = boundary.sourceAnalysisGeneration;
+  return [
+    "Data view:",
+    `${boundary.compatibility.verdict} source ${analysis.sourceIdentity};`,
+    `checked ${analysis.checkedSourceDigest};`,
+    `accepted catalog ${formatCatalog(analysis.acceptedCatalog)};`,
+    `store ${formatStoreCommit(boundary)};`,
+    `watch targets ${boundary.watchTargets.length}`,
+  ].join(" ");
+}
+
+function formatCatalog(catalog: SourceAnalysisCatalog | null): string {
+  if (catalog === null) {
+    return "none";
+  }
+  return `${catalog.epoch} ${catalog.digest ?? "no digest"}`;
+}
+
+function formatStoreCommit(boundary: DataViewBoundary): string {
+  const commit = boundary.storeSnapshot.commit;
+  if (commit === null) {
+    return "no commit";
+  }
+  return `commit ${commit.commit_id}`;
 }
