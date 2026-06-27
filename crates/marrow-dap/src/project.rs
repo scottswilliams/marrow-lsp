@@ -187,7 +187,13 @@ fn prepare_descriptor(
 ) -> Result<(ProjectSession, EntryDescriptor), LaunchError> {
     let config_path = project_dir.join(CONFIG_FILE);
     if !config_path.is_file() {
-        return Err(LaunchError::NoProject(project_dir.to_path_buf()));
+        match marrow_check::load_config(project_dir) {
+            Err(ProjectIoError::ConfigMissing { .. }) => {
+                return Err(LaunchError::NoProject(project_dir.to_path_buf()));
+            }
+            Err(error) => return Err(from_project_io_error(error)),
+            Ok(_) => {}
+        }
     }
     guard_session_open_is_read_only(project_dir)?;
     let mut open = ProjectOpen::run().with_isolated_writes();
@@ -228,14 +234,13 @@ fn from_project_io_error(error: ProjectIoError) -> LaunchError {
         ProjectIoError::Io { path, error } => {
             LaunchError::Session(format!("{}: {error}", path.display()))
         }
-        ProjectIoError::DataDirCreate { path, error } => {
-            LaunchError::Session(format!("{}: {error}", path.display()))
-        }
+        error @ ProjectIoError::DataDirCreate { .. } => LaunchError::Config(error.message()),
         ProjectIoError::ConfigMissing { dir } => LaunchError::Config(format!(
             "no {CONFIG_FILE} in {}; run `marrow init {}` or open a directory containing {CONFIG_FILE}",
             dir.display(),
             dir.display()
         )),
+        error @ ProjectIoError::NotAProject { .. } => LaunchError::Config(error.message()),
         ProjectIoError::Config { message, .. } => LaunchError::Config(message),
         ProjectIoError::Catalog { message, .. } => LaunchError::Session(message),
         ProjectIoError::Check { report } => LaunchError::CheckErrors(check_errors(&report)),
@@ -495,18 +500,81 @@ pub fn main()
     }
 
     #[test]
-    fn data_dir_create_error_reports_the_store_directory() {
-        let error = from_project_io_error(ProjectIoError::DataDirCreate {
-            path: PathBuf::from("data"),
-            error: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
-        });
+    fn a_bare_file_project_path_is_not_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.mw");
+        std::fs::write(&path, "module demo\n").unwrap();
+        let project_error = ProjectIoError::NotAProject { path: path.clone() };
+        let expected = format!("invalid {CONFIG_FILE}: {}", project_error.message());
+
+        let error = expect_error(prepare(&path, None, &[]));
+
+        assert!(matches!(error, LaunchError::Config(_)), "{error}");
+        assert_eq!(error.code(), "dap.launchProject.invalid");
+        assert_eq!(error.status(), "invalid-project");
+        assert_eq!(error.blocked_on(), None);
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn a_bare_file_project_path_with_a_trailing_separator_is_not_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.mw");
+        std::fs::write(&path, "module demo\n").unwrap();
+        let project = PathBuf::from(format!("{}/", path.display()));
+        let project_error = ProjectIoError::NotAProject {
+            path: project.clone(),
+        };
+        let expected = format!("invalid {CONFIG_FILE}: {}", project_error.message());
+
+        let error = expect_error(prepare(&project, None, &[]));
+
+        assert!(matches!(error, LaunchError::Config(_)), "{error}");
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn a_project_path_under_a_file_component_is_not_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("demo.mw");
+        std::fs::write(&path, "module demo\n").unwrap();
+        let project = path.join("nested");
+        let project_error = ProjectIoError::NotAProject {
+            path: project.clone(),
+        };
+        let expected = format!("invalid {CONFIG_FILE}: {}", project_error.message());
+
+        let error = expect_error(prepare(&project, None, &[]));
+
+        assert!(matches!(error, LaunchError::Config(_)), "{error}");
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn an_unreadable_config_entry_is_not_reported_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(CONFIG_FILE)).unwrap();
+        let project_error = marrow_check::load_config(dir.path()).unwrap_err();
+        let expected = from_project_io_error(project_error).to_string();
+
+        let error = expect_error(prepare(dir.path(), None, &[]));
 
         assert!(matches!(error, LaunchError::Session(_)), "{error}");
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn data_dir_create_error_reports_the_store_directory() {
+        let project_error = ProjectIoError::DataDirCreate {
+            path: PathBuf::from("data"),
+            fault: marrow_check::DataDirFault::PermissionDenied,
+        };
+        let expected = format!("invalid {CONFIG_FILE}: {}", project_error.message());
+        let error = from_project_io_error(project_error);
+
+        assert!(matches!(error, LaunchError::Config(_)), "{error}");
         assert_eq!(error.code(), "dap.launchProject.invalid");
-        assert_eq!(
-            error.to_string(),
-            "could not open the debug session: data: denied"
-        );
+        assert_eq!(error.to_string(), expected);
     }
 
     #[test]
@@ -520,5 +588,18 @@ pub fn main()
         let message = error.to_string();
         assert!(message.contains("/projects/demo"), "{message}");
         assert!(message.contains("marrow init"), "{message}");
+    }
+
+    #[test]
+    fn not_a_project_error_names_the_bare_file() {
+        let project_error = ProjectIoError::NotAProject {
+            path: PathBuf::from("/projects/demo.mw"),
+        };
+        let expected = format!("invalid {CONFIG_FILE}: {}", project_error.message());
+        let error = from_project_io_error(project_error);
+
+        assert!(matches!(error, LaunchError::Config(_)), "{error}");
+        assert_eq!(error.code(), "dap.launchProject.invalid");
+        assert_eq!(error.to_string(), expected);
     }
 }
