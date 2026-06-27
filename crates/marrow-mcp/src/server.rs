@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use marrow_lsp_core::data_explorer::{
-    DataChildrenRequest, DataReadRequest, DataRequestValidationError,
-    validate_data_children_request, validate_data_read_request,
+    DataChildrenRequest, DataReadRequest, DataRequestValidationError, data_key_input_schema,
+    data_path_segment_input_schema, validate_data_children_request, validate_data_read_request,
 };
 use marrow_lsp_core::mcp::{
     self, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS, DATA_READ_MISSING_FACTS,
@@ -60,49 +60,6 @@ fn namespace_qualifier_schema() -> Json {
         "description": "One or more namespace/name segments such as [\"shelf\", \"books\"] or [\"books\"] for an imported module alias.",
         "items": { "type": "string", "minLength": 1 },
         "minItems": 1,
-    })
-}
-
-fn data_key_schema(description: &str) -> Json {
-    json!({
-        "description": description,
-        "oneOf": [
-            { "type": "object", "properties": { "kind": { "const": "int" }, "value": { "type": "integer" } }, "required": ["kind", "value"] },
-            { "type": "object", "properties": { "kind": { "const": "bool" }, "value": { "type": "boolean" } }, "required": ["kind", "value"] },
-            { "type": "object", "properties": { "kind": { "const": "string" }, "value": { "type": "string" } }, "required": ["kind", "value"] },
-            { "type": "object", "properties": { "kind": { "const": "date" }, "value": { "type": "integer" } }, "required": ["kind", "value"] },
-            { "type": "object", "properties": { "kind": { "const": "instant" }, "value": { "type": "string" } }, "required": ["kind", "value"] },
-            { "type": "object", "properties": { "kind": { "const": "duration" }, "value": { "type": "string" } }, "required": ["kind", "value"] },
-            { "type": "object", "properties": { "kind": { "const": "bytes" }, "value": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } } }, "required": ["kind", "value"] },
-        ],
-    })
-}
-
-fn data_path_segment_schema() -> Json {
-    let catalog_segment = |kind: &str, authority: &str| {
-        json!({
-            "type": "object",
-            "properties": {
-                "kind": { "const": kind },
-                authority: { "type": "string" },
-            },
-            "required": ["kind", authority],
-        })
-    };
-    json!({
-        "oneOf": [
-            catalog_segment("root", "store_catalog_id"),
-            catalog_segment("field", "member_catalog_id"),
-            catalog_segment("layer", "member_catalog_id"),
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "key" },
-                    "value": data_key_schema("Typed saved-data key segment."),
-                },
-                "required": ["kind", "value"],
-            },
-        ],
     })
 }
 
@@ -379,14 +336,14 @@ pub fn tools() -> Json {
                         "type": "array",
                         "description": "Catalog-bound typed saved-data path segments, for example [{\"kind\":\"root\",\"store_catalog_id\":\"cat_00000000000000000000000000000001\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}}].",
                         "minItems": 1,
-                        "items": data_path_segment_schema(),
+                        "items": data_path_segment_input_schema(),
                     },
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
                         "description": "Maximum first identity keys to return; the core clamps oversized requests.",
                     },
-                    "cursor": data_key_schema("Optional typed cursor returned by the previous page."),
+                    "cursor": data_key_input_schema("Optional typed cursor returned by the previous page."),
                 },
                 "required": ["file", "segments", "limit"],
             },
@@ -418,7 +375,7 @@ pub fn tools() -> Json {
                         "type": "array",
                         "description": "Catalog-bound typed saved-data path segments, for example [{\"kind\":\"root\",\"store_catalog_id\":\"cat_00000000000000000000000000000001\"},{\"kind\":\"key\",\"value\":{\"kind\":\"int\",\"value\":1}},{\"kind\":\"field\",\"member_catalog_id\":\"cat_00000000000000000000000000000002\"}].",
                         "minItems": 1,
-                        "items": data_path_segment_schema(),
+                        "items": data_path_segment_input_schema(),
                     },
                     "preview_limit": {
                         "type": "integer",
@@ -953,6 +910,30 @@ mod tests {
         let read_segments = &tool(tools, "mw_data_read")["inputSchema"]["properties"]["segments"];
         assert_eq!(read_segments["minItems"], 1);
         assert_eq!(read_segments.get("maxItems"), None);
+    }
+
+    #[test]
+    fn catalog_consumes_marrow_saved_data_input_schema_helpers() {
+        let source = include_str!("server.rs");
+        let key_schema_call = concat!("data_key", "_input_schema(");
+        let segment_schema_call = concat!("data_path_segment", "_input_schema()");
+
+        assert!(
+            source.matches(key_schema_call).count() >= 1,
+            "MCP data-key schemas must consume the Marrow saved-data DTO schema helper"
+        );
+        assert!(
+            source.matches(segment_schema_call).count() >= 2,
+            "MCP path-segment schemas must consume the Marrow saved-data DTO schema helper"
+        );
+        assert!(
+            !source.contains(concat!("fn ", "data_key_schema")),
+            "MCP must not keep a local saved-data key schema authority"
+        );
+        assert!(
+            !source.contains(concat!("fn ", "data_path_segment_schema")),
+            "MCP must not keep a local saved-data path-segment schema authority"
+        );
     }
 
     #[test]

@@ -13,8 +13,8 @@ pub use marrow_json::saved_data::{
     DataPresenceJson as DataPresenceDto, DataReadRequestJson as DataReadRequest,
     DataReadResultJson as DataReadResult, DataStoreErrorCodeJson as DataStoreErrorCodeDto,
     DataStoreErrorJson as DataStoreErrorDto, DataViewBoundaryJson,
-    MemberFlavorJson as MemberFlavorDto, ScalarTypeJson as ScalarTypeDto,
-    data_view_boundary_to_json,
+    MemberFlavorJson as MemberFlavorDto, ScalarTypeJson as ScalarTypeDto, data_key_input_schema,
+    data_path_segment_input_schema, data_view_boundary_to_json,
 };
 pub use marrow_json::{DataGenerationJson, data_generation_stamp_to_json};
 
