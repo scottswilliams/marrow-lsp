@@ -6,7 +6,7 @@ use marrow_check::tooling::{
     SourceModulePathHoverFact, SourceOperatorHoverFact, SourceResourceHoverFact,
     SourceResourceHoverMember, SourceResourceHoverMemberKind, SourceResourceHoverPathSegment,
     SourceSchemaHoverFact, SourceSchemaHoverKeyParam, SourceStandardLibraryCapability,
-    StoreRootHoverFact, StoreRootHoverMember, StoreRootHoverPathSegment,
+    SourceTypeHoverFact, StoreRootHoverFact, StoreRootHoverMember, StoreRootHoverPathSegment,
 };
 use marrow_check::{CheckedFacts, DirectEffectFacts, HostEffect, MarrowType, SavedPlaceEffect};
 use marrow_schema::stdlib;
@@ -27,18 +27,8 @@ pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
         HoverFact::StoreRoot(fact) => store_hover(&fact),
         HoverFact::SourceSchema(fact) => source_schema_hover(&fact),
         HoverFact::SavedPlace(fact) => saved_place_markdown(&fact),
-        HoverFact::Type { ty, docs } => type_hover(&ty, docs.as_deref()),
+        HoverFact::Type(fact) => type_hover(&fact),
     })
-}
-
-#[cfg(test)]
-pub(super) fn type_hover_with_docs_text(ty: &MarrowType, docs: Option<&str>) -> Hover {
-    let mut value = marrow_code_block(&render_type(ty));
-    if let Some(docs) = docs {
-        value.push_str("\n\n");
-        value.push_str(docs);
-    }
-    markdown_hover(value)
 }
 
 fn markdown_hover(value: String) -> Hover {
@@ -110,11 +100,9 @@ fn module_const_hover(name: &str, ty: Option<&MarrowType>, docs: &[String]) -> S
     value
 }
 
-fn type_hover(ty: &MarrowType, docs: Option<&[String]>) -> String {
-    let mut value = marrow_code_block(&render_type(ty));
-    if let Some(docs) = docs {
-        append_docs(&mut value, join_docs(docs));
-    }
+fn type_hover(fact: &SourceTypeHoverFact) -> String {
+    let mut value = marrow_code_block(&render_type(&fact.ty));
+    append_docs(&mut value, join_docs(&fact.docs));
     value
 }
 

@@ -1361,6 +1361,22 @@ fn hover_does_not_own_source_symbol_doc_traversal() {
 }
 
 #[test]
+fn hover_type_fallback_consumes_marrow_source_type_hover_fact() {
+    let fact_helpers = include_str!("facts.rs");
+    assert!(
+        fact_helpers.contains("source_type_hover_fact_at"),
+        "type hover fallback should consume Marrow source type hover facts"
+    );
+
+    for obsolete in ["type_at", "checked_type_at"] {
+        assert!(
+            !hover_active_code().contains(obsolete),
+            "type hover fallback should consume Marrow source type hover facts, not `{obsolete}`"
+        );
+    }
+}
+
+#[test]
 fn hover_does_not_own_source_callable_target_traversal() {
     let source_helpers = hover_active_code();
     for obsolete in [
@@ -2833,20 +2849,12 @@ fn hover_for_an_unknown_file_is_none() {
 
 #[test]
 fn hover_without_docs_is_type_only() {
-    let source = "\
-module a
-
-resource Book
-    required title: string
-
-store ^books(id: int): Book
-
-pub fn f(): string
-    return ^books(1).title ?? \"\"
-";
-    let (snapshot, file) = analyze(source);
-    let offset = source.rfind(").title").unwrap() + ").".len() + 1;
-    let hover = hover_with_docs(&snapshot, &file, offset, None).expect("a hover");
+    let hover = render::hover(facts::HoverFact::Type(
+        marrow_check::tooling::SourceTypeHoverFact {
+            ty: marrow_check::MarrowType::Primitive(marrow_check::ScalarType::Str),
+            docs: Vec::new(),
+        },
+    ));
     let HoverContents::Markup(markup) = hover.contents else {
         panic!("expected markup");
     };
@@ -2879,35 +2887,27 @@ pub fn caller(): int
 }
 
 #[test]
-fn hover_over_a_documented_function_shows_type_and_description() {
+fn hover_over_a_documented_module_const_use_shows_type_and_description() {
     let source = "\
 module a
 
-;; Adds two numbers.
-pub fn add(x: int, y: int): int
-    return x + y
+;; Maximum count.
+const LIMIT: int = 10
 
 pub fn caller(): int
-    return add(1, 2)
+    return LIMIT
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
-    let offset = source.rfind("add(1, 2)").unwrap();
-    let docs = symbol_docs(&snapshot, &index, &file, offset);
-    let hover =
-        hover_with_docs(&snapshot, &file, offset, docs.as_deref()).expect("a hover at the call");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup");
-    };
+    let offset = source.rfind("LIMIT").unwrap();
+    let value = hover_value_at(&snapshot, &index, &file, offset).expect("module const use hover");
     assert!(
-        markup.value.starts_with("```marrow\n"),
-        "the type still leads the hover: {}",
-        markup.value
+        value.starts_with("```marrow\nint\n```"),
+        "the type should lead the hover: {value}"
     );
     assert!(
-        markup.value.contains("Adds two numbers."),
-        "the description should be shown: {}",
-        markup.value
+        value.contains("Maximum count."),
+        "the description should be shown: {value}"
     );
 }
 

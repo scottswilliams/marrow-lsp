@@ -1,15 +1,14 @@
 use std::path::Path;
 
 use marrow_check::{
-    AnalysisSnapshot, BindingIndex, CheckedFacts, MarrowType,
+    AnalysisSnapshot, BindingIndex, CheckedFacts,
     tooling::{
         SavedPlaceHoverFact, SourceCallableHoverFact, SourceModulePathHoverFact,
-        SourceOperatorHoverFact, SourceSchemaHoverFact, StoreRootHoverFact,
+        SourceOperatorHoverFact, SourceSchemaHoverFact, SourceTypeHoverFact, StoreRootHoverFact,
         saved_place_hover_fact_at, source_callable_hover_fact_at, source_module_path_hover_fact_at,
-        source_operator_hover_fact_at, source_schema_hover_fact_at, source_symbol_docs_at,
+        source_operator_hover_fact_at, source_schema_hover_fact_at, source_type_hover_fact_at,
         store_root_hover_fact_at,
     },
-    type_at,
 };
 
 pub(super) enum HoverFact<'a> {
@@ -22,10 +21,7 @@ pub(super) enum HoverFact<'a> {
     StoreRoot(StoreRootHoverFact),
     SourceSchema(SourceSchemaHoverFact),
     SavedPlace(SavedPlaceHoverFact),
-    Type {
-        ty: MarrowType,
-        docs: Option<Vec<String>>,
-    },
+    Type(SourceTypeHoverFact),
 }
 
 pub(super) fn collect<'a>(
@@ -56,15 +52,5 @@ pub(super) fn collect<'a>(
         return Some(HoverFact::SourceOperator(fact));
     }
 
-    let docs = source_symbol_docs_at(snapshot, index, file, offset).map(|docs| docs.lines);
-    checked_type_at(snapshot, file, offset).map(|ty| HoverFact::Type { ty, docs })
-}
-
-pub(super) fn checked_type_at(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-) -> Option<MarrowType> {
-    let analyzed = snapshot.files.iter().find(|f| f.path == file)?;
-    type_at(&snapshot.program, file, &analyzed.parsed, offset)
+    source_type_hover_fact_at(snapshot, index, file, offset).map(HoverFact::Type)
 }

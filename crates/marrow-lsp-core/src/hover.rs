@@ -3,8 +3,8 @@
 //! An editor sends a byte offset (already converted from an LSP position by the
 //! document's [`LineIndex`](crate::positions::LineIndex)). The LSP builds or
 //! accepts a [`BindingIndex`], asks Marrow tooling for callable, operator,
-//! module-path, schema, store-root, and saved-place hover facts, then falls back
-//! to `type_at` for plain expression type hovers.
+//! module-path, schema, store-root, saved-place, and type hover facts, then
+//! renders the selected fact as Markdown.
 
 use std::path::Path;
 
@@ -42,17 +42,6 @@ pub fn symbol_docs(
     offset: usize,
 ) -> Option<String> {
     render::join_docs(&source_symbol_docs_at(snapshot, index, file, offset)?.lines)
-}
-
-#[cfg(test)]
-fn hover_with_docs(
-    snapshot: &AnalysisSnapshot,
-    file: &Path,
-    offset: usize,
-    docs: Option<&str>,
-) -> Option<Hover> {
-    let ty = facts::checked_type_at(snapshot, file, offset)?;
-    Some(render::type_hover_with_docs_text(&ty, docs))
 }
 
 #[cfg(test)]
