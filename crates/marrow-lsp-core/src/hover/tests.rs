@@ -1324,15 +1324,23 @@ pub fn f(): bool
 
 #[test]
 fn hover_has_no_local_intrinsic_callable_model() {
-    let source = include_str!("facts.rs");
+    let source = hover_active_code();
     for forbidden in [
         "language_facts::bare_builtin_hover",
         "language_facts::scalar_conversion_hover",
         "language_facts::std_operation_hover",
+        "intrinsic_callable_signature_for_file",
+        "fn default_library_call_text",
+        "fn operator_text",
+        "fn operator_spelling",
+        "lex_source",
+        "TokenKind",
+        "language_facts",
+        "super::tokens",
     ] {
         assert!(
             !source.contains(forbidden),
-            "hover must consume marrow_check callable facts instead of {forbidden}"
+            "hover must consume Marrow intrinsic/operator hover facts instead of local `{forbidden}`"
         );
     }
 }
@@ -1457,19 +1465,10 @@ fn hover_does_not_own_module_path_or_std_module_facts() {
         );
     }
 
-    let language_facts = include_str!("../language_facts.rs");
-    for obsolete in [
-        "std_namespace_hover",
-        "std_module_hover",
-        "fn std_modules",
-        "fn capability_label",
-        "stdlib::all()",
-    ] {
-        assert!(
-            !language_facts.contains(obsolete),
-            "LSP should render std module facts from Marrow DTOs, not own `{obsolete}`"
-        );
-    }
+    assert!(
+        !hover_active_code().contains("stdlib::all()"),
+        "LSP should render std module facts from Marrow DTOs, not own stdlib traversal"
+    );
 }
 
 fn hover_active_code() -> String {

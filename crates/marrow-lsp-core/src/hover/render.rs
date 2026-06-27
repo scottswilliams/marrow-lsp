@@ -1,28 +1,29 @@
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::tooling::{
-    SavedPlaceHoverFact, SavedPlaceHoverKeyParam, SourceCallableFunctionFact,
-    SourceCallableHoverFact, SourceCallableParamFact, SourceEnumHoverFact,
-    SourceEnumMemberHoverFact, SourceEnumMemberStatus, SourceModulePathHoverFact,
-    SourceResourceHoverFact, SourceResourceHoverMember, SourceResourceHoverMemberKind,
-    SourceResourceHoverPathSegment, SourceSchemaHoverFact, SourceSchemaHoverKeyParam,
-    SourceStandardLibraryCapability, StoreRootHoverFact, StoreRootHoverMember,
-    StoreRootHoverPathSegment,
+    CallableSignature, CallableSignatureKind, SavedPlaceHoverFact, SavedPlaceHoverKeyParam,
+    SourceCallableFunctionFact, SourceCallableHoverFact, SourceCallableParamFact,
+    SourceEnumHoverFact, SourceEnumMemberHoverFact, SourceEnumMemberStatus,
+    SourceModulePathHoverFact, SourceOperatorHoverFact, SourceResourceHoverFact,
+    SourceResourceHoverMember, SourceResourceHoverMemberKind, SourceResourceHoverPathSegment,
+    SourceSchemaHoverFact, SourceSchemaHoverKeyParam, SourceStandardLibraryCapability,
+    StoreRootHoverFact, StoreRootHoverMember, StoreRootHoverPathSegment,
 };
 use marrow_check::{CheckedFacts, DirectEffectFacts, HostEffect, MarrowType, SavedPlaceEffect};
 use marrow_schema::stdlib;
 
+use crate::callables::render_callable_signature;
 use crate::types::render_type;
 
 use super::facts::HoverFact;
 
 pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
     markdown_hover(match fact {
-        HoverFact::CanonicalLibraryText(text) => default_library_hover_markdown(&text),
         HoverFact::SourceCallable {
             fact,
             checked_facts,
         } => source_callable_hover(&fact, checked_facts),
         HoverFact::SourceModulePath(fact) => source_module_path_hover(&fact),
+        HoverFact::SourceOperator(fact) => source_operator_hover(&fact),
         HoverFact::StoreRoot(fact) => store_hover(&fact),
         HoverFact::SourceSchema(fact) => source_schema_hover(&fact),
         HoverFact::SavedPlace(fact) => saved_place_markdown(&fact),
@@ -52,11 +53,32 @@ fn markdown_hover(value: String) -> Hover {
 
 fn source_callable_hover(fact: &SourceCallableHoverFact, checked_facts: &CheckedFacts) -> String {
     match fact {
+        SourceCallableHoverFact::Intrinsic(signature) => intrinsic_callable_hover(signature),
         SourceCallableHoverFact::Function(function) => function_hover(function, checked_facts),
         SourceCallableHoverFact::Parameter(param) => parameter_hover(param),
         SourceCallableHoverFact::ModuleConst { name, ty, docs } => {
             module_const_hover(name, ty.as_ref(), docs)
         }
+    }
+}
+
+fn intrinsic_callable_hover(signature: &CallableSignature) -> String {
+    let mut value = marrow_code_block(&render_callable_signature(signature));
+    append_docs(
+        &mut value,
+        Some(callable_context(signature.kind).to_string()),
+    );
+    append_docs(&mut value, join_docs(&signature.docs));
+    value
+}
+
+fn callable_context(kind: CallableSignatureKind) -> &'static str {
+    match kind {
+        CallableSignatureKind::Builtin => "default library builtin.",
+        CallableSignatureKind::ScalarConversion => "default library scalar conversion.",
+        CallableSignatureKind::ErrorConstructor => "default library Error constructor.",
+        CallableSignatureKind::IdentityConstructor => "default library Id constructor.",
+        CallableSignatureKind::StandardLibrary => "default library std operation.",
     }
 }
 
@@ -96,13 +118,10 @@ fn type_hover(ty: &MarrowType, docs: Option<&[String]>) -> String {
     value
 }
 
-fn default_library_hover_markdown(fact: &str) -> String {
-    let Some((signature, context)) = fact.split_once("\n\n") else {
-        return marrow_code_block(fact);
-    };
-    let mut value = marrow_code_block(signature);
-    value.push_str("\n\n");
-    value.push_str(context);
+fn source_operator_hover(fact: &SourceOperatorHoverFact) -> String {
+    let mut value = marrow_code_block(&format!("operator {}", fact.spelling));
+    append_docs(&mut value, Some("language operator.".to_string()));
+    append_docs(&mut value, Some(fact.description.clone()));
     value
 }
 

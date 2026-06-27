@@ -1,10 +1,10 @@
-//! Hover: presentation over checked facts, as a `marrow` code block.
+//! Hover: Markdown presentation over Marrow analysis facts.
 //!
 //! An editor sends a byte offset (already converted from an LSP position by the
-//! document's [`LineIndex`](crate::positions::LineIndex)). Positive semantic hovers
-//! render checker facts such as binding-index symbols and expression types. Local
-//! token and parse inspection only decides presentation targets or suppresses
-//! surfaces whose canonical Marrow facts are not exposed yet.
+//! document's [`LineIndex`](crate::positions::LineIndex)). The LSP builds or
+//! accepts a [`BindingIndex`], asks Marrow tooling for callable, operator,
+//! module-path, schema, store-root, and saved-place hover facts, then falls back
+//! to `type_at` for plain expression type hovers.
 
 use std::path::Path;
 
@@ -14,7 +14,6 @@ use marrow_check::{AnalysisSnapshot, BindingIndex, build_binding_index};
 
 mod facts;
 mod render;
-mod tokens;
 
 /// The hover for byte `offset` in `file`, or `None` when no known symbol or type
 /// covers it.
