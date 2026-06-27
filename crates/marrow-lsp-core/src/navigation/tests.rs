@@ -107,6 +107,25 @@ fn saved_root_navigation_suppression_consumes_marrow_cursor_fact() {
 }
 
 #[test]
+fn enum_type_navigation_filter_consumes_marrow_type_annotation_cursor_fact() {
+    let crate_root = include_str!("../lib.rs");
+    let catalog_uses_source = include_str!("catalog_uses.rs");
+
+    assert!(
+        catalog_uses_source.contains("source_type_annotation_cursor_fact_at"),
+        "enum type-annotation filtering must consume Marrow's source type-annotation cursor fact"
+    );
+    assert!(
+        !catalog_uses_source.contains("crate::type_context"),
+        "navigation must not call an LSP-local type-annotation syntax classifier"
+    );
+    assert!(
+        !crate_root.contains("mod type_context"),
+        "marrow-lsp-core must not keep the LSP-local type-annotation syntax classifier module"
+    );
+}
+
+#[test]
 fn definition_of_a_local_use_jumps_to_its_binding() {
     let source = "module a\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
     let (snapshot, file, indices) = analyze(source);

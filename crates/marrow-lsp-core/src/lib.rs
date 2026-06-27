@@ -20,6 +20,5 @@ pub mod semantic_tokens;
 pub mod signature_help;
 pub mod store;
 pub mod symbols;
-mod type_context;
 mod types;
 pub mod workspace;

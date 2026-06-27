@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use lsp_types::{Location, Url};
-use marrow_check::{AnalysisSnapshot, CatalogDeclaration, CatalogEntryKind, UseSite, UseSiteKind};
+use marrow_check::{
+    AnalysisSnapshot, CatalogDeclaration, CatalogEntryKind, UseSite, UseSiteKind,
+    tooling::source_type_annotation_cursor_fact_at,
+};
 use marrow_syntax::SourceSpan;
 
 use super::{indices::FileIndex, source_names::span_covers};
@@ -168,13 +171,7 @@ impl CatalogTarget<'_> {
 }
 
 fn span_is_type_annotation(snapshot: &AnalysisSnapshot, file: &Path, span: SourceSpan) -> bool {
-    snapshot
-        .files
-        .iter()
-        .find(|analyzed| analyzed.path == file)
-        .is_some_and(|analyzed| {
-            crate::type_context::type_annotation_at(&analyzed.parsed.file, span.start_byte)
-        })
+    source_type_annotation_cursor_fact_at(snapshot, file, span.start_byte).is_some()
 }
 
 #[derive(Clone, Copy)]
