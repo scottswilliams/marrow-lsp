@@ -702,6 +702,34 @@ fn assert_launch_success(response: &Json) {
     );
 }
 
+fn assert_dap_execution_boundary(boundary: &Json, store_kind: &str, stamped: bool) {
+    assert_eq!(boundary["sessionKind"], "run", "{boundary}");
+    assert_eq!(
+        boundary["sourceAnalysisGeneration"]["profileVersion"], "analysis.generation.v1",
+        "{boundary}"
+    );
+    assert!(
+        boundary["sourceAnalysisGeneration"]["sourceIdentity"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "{boundary}"
+    );
+    assert_eq!(boundary["store"]["kind"], store_kind, "{boundary}");
+    if stamped {
+        let stamp = &boundary["store"]["stamp"];
+        assert!(
+            stamp["store_uid"]
+                .as_str()
+                .is_some_and(|uid| uid.starts_with("store_")),
+            "{boundary}"
+        );
+        assert!(stamp["catalog_epoch"].as_u64().is_some(), "{boundary}");
+        assert!(stamp["commit_id"].as_u64().is_some(), "{boundary}");
+    } else {
+        assert_eq!(boundary["store"]["stamp"], Json::Null, "{boundary}");
+    }
+}
+
 #[test]
 fn malformed_request_arguments_fail_before_command_handlers() {
     for (command, arguments) in [
@@ -1715,9 +1743,20 @@ fn launch_accepts_configured_default_entry_with_isolated_writes() {
     );
     let response = client.response_for(launch);
     assert_launch_success(&response);
+    assert_dap_execution_boundary(
+        &response["body"]["marrowDebug"]["previewExecutionBoundary"],
+        "plain_memory",
+        false,
+    );
 
     let done = client.request("configurationDone", json!({}));
-    assert_eq!(client.response_for(done)["success"], true);
+    let done = client.response_for(done);
+    assert_eq!(done["success"], true, "{done}");
+    assert_dap_execution_boundary(
+        &done["body"]["marrowDebug"]["executionBoundary"],
+        "plain_memory",
+        false,
+    );
 
     let output = client.event("output");
     assert!(
@@ -1757,9 +1796,20 @@ fn launch_accepts_valid_existing_native_store() {
     );
     let response = client.response_for(launch);
     assert_launch_success(&response);
+    assert_dap_execution_boundary(
+        &response["body"]["marrowDebug"]["previewExecutionBoundary"],
+        "isolated",
+        true,
+    );
 
     let done = client.request("configurationDone", json!({}));
-    assert_eq!(client.response_for(done)["success"], true);
+    let done = client.response_for(done);
+    assert_eq!(done["success"], true, "{done}");
+    assert_dap_execution_boundary(
+        &done["body"]["marrowDebug"]["executionBoundary"],
+        "isolated",
+        true,
+    );
     client.event("output");
     client.event("terminated");
 }

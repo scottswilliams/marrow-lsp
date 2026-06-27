@@ -12,10 +12,12 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
 use marrow_check::AnalysisGeneration;
+use marrow_lsp_core::execution::execution_boundary_json;
 use marrow_run::{
     DebugValue, EntryInvocation, Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry,
     SourceAnalysisAdmission, SystemNondeterminism,
 };
+use serde_json::Value as Json;
 
 use crate::debugger::{ArmedBreakpoints, Control, Debugger, RunEvent};
 
@@ -36,6 +38,13 @@ pub struct RunHandle {
     pub control: Sender<Control>,
     pub events: Receiver<RunEvent>,
     pub terminate: Arc<AtomicBool>,
+    pub execution_boundary: Json,
+}
+
+#[derive(Debug)]
+pub enum SpawnError {
+    Launch(crate::project::LaunchError),
+    Thread(String),
 }
 
 struct RunRequest {
@@ -58,9 +67,10 @@ pub fn spawn(
     invocation: EntryInvocation,
     stop_on_entry: bool,
     breakpoints: ArmedBreakpoints,
-) -> Result<RunHandle, String> {
+) -> Result<RunHandle, SpawnError> {
     let (event_tx, event_rx) = channel::<RunEvent>();
     let (control_tx, control_rx) = channel::<Control>();
+    let (start_tx, start_rx) = channel::<Result<Json, crate::project::LaunchError>>();
     let terminate = Arc::new(AtomicBool::new(false));
     let request = RunRequest {
         project_dir,
@@ -75,14 +85,29 @@ pub fn spawn(
 
     let handle = thread::Builder::new()
         .name("marrow-dap-run".to_string())
-        .spawn(move || run_on_thread(request, event_tx, control_rx))
-        .map_err(|error| format!("could not start the run thread: {error}"))?;
+        .spawn(move || run_on_thread(request, event_tx, control_rx, start_tx))
+        .map_err(|error| SpawnError::Thread(format!("could not start the run thread: {error}")))?;
+
+    let execution_boundary = match start_rx.recv() {
+        Ok(Ok(boundary)) => boundary,
+        Ok(Err(error)) => {
+            let _ = handle.join();
+            return Err(SpawnError::Launch(error));
+        }
+        Err(_) => {
+            let _ = handle.join();
+            return Err(SpawnError::Thread(
+                "run thread stopped before launch admission".to_string(),
+            ));
+        }
+    };
 
     Ok(RunHandle {
         handle,
         control: control_tx,
         events: event_rx,
         terminate,
+        execution_boundary,
     })
 }
 
@@ -94,6 +119,7 @@ fn run_on_thread(
     request: RunRequest,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
+    start: Sender<Result<Json, crate::project::LaunchError>>,
 ) -> Option<Outcome> {
     let RunRequest {
         project_dir,
@@ -114,9 +140,11 @@ fn run_on_thread(
     ) {
         Ok(launch) => launch,
         Err(error) => {
+            let message = error.to_string();
+            let _ = start.send(Err(error));
             return Some(Outcome {
                 output: String::new(),
-                result: Err(error.to_string()),
+                result: Err(message),
             });
         }
     };
@@ -125,6 +153,9 @@ fn run_on_thread(
         invocation,
         ..
     } = launch;
+    if start.send(Ok(execution_boundary_json(&session))).is_err() {
+        return None;
+    }
     let debugger = Debugger::new(stop_on_entry, breakpoints, events, control, terminate);
     run_with_session(&session, invocation, debugger)
 }

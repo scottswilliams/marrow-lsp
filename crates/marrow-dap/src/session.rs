@@ -15,6 +15,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
 use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType, tooling};
+use marrow_lsp_core::execution::execution_boundary_json;
 use marrow_run::{DebugValue, EntryArgument, EntryInvocation, SourceAnalysisAdmission};
 use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
@@ -583,6 +584,7 @@ impl<W: Write> Session<W> {
         // stay aligned with runtime frames.
         match crate::project::prepare(&project_dir, entry, &args) {
             Ok(launch) => {
+                let execution_boundary = execution_boundary_json(&launch.session);
                 self.stop_points = Some(StopPointIndex::from_runtime(
                     launch.session.runtime_program(),
                 ));
@@ -595,7 +597,11 @@ impl<W: Write> Session<W> {
                     invocation: launch.invocation,
                     stop_on_entry,
                 });
-                self.respond(request, true, json!({}));
+                self.respond(
+                    request,
+                    true,
+                    json!({ "marrowDebug": { "previewExecutionBoundary": execution_boundary } }),
+                );
                 self.event("initialized", json!({}));
             }
             Err(error) => {
@@ -880,17 +886,6 @@ impl<W: Write> Session<W> {
             );
             return;
         };
-        if let Err(error) = crate::project::prepare_admitted(
-            &pending.project_dir,
-            pending.entry.as_deref(),
-            &pending.analysis_generation,
-            pending.source_analysis_admission.as_ref(),
-            pending.invocation.clone(),
-        ) {
-            let contract = DapError::from_launch_error(&error);
-            self.respond_error(request, error.to_string(), contract);
-            return;
-        }
         let breakpoints = self.armed_breakpoints();
         match crate::run::spawn(
             pending.project_dir,
@@ -902,6 +897,7 @@ impl<W: Write> Session<W> {
             breakpoints,
         ) {
             Ok(running) => {
+                let execution_boundary = running.execution_boundary.clone();
                 self.running = Some(Running {
                     handle: running.handle,
                     control: running.control,
@@ -911,9 +907,17 @@ impl<W: Write> Session<W> {
                     pending_resume: None,
                     terminating: false,
                 });
-                self.respond(request, true, json!({}));
+                self.respond(
+                    request,
+                    true,
+                    json!({ "marrowDebug": { "executionBoundary": execution_boundary } }),
+                );
             }
-            Err(error) => {
+            Err(crate::run::SpawnError::Launch(error)) => {
+                let contract = DapError::from_launch_error(&error);
+                self.respond_error(request, error.to_string(), contract);
+            }
+            Err(crate::run::SpawnError::Thread(error)) => {
                 self.respond_error(request, error, ERROR_RUN_INVALID);
                 self.terminate_session();
             }

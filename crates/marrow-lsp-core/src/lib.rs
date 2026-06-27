@@ -11,6 +11,7 @@ pub mod data_explorer;
 pub mod data_integrity;
 pub mod diagnostics;
 pub mod documents;
+pub mod execution;
 pub mod formatting;
 pub mod hover;
 pub mod mcp;

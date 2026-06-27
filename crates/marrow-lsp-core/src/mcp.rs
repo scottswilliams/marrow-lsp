@@ -52,6 +52,7 @@ use crate::data_explorer::{
 };
 use crate::diagnostics::path_to_url;
 use crate::documents::Documents;
+use crate::execution::execution_boundary_json;
 use crate::positions::Position;
 use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
@@ -1008,11 +1009,6 @@ fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json
 fn entry_run_facts_json(session: &ProjectSession) -> Option<Json> {
     marrow_json::entry_run_facts_to_json(session)
         .map(|facts| serde_json::to_value(facts).expect("Marrow run facts DTO serializes"))
-}
-
-fn execution_boundary_json(session: &ProjectSession) -> Json {
-    let boundary = marrow_json::execution_boundary_to_json(session);
-    serde_json::to_value(boundary).expect("Marrow boundary DTO serializes")
 }
 
 /// Discover and run the project's tests through Marrow's test project session,
