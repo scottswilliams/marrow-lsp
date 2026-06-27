@@ -945,6 +945,53 @@ pub fn run()
 }
 
 #[test]
+fn complete_saved_path_members_uses_marrow_active_saved_path_fact() {
+    let (_dir, file) = project();
+    std::fs::write(
+        &file,
+        "\
+module shelf::books
+
+resource Book
+    required title: string
+    code: ErrorCode
+    tags(pos: int): string
+
+store ^books(id: int): Book
+
+pub fn read(id: int)
+    const value = ^books(id).candidate
+",
+    )
+    .unwrap();
+    let position = position_in_file(&file, "candidate");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "title"
+                && item["kind"] == "field"
+                && item["detail"] == "required field: string"
+        }),
+        "saved-path completion should include required fields from Marrow facts, got {result}"
+    );
+    assert!(
+        result["contract"]["missingFacts"]
+            .as_array()
+            .expect("missing facts")
+            .iter()
+            .all(|fact| fact != "active saved-path context facts"),
+        "saved-path context facts must no longer be listed as missing, got {result}"
+    );
+    assert_contract(
+        &result,
+        "presentation-only",
+        "development helper",
+        COMPLETION_MISSING_FACTS,
+    );
+}
+
+#[test]
 fn namespace_complete_for_imported_module_returns_marrow_fact_shape() {
     let (_dir, file) = namespace_project();
     let result = namespace_complete(&file, &["books".to_string()]);

@@ -216,7 +216,7 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_complete",
-            "description": "Presentation-only development helper: list Marrow source completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing expected-type contexts outside annotated local const/var enum initializers and enum return expressions, active saved-path context, remaining checker-owned candidate facts, and a production stability contract; not a stable production completion API.",
+            "description": "Presentation-only development helper: list Marrow source completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing expected-type contexts outside annotated local const/var enum initializers and enum return expressions, remaining checker-owned candidate facts, and a production stability contract; not a stable production completion API.",
             "_meta": marrow_meta(presentation_contract(
                 "development helper",
                 COMPLETION_MISSING_FACTS,
