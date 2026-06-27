@@ -34,6 +34,12 @@ fn assert_run_contract(result: &Json) {
     assert_production_contract(result, "sandboxed execution API");
 }
 
+fn assert_completion_contract(result: &Json) {
+    assert_eq!(result["profile_version"], "source.completion.v1");
+    assert_production_contract(result, "source completion fact");
+    assert_eq!(result["contract"]["basis"], "Marrow source completion fact");
+}
+
 fn assert_production_contract(result: &Json, description: &str) {
     let contract = &result["contract"];
     assert_eq!(contract["status"], "ready", "contract status for {result}");
@@ -903,12 +909,69 @@ fn complete_in_a_function_body_lists_locals_and_keywords() {
         items.iter().all(|item| item["label"] != "write"),
         "removed builtins must not be offered, got {result}"
     );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "development helper",
-        COMPLETION_MISSING_FACTS,
+    assert_completion_contract(&result);
+}
+
+#[test]
+fn complete_lists_import_aliases_as_module_candidates() {
+    let (_dir, file) = namespace_project();
+    let position = position_in_file(&file, "return 1");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "books"
+                && item["kind"] == "module"
+                && item["detail"] == "module shelf::books"
+        }),
+        "import aliases must be module completions from Marrow facts, got {result}"
     );
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "std"
+                && item["kind"] == "module"
+                && item["detail"] == "standard library"
+        }),
+        "raw std namespace must be a Marrow module completion, got {result}"
+    );
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "run"
+                && item["kind"] == "function"
+                && item["detail"] == "fn run(): int"
+        }),
+        "same-module functions must be Marrow completion facts, got {result}"
+    );
+}
+
+#[test]
+fn complete_namespace_items_include_docs_in_mcp_json() {
+    let (_dir, file) = namespace_project();
+    std::fs::write(
+        &file,
+        "\
+module shelf::app
+
+use shelf::books
+
+pub fn run(): int
+    const status = books::chooseStatus(\"current\", books::Status::active)
+    return 1
+",
+    )
+    .unwrap();
+    let position = position_in_file(&file, "chooseStatus");
+    let result = complete(&file, position.line, position.character);
+    let items = result["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| {
+            item["label"] == "Book"
+                && item["kind"] == "resource"
+                && item["docs"] == json!(["Books stored in the public shelf."])
+        }),
+        "MCP completion must preserve Marrow item docs, got {result}"
+    );
+    assert_completion_contract(&result);
 }
 
 #[test]
@@ -977,12 +1040,7 @@ pub fn run()
             items.iter().all(|item| item["label"] != "Status::archived"),
             "expected enum value completion must not offer the category member, got {result}"
         );
-        assert_contract(
-            &result,
-            "presentation-only",
-            "development helper",
-            COMPLETION_MISSING_FACTS,
-        );
+        assert_completion_contract(&result);
     }
 
     std::fs::write(
@@ -1191,12 +1249,7 @@ pub fn run(state: Status)
         items.iter().all(|item| item["label"] != "Status::active"),
         "match arm completions must stay relative to the scrutinee enum, got {result}"
     );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "development helper",
-        COMPLETION_MISSING_FACTS,
-    );
+    assert_completion_contract(&result);
 
     let empty_match_arm_source = concat!(
         "\
@@ -1257,20 +1310,7 @@ pub fn read(id: int)
         }),
         "saved-path completion should include required fields from Marrow facts, got {result}"
     );
-    assert!(
-        result["contract"]["missingFacts"]
-            .as_array()
-            .expect("missing facts")
-            .iter()
-            .all(|fact| fact != "active saved-path context facts"),
-        "saved-path context facts must no longer be listed as missing, got {result}"
-    );
-    assert_contract(
-        &result,
-        "presentation-only",
-        "development helper",
-        COMPLETION_MISSING_FACTS,
-    );
+    assert_completion_contract(&result);
 }
 
 #[test]

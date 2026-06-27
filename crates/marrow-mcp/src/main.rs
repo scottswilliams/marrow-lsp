@@ -521,8 +521,8 @@ mod tests {
     use super::*;
 
     use marrow_lsp_core::mcp::{
-        COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
-        DATA_READ_MISSING_FACTS, SAVED_DATA_MISSING_FACTS,
+        DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS, DATA_READ_MISSING_FACTS,
+        SAVED_DATA_MISSING_FACTS,
     };
 
     /// Drive the server loop over an in-memory stdin and collect its line-framed
@@ -834,13 +834,14 @@ mod tests {
                 "mw_complete",
                 json!({
                     "items": [{}, {}, {}],
-                    "contract": contract(
-                        "presentation-only",
-                        "development helper",
-                        COMPLETION_MISSING_FACTS,
-                    ),
+                    "contract": {
+                        "status": "ready",
+                        "stableProductionApi": true,
+                        "description": "source completion fact",
+                        "missingFacts": [],
+                    },
                 }),
-                "development helper (presentation-only: remaining checker-owned completion candidate facts +1): 3 completions",
+                "source completion fact (ready): 3 completions",
             ),
             (
                 "mw_saved_roots",

@@ -12,8 +12,8 @@ use marrow_lsp_core::data_explorer::{
     validate_data_children_request, validate_data_read_request,
 };
 use marrow_lsp_core::mcp::{
-    self, COMPLETION_MISSING_FACTS, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS,
-    DATA_READ_MISSING_FACTS, RunMode, SAVED_DATA_MISSING_FACTS, SurfaceRouteScope,
+    self, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS, DATA_READ_MISSING_FACTS,
+    RunMode, SAVED_DATA_MISSING_FACTS, SurfaceRouteScope,
 };
 use serde_json::{Value as Json, json};
 
@@ -164,13 +164,10 @@ fn namespace_completion_contract() -> Json {
     contract
 }
 
-fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
-    json!({
-        "status": "presentation-only",
-        "stableProductionApi": false,
-        "description": description,
-        "missingFacts": missing_facts,
-    })
+fn completion_contract() -> Json {
+    let mut contract = production_contract("source completion fact");
+    contract["basis"] = json!("Marrow source completion fact");
+    contract
 }
 
 fn marrow_meta(contract: Json) -> Json {
@@ -216,11 +213,8 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_complete",
-            "description": "Presentation-only development helper: list Marrow source completion items (in-scope names, resource fields, saved roots, std ops, keywords) at a position in `file`. Missing remaining checker-owned candidate facts and a production stability contract; not a stable production completion API.",
-            "_meta": marrow_meta(presentation_contract(
-                "development helper",
-                COMPLETION_MISSING_FACTS,
-            )),
+            "description": "Return Marrow's source.completion.v1 fact at a position in `file`, including source completion items with stable semantic kinds, labels, detail text, and docs.",
+            "_meta": marrow_meta(completion_contract()),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -758,6 +752,13 @@ mod tests {
         assert_eq!(type_at["basis"], "Marrow checked type_at facts");
         assert_eq!(strings(&type_at["missingFacts"]), Vec::<String>::new());
 
+        let complete = contract(tools, "mw_complete");
+        assert_eq!(complete["status"], "ready");
+        assert_eq!(complete["stableProductionApi"], true);
+        assert_eq!(complete["description"], "source completion fact");
+        assert_eq!(complete["basis"], "Marrow source completion fact");
+        assert_eq!(strings(&complete["missingFacts"]), Vec::<String>::new());
+
         let schema = contract(tools, "mw_resource_schema");
         assert_eq!(schema["status"], "ready");
         assert_eq!(schema["stableProductionApi"], true);
@@ -847,15 +848,6 @@ mod tests {
     fn catalog_exposes_presentation_tool_contracts() {
         let catalog = tools();
         let tools = catalog.as_array().unwrap();
-
-        let complete = contract(tools, "mw_complete");
-        assert_eq!(complete["status"], "presentation-only");
-        assert_eq!(complete["stableProductionApi"], false);
-        assert_eq!(complete["description"], "development helper");
-        assert_eq!(
-            strings(&complete["missingFacts"]),
-            COMPLETION_MISSING_FACTS.to_vec()
-        );
 
         let saved_roots = contract(tools, "mw_saved_roots");
         assert_eq!(saved_roots["status"], "presentation-only");

@@ -482,11 +482,15 @@ fn ordinary_non_saved_dot_keeps_bare_completion() {
 #[test]
 fn bare_identifier_lists_locals_and_keywords() {
     let (program, file) = project();
-    let labels = complete(
+    let items = complete_items(
         &program,
         &file,
-        "module shelf::app\n\npub fn f(count: int)\n    const total: int = 1\n    return t|\n",
+        "module shelf::app\n\nuse shelf::books\n\npub fn f(count: int)\n    const total: int = 1\n    return t|\n",
     );
+    let labels = items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
     assert!(
         labels.contains(&"count".to_string()),
         "a param local, got {labels:?}"
@@ -507,6 +511,18 @@ fn bare_identifier_lists_locals_and_keywords() {
         labels.contains(&"exists".to_string()),
         "a builtin, got {labels:?}"
     );
+    let books = item_named(&items, "books");
+    assert_eq!(books.kind, Some(CompletionItemKind::MODULE));
+    assert_eq!(books.detail.as_deref(), Some("module shelf::books"));
+    let std = item_named(&items, "std");
+    assert_eq!(std.kind, Some(CompletionItemKind::MODULE));
+    assert_eq!(std.detail.as_deref(), Some("standard library"));
+    let draft = item_named(&items, "Draft");
+    assert_eq!(draft.kind, Some(CompletionItemKind::STRUCT));
+    assert_eq!(draft.detail.as_deref(), Some("resource"));
+    let run = item_named(&items, "run");
+    assert_eq!(run.kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(run.detail.as_deref(), Some("fn run(count: int): int"));
 }
 
 #[test]

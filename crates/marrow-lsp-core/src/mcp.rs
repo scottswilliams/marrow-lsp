@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 
 use marrow_check::{
     tooling::{
-        SourceCompletionItemKind, SourceEnumNamespaceCompletionFact,
-        SourceModuleNamespaceCompletionFact, SourceNamespaceCompletionFact,
-        SourceNamespaceEnumMemberStatus, SourceNamespaceFunctionCompletion, source_completion_fact,
+        SOURCE_COMPLETION_PROFILE_VERSION, SourceCompletionItemKind,
+        SourceEnumNamespaceCompletionFact, SourceModuleNamespaceCompletionFact,
+        SourceNamespaceCompletionFact, SourceNamespaceEnumMemberStatus,
+        SourceNamespaceFunctionCompletion, source_completion_fact,
         source_namespace_completion_file_fact,
     },
     type_at,
@@ -56,10 +57,6 @@ use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
 use crate::workspace::Workspace;
 
-pub const COMPLETION_MISSING_FACTS: &[&str] = &[
-    "remaining checker-owned completion candidate facts",
-    "production completion stability contract",
-];
 pub const SAVED_DATA_MISSING_FACTS: &[&str] =
     &["integrity and repair facts", "serve/attach data boundaries"];
 pub const DATA_CHILDREN_MISSING_FACTS: &[&str] =
@@ -93,7 +90,9 @@ fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
 }
 
 fn completion_contract() -> Json {
-    presentation_contract("development helper", COMPLETION_MISSING_FACTS)
+    let mut contract = production_contract("source completion fact");
+    contract["basis"] = json!("Marrow source completion fact");
+    contract
 }
 
 fn namespace_completion_contract() -> Json {
@@ -309,18 +308,18 @@ pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
     json!({ "type": ty.map(|ty| render_type(&ty)) })
 }
 
-/// `mw_complete`: the Marrow source completion items at a position in `file`.
-/// Each item is `{ label, kind, detail? }`. The file is checked so the
-/// snapshot's program backs schema- and scope-aware modes.
+/// `mw_complete`: the Marrow `source.completion.v1` fact at a position in
+/// `file`. The result contains the fact profile version plus items shaped as
+/// `{ label, kind, detail?, docs }`.
 pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     let contract = completion_contract();
     let (workspace, file) = match load_project(file, None) {
         Ok(loaded) => loaded,
-        Err(error) => return with_contract(json!({ "items": [], "error": error }), contract),
+        Err(error) => return with_contract(empty_completion_result(Some(error)), contract),
     };
     let snapshot = workspace.latest().expect("recompute stored a snapshot");
     let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return with_contract(json!({ "items": [] }), contract);
+        return with_contract(empty_completion_result(None), contract);
     };
     // The classifier reads the cached lex's spans against this text, and the parse
     // came from the same on-disk text, so read and index that text.
@@ -328,25 +327,41 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     let index = crate::positions::LineIndex::new(&source);
     let offset = index.offset(Position { line, character });
     let lexed = marrow_syntax::lex_source(&source);
-    let items: Vec<Json> = source_completion_fact(
+    let fact = source_completion_fact(
         &snapshot.program,
         &file,
         &source,
         &analyzed.parsed,
         &lexed,
         offset,
-    )
-    .items
-    .into_iter()
-    .map(|item| {
-        json!({
-            "label": item.label,
-            "kind": completion_kind_name(item.kind),
-            "detail": item.detail,
+    );
+    let items: Vec<Json> = fact
+        .items
+        .into_iter()
+        .map(|item| {
+            json!({
+                "label": item.label,
+                "kind": completion_kind_name(item.kind),
+                "detail": item.detail,
+                "docs": item.docs,
+            })
         })
-    })
-    .collect();
-    with_contract(json!({ "items": items }), contract)
+        .collect();
+    with_contract(
+        json!({ "profile_version": fact.profile_version, "items": items }),
+        contract,
+    )
+}
+
+fn empty_completion_result(error: Option<String>) -> Json {
+    let mut result = json!({
+        "profile_version": SOURCE_COMPLETION_PROFILE_VERSION,
+        "items": [],
+    });
+    if let Some(error) = error {
+        result["error"] = json!(error);
+    }
+    result
 }
 
 /// `mw_namespace_complete`: Marrow's source namespace completion fact for a

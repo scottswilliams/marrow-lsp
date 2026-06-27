@@ -120,8 +120,20 @@ const readmeSavedInspector = markdownBullet(readme, "README.md", "Saved Resource
 assertMentions(
   changelog,
   "CHANGELOG.md",
-  "presentation-only source intelligence framing",
-  /Presentation-only source-intelligence helpers[\s\S]*not stable production semantic contracts/i,
+  "fact-backed completion framing",
+  /completion are backed by Marrow facts/i,
+);
+assertMentions(
+  changelog,
+  "CHANGELOG.md",
+  "editor aid caveat",
+  /Hover, go-to definition, find references, and rename remain editor aids/i,
+);
+assertMentions(
+  changelog,
+  "CHANGELOG.md",
+  "Marrow-owned typed facts",
+  /typed\s+hover\/navigation facts stay owned by Marrow/i,
 );
 assertMentions(
   changelog,
@@ -363,14 +375,20 @@ const readmeSourceIntelligence = markdownBullet(readme, "README.md", "Source int
 assertMentions(
   readmeSourceIntelligence,
   "README.md source intelligence bullet",
-  "presentation-only source intelligence framing",
-  /presentation-only[\s\S]*not stable production semantic contracts/i,
+  "fact-backed completion framing",
+  /completion are backed by Marrow facts over the current analysis/i,
+);
+assertMentions(
+  readmeSourceIntelligence,
+  "README.md source intelligence bullet",
+  "editor aid caveat",
+  /Hover, go-to definition,\s+find references, and rename remain editor aids/i,
 );
 assertMentions(
   readmeSourceIntelligence,
   "README.md source intelligence bullet",
   "Marrow-owned typed facts",
-  /typed hover\/navigation\/completion facts stay owned by Marrow/i,
+  /typed hover\/navigation facts stay owned by Marrow/i,
 );
 assertMentions(readme, "README.md", "rename catalog-evolution caveat", /catalog-backed evolution facts/i);
 assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveData[\s\S]*advisory/i);
