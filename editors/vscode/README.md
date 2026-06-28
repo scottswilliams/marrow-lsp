@@ -71,6 +71,8 @@ same way, in order:
   debuggee state, or served programs; a disabled, busy, or missing store is treated as
   "unavailable" rather than reporting an error.
 - Debugging is **statement-level** (not expression-level stepping).
+- Attaching to programs started with `marrow serve` is not advertised yet. The debug adapter
+  reports a blocked Marrow contract until serve/attach execution boundary facts exist.
 
 ## Development
 

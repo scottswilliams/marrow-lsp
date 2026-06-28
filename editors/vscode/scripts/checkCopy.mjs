@@ -257,6 +257,11 @@ assert.equal(
   "Saved Resource Inspector",
   "saved-resource view title must name the inspector",
 );
+assert.equal(
+  Object.hasOwn(marrowDebugger.configurationAttributes, "attach"),
+  false,
+  "VS Code must not advertise attach until Marrow exposes serve/attach execution boundary facts",
+);
 const launchProperties = marrowDebugger.configurationAttributes.launch.properties;
 assert.equal(
   Object.hasOwn(launchProperties, "entry"),

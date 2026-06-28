@@ -734,6 +734,7 @@ fn assert_dap_execution_boundary(boundary: &Json, store_kind: &str, stamped: boo
 fn malformed_request_arguments_fail_before_command_handlers() {
     for (command, arguments) in [
         ("initialize", json!([])),
+        ("attach", json!([])),
         ("launch", json!([])),
         ("setBreakpoints", json!([])),
         ("configurationDone", json!("bad")),
@@ -799,6 +800,30 @@ fn unsupported_commands_do_not_parse_request_arguments() {
         "dap.unsupportedRequest",
         "unsupported-request",
         None,
+    );
+}
+
+#[test]
+fn attach_reports_serve_boundary_blocker() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+
+    let attach = client.request("attach", json!({ "project": "/tmp/project" }));
+    let attach = client.response_for(attach);
+    assert_response_marrow_error(
+        &attach,
+        "dap.attach.blocked",
+        "blocked-on-marrow",
+        Some("serve/attach execution boundary facts"),
+    );
+
+    let threads = client.request("threads", json!({}));
+    let threads = client.response_for(threads);
+    assert_eq!(
+        threads["success"], true,
+        "blocked attach must leave the protocol session usable: {threads}"
     );
 }
 
