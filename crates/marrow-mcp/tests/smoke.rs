@@ -240,16 +240,17 @@ fn data_tools_refuse_without_the_opt_in() {
         "without the opt-in, data tools must refuse and read nothing, got {response}"
     );
     assert_eq!(structured["available"], false);
-    assert_eq!(structured["contract"]["status"], "presentation-only");
+    assert_eq!(structured["contract"]["status"], "ready");
+    assert_eq!(structured["contract"]["stableProductionApi"], true);
     assert_eq!(
         structured["contract"]["description"],
-        "saved-root listing helper"
+        "saved-root listing API"
     );
     assert!(
         response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .starts_with("saved-root listing helper (presentation-only: "),
+            .starts_with("saved-root listing API (ready): "),
         "summary must name the saved-root contract, got {response}"
     );
 
@@ -278,10 +279,11 @@ fn data_tools_refuse_without_the_opt_in() {
         "without the opt-in, mw_data_children must refuse before loading the file, got {response}"
     );
     assert_eq!(structured["available"], false);
-    assert_eq!(structured["contract"]["status"], "presentation-only");
+    assert_eq!(structured["contract"]["status"], "ready");
+    assert_eq!(structured["contract"]["stableProductionApi"], true);
     assert_eq!(
         structured["contract"]["description"],
-        "bounded typed data helper"
+        "bounded typed data children API"
     );
 
     send(
@@ -308,10 +310,11 @@ fn data_tools_refuse_without_the_opt_in() {
         "without the opt-in, mw_data_read must refuse before loading the file, got {response}"
     );
     assert_eq!(structured["available"], false);
-    assert_eq!(structured["contract"]["status"], "presentation-only");
+    assert_eq!(structured["contract"]["status"], "ready");
+    assert_eq!(structured["contract"]["stableProductionApi"], true);
     assert_eq!(
         structured["contract"]["description"],
-        "data value preview helper"
+        "bounded typed data read API"
     );
 
     send(

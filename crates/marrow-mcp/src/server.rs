@@ -11,10 +11,7 @@ use marrow_lsp_core::data_explorer::{
     DataChildrenRequest, DataReadRequest, DataRequestValidationError, data_key_input_schema,
     data_path_segment_input_schema, validate_data_children_request, validate_data_read_request,
 };
-use marrow_lsp_core::mcp::{
-    self, DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS, DATA_READ_MISSING_FACTS,
-    RunMode, SAVED_DATA_MISSING_FACTS, SurfaceRouteScope,
-};
+use marrow_lsp_core::mcp::{self, DATA_INTEGRITY_MISSING_FACTS, RunMode, SurfaceRouteScope};
 use serde_json::{Value as Json, json};
 
 /// The MCP protocol version this server speaks, echoed in the `initialize` reply.
@@ -286,19 +283,8 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_saved_roots",
-            "description": "Presentation-only saved-root listing helper: list typed saved-root views with Marrow data_view_boundary facts and generation/snapshot metadata, retained for current clients, from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled. Missing integrity and repair facts plus serve/attach data boundaries; not a stable typed production API.",
-            "_meta": marrow_meta(json!({
-                "status": "presentation-only",
-                "stableProductionApi": false,
-                "description": "saved-root listing helper",
-                "missingFacts": SAVED_DATA_MISSING_FACTS,
-                "dataAccess": "gated",
-                "pathSurface": {
-                    "rootOnly": true,
-                    "childPaths": "absent",
-                    "editorAuthoredSavedPath": "blocked",
-                },
-            })),
+            "description": "Production read-only saved-root listing API: list typed saved-root views with Marrow data_view_boundary facts and generation/snapshot metadata from the project's real store when data access is enabled. It returns no child paths or stored values, accepts no editor-authored saved path, and reads nothing when data access is disabled.",
+            "_meta": marrow_meta(mcp::saved_roots_contract()),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -309,25 +295,8 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_children",
-            "description": "Presentation-only bounded typed data helper: return one page of typed child segments with Marrow data_view_boundary facts and generation/snapshot metadata, retained for current clients, for a saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled. Missing integrity and repair facts plus serve/attach data boundaries; not a stable production data API.",
-            "_meta": marrow_meta(json!({
-                "status": "presentation-only",
-                "stableProductionApi": false,
-                "description": "bounded typed data helper",
-                "missingFacts": DATA_CHILDREN_MISSING_FACTS,
-                "dataAccess": "gated",
-                "basis": "Marrow typed data children tooling",
-                "boundedness": {
-                    "page": "limit-clamped",
-                    "unboundedWalk": false,
-                },
-                "pathSurface": {
-                    "segments": "typed-saved-data-path",
-                    "cursor": "typed",
-                    "memberExpansion": "Marrow-owned",
-                    "savedPathString": "absent",
-                },
-            })),
+            "description": "Production read-only bounded typed data children API: return one page of typed child segments with Marrow data_view_boundary facts and generation/snapshot metadata for a saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path and an optional typed cursor DTO, clamps `limit`, and reads nothing when data access is disabled.",
+            "_meta": marrow_meta(mcp::data_children_contract()),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -350,23 +319,8 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_read",
-            "description": "Presentation-only data value preview helper: return a Marrow-rendered value preview with Marrow data_view_boundary facts and generation/snapshot metadata, retained for current clients, for one typed saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path, clamps `preview_limit`, uses Marrow-owned bounded read presence, and reads nothing when data access is disabled. Missing integrity and repair facts plus serve/attach data boundaries; not a stable production data API.",
-            "_meta": marrow_meta(json!({
-                "status": "presentation-only",
-                "stableProductionApi": false,
-                "description": "data value preview helper",
-                "missingFacts": DATA_READ_MISSING_FACTS,
-                "dataAccess": "gated",
-                "basis": "Marrow typed data read tooling",
-                "boundedness": {
-                    "valuePreview": "limit-clamped"
-                },
-                "presenceDetection": "Marrow-owned bounded read presence",
-                "pathSurface": {
-                    "segments": "typed-saved-data-path",
-                    "savedPathString": "absent",
-                },
-            })),
+            "description": "Production read-only bounded typed data read API: return a Marrow-rendered value preview with Marrow data_view_boundary facts and generation/snapshot metadata for one typed saved-data path from the project's real store when data access is enabled. It accepts a catalog-bound typed saved-data path, clamps `preview_limit`, uses Marrow-owned bounded read presence, and reads nothing when data access is disabled.",
+            "_meta": marrow_meta(mcp::data_read_contract()),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -802,18 +756,15 @@ mod tests {
     }
 
     #[test]
-    fn catalog_exposes_presentation_tool_contracts() {
+    fn catalog_exposes_saved_data_read_tool_contracts() {
         let catalog = tools();
         let tools = catalog.as_array().unwrap();
 
         let saved_roots = contract(tools, "mw_saved_roots");
-        assert_eq!(saved_roots["status"], "presentation-only");
-        assert_eq!(saved_roots["stableProductionApi"], false);
-        assert_eq!(saved_roots["description"], "saved-root listing helper");
-        assert_eq!(
-            strings(&saved_roots["missingFacts"]),
-            SAVED_DATA_MISSING_FACTS.to_vec()
-        );
+        assert_eq!(saved_roots["status"], "ready");
+        assert_eq!(saved_roots["stableProductionApi"], true);
+        assert_eq!(saved_roots["description"], "saved-root listing API");
+        assert_eq!(strings(&saved_roots["missingFacts"]), Vec::<String>::new());
         assert_eq!(saved_roots["dataAccess"], "gated");
         assert_eq!(saved_roots["pathSurface"]["rootOnly"], true);
         assert_eq!(saved_roots["pathSurface"]["childPaths"], "absent");
@@ -823,12 +774,15 @@ mod tests {
         );
 
         let data_children = contract(tools, "mw_data_children");
-        assert_eq!(data_children["status"], "presentation-only");
-        assert_eq!(data_children["stableProductionApi"], false);
-        assert_eq!(data_children["description"], "bounded typed data helper");
+        assert_eq!(data_children["status"], "ready");
+        assert_eq!(data_children["stableProductionApi"], true);
+        assert_eq!(
+            data_children["description"],
+            "bounded typed data children API"
+        );
         assert_eq!(
             strings(&data_children["missingFacts"]),
-            DATA_CHILDREN_MISSING_FACTS.to_vec()
+            Vec::<String>::new()
         );
         assert_eq!(data_children["dataAccess"], "gated");
         assert_eq!(data_children["boundedness"]["page"], "limit-clamped");
@@ -843,13 +797,10 @@ mod tests {
         );
 
         let data_read = contract(tools, "mw_data_read");
-        assert_eq!(data_read["status"], "presentation-only");
-        assert_eq!(data_read["stableProductionApi"], false);
-        assert_eq!(data_read["description"], "data value preview helper");
-        assert_eq!(
-            strings(&data_read["missingFacts"]),
-            DATA_READ_MISSING_FACTS.to_vec()
-        );
+        assert_eq!(data_read["status"], "ready");
+        assert_eq!(data_read["stableProductionApi"], true);
+        assert_eq!(data_read["description"], "bounded typed data read API");
+        assert_eq!(strings(&data_read["missingFacts"]), Vec::<String>::new());
         assert_eq!(data_read["dataAccess"], "gated");
         assert_eq!(data_read["basis"], "Marrow typed data read tooling");
         assert_eq!(data_read["boundedness"]["valuePreview"], "limit-clamped");
@@ -910,6 +861,22 @@ mod tests {
         let read_segments = &tool(tools, "mw_data_read")["inputSchema"]["properties"]["segments"];
         assert_eq!(read_segments["minItems"], 1);
         assert_eq!(read_segments.get("maxItems"), None);
+    }
+
+    #[test]
+    fn catalog_saved_data_contracts_match_core_runtime_contracts() {
+        let catalog = tools();
+        let tools = catalog.as_array().unwrap();
+
+        assert_eq!(
+            contract(tools, "mw_saved_roots"),
+            &mcp::saved_roots_contract()
+        );
+        assert_eq!(
+            contract(tools, "mw_data_children"),
+            &mcp::data_children_contract()
+        );
+        assert_eq!(contract(tools, "mw_data_read"), &mcp::data_read_contract());
     }
 
     #[test]

@@ -18,11 +18,11 @@ Initial release.
   hover/navigation facts stay owned by Marrow.
 - Rename refuses saved-data-backed edits until Marrow exposes catalog-backed evolution facts.
 - Document formatting.
-- The generation-aware Saved Resource Inspector view for opt-in committed saved-resource inspection
-  through Marrow-owned store facts. It automatically refreshes from LSP-supplied native dev-store
-  and committed-lock watch targets when `marrow.liveData` is enabled, refuses to mix child pages or
-  value reads from different Marrow store snapshots, and does not watch uncommitted writes, debuggee
-  state, or served programs.
+- The Saved Resource Inspector view for the opt-in production read-only data-view contract over
+  committed saved resources through Marrow-owned store facts. It automatically refreshes from
+  LSP-supplied native dev-store and committed-lock watch targets when `marrow.liveData` is enabled,
+  refuses to mix child pages or value reads from different Marrow store snapshots, and does not
+  watch uncommitted writes, debuggee state, or served programs.
 - F5 debugging via the `marrow-dap` adapter, with explicit `entry`, Marrow-admitted typed `args`
   where `int`, `date`, and `bytes` use exact string forms, stop-on-entry, statement stepping,
   verified plain-line and conditional breakpoints, exact hit-count breakpoints, logpoints with

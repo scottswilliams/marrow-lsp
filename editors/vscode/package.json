@@ -436,7 +436,7 @@
         "marrow.liveData": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Opt in to read-only native dev-store reads for the Saved Resource Inspector and advisory stored-data integrity checks. Leave disabled to prevent editor-triggered reads of local stored data."
+          "markdownDescription": "Opt in to the production read-only data-view contract for the Saved Resource Inspector and to advisory stored-data integrity checks over native dev-store reads. Leave disabled to prevent editor-triggered reads of local stored data."
         }
       }
     }

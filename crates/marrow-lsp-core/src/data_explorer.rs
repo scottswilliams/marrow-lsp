@@ -1,4 +1,4 @@
-//! Saved-data presentation DTOs for editor and tool transports.
+//! Saved-data data-view DTOs for editor and tool transports.
 //!
 //! Marrow owns saved-data traversal and typed key validation. This module only
 //! translates transport DTOs, clamps child pages, and calls Marrow tooling APIs.

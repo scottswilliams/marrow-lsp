@@ -139,7 +139,13 @@ assertMentions(
   changelog,
   "CHANGELOG.md",
   "Saved Resource Inspector framing",
-  /Saved Resource Inspector view[\s\S]*opt-in committed\s+saved-resource inspection[\s\S]*Marrow-owned store\s+facts/i,
+  /Saved Resource Inspector view[\s\S]*production\s+read-only\s+data-view\s+contract[\s\S]*Marrow-owned store\s+facts/i,
+);
+assertMentions(
+  changelogSavedInspector,
+  "CHANGELOG.md Saved Resource Inspector bullet",
+  "production read-only data-view contract",
+  /production\s+read-only\s+data-view\s+contract/i,
 );
 assertMentions(
   changelogSavedInspector,
@@ -158,6 +164,12 @@ assertMentions(
   "CHANGELOG.md Saved Resource Inspector bullet",
   "no live watches",
   /does\s+not\s+watch[\s\S]*uncommitted\s+writes[\s\S]*debuggee\s+state[\s\S]*served\s+programs/i,
+);
+assertMentions(
+  readmeSavedInspector,
+  "README.md Saved Resource Inspector bullet",
+  "production read-only data-view contract",
+  /production\s+read-only\s+data-view\s+contract/i,
 );
 assertMentions(
   readmeSavedInspector,
@@ -243,6 +255,12 @@ assertDoesNotMention(
 const liveDataDescription =
   packageJson.contributes.configuration.properties["marrow.liveData"].markdownDescription;
 assertMentions(liveDataDescription, "marrow.liveData", "opt-in setting framing", /opt[- ]in/i);
+assertMentions(
+  liveDataDescription,
+  "marrow.liveData",
+  "production read-only data-view contract",
+  /production\s+read-only\s+data-view\s+contract/i,
+);
 assertMentions(liveDataDescription, "marrow.liveData", "advisory integrity framing", /advisory/i);
 assertMentions(liveDataDescription, "marrow.liveData", "native dev-store reads", /native dev[- ]store/i);
 

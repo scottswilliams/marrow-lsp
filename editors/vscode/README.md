@@ -16,13 +16,13 @@ Rust binaries. No parsing or position math runs in TypeScript.
 - **Rename** — editor rename for supported source bindings; saved-data-backed edits are refused
   until Marrow exposes catalog-backed evolution facts.
 - **Formatting** — format a `.mw` document.
-- **Saved Resource Inspector** — an opt-in view (Activity Bar) that expands committed saved
-  resources from the native dev store when `marrow.liveData` is enabled. It is gated on Marrow
-  tooling facts, carries Marrow store snapshot metadata through expansions, refuses to mix child
-  pages or value reads from a different snapshot, and automatically refreshes from LSP-supplied
-  native dev-store and committed-lock watch targets when `marrow.liveData` is enabled. The view
-  title remains available for manual refreshes and for revealing a selected server-returned root.
-  It does not accept editor-authored saved paths.
+- **Saved Resource Inspector** — an opt-in production read-only data-view contract (Activity Bar)
+  that expands committed saved resources from the native dev store when `marrow.liveData` is
+  enabled. It is gated on Marrow tooling facts, carries Marrow store snapshot metadata through
+  expansions, refuses to mix child pages or value reads from a different snapshot, and automatically
+  refreshes from LSP-supplied native dev-store and committed-lock watch targets when
+  `marrow.liveData` is enabled. The view title remains available for manual refreshes and for
+  revealing a selected server-returned root. It does not accept editor-authored saved paths.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
   project's `defaultEntry`, or set `entry` and typed `args` in `launch.json`. Marrow admits
   the args; `int`, `date`, and `bytes` use exact string forms. F5 remains useful for launch,
@@ -57,9 +57,9 @@ same way, in order:
   dev locations when the file exists.
 - `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
   bundled and dev locations when the file exists.
-- `marrow.liveData` — opt in to read-only native dev-store reads for the Saved Resource Inspector
-  and advisory data-integrity checks. Leave disabled to prevent editor-triggered reads of local
-  stored data.
+- `marrow.liveData` — opt in to the production read-only data-view contract for the Saved Resource
+  Inspector and to advisory data-integrity checks over native dev-store reads. Leave disabled to
+  prevent editor-triggered reads of local stored data.
 
 ## Known limitations
 

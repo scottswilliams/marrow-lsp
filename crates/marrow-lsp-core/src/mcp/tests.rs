@@ -58,6 +58,18 @@ fn assert_production_contract(result: &Json, description: &str) {
     );
 }
 
+fn assert_saved_roots_contract(result: &Json) {
+    assert_eq!(result["contract"], saved_roots_contract(), "{result}");
+}
+
+fn assert_data_children_contract(result: &Json) {
+    assert_eq!(result["contract"], data_children_contract(), "{result}");
+}
+
+fn assert_data_read_contract(result: &Json) {
+    assert_eq!(result["contract"], data_read_contract(), "{result}");
+}
+
 fn assert_store_snapshot(snapshot: &Json) {
     assert_eq!(
         snapshot["profile_version"], DATA_GENERATION_PROFILE_VERSION,
@@ -2330,12 +2342,7 @@ fn data_tools_refuse_when_not_enabled() {
         roots.get("data_view_boundary").is_none(),
         "disabled data replies must not carry a fake boundary: {roots}"
     );
-    assert_contract(
-        &roots,
-        "presentation-only",
-        "saved-root listing helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_saved_roots_contract(&roots);
     let integrity = data_integrity(&file, false);
     assert_eq!(integrity["dataAccess"], "disabled");
     assert_eq!(integrity["store_snapshot"], Json::Null);
@@ -2369,12 +2376,7 @@ fn data_tools_refuse_when_not_enabled() {
         children.get("data_view_boundary").is_none(),
         "disabled data replies must not carry a fake boundary: {children}"
     );
-    assert_contract(
-        &children,
-        "presentation-only",
-        "bounded typed data helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_data_children_contract(&children);
 
     let read = data_read(
         Path::new("/nope/project/src/main.mw"),
@@ -2389,12 +2391,7 @@ fn data_tools_refuse_when_not_enabled() {
         read.get("data_view_boundary").is_none(),
         "disabled data replies must not carry a fake boundary: {read}"
     );
-    assert_contract(
-        &read,
-        "presentation-only",
-        "data value preview helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_data_read_contract(&read);
 }
 
 #[test]
@@ -2416,12 +2413,7 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
     );
     assert_store_snapshot(&result["store_snapshot"]);
     assert_data_view_boundary(&result["data_view_boundary"]);
-    assert_contract(
-        &result,
-        "presentation-only",
-        "saved-root listing helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_saved_roots_contract(&result);
 }
 
 #[test]
@@ -2430,16 +2422,12 @@ fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
 
     let roots = saved_roots(&file, true);
     assert_eq!(roots["available"], false, "{roots}");
+    assert_eq!(roots["roots"], json!([]), "{roots}");
     assert!(
         roots.get("data_view_boundary").is_none(),
         "unavailable data replies must not carry a fake boundary: {roots}"
     );
-    assert!(
-        roots["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("no catalog activation stamp")),
-        "{roots}"
-    );
+    assert_saved_roots_contract(&roots);
 
     let children = data_children(
         &file,
@@ -2453,16 +2441,14 @@ fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
 
     assert_eq!(children["available"], false, "{children}");
     assert_eq!(children["children"], json!([]), "{children}");
+    assert_eq!(children["truncated"], false, "{children}");
+    assert_eq!(children["cursor"], Json::Null, "{children}");
+    assert_eq!(children["store_snapshot"], Json::Null, "{children}");
     assert!(
         children.get("data_view_boundary").is_none(),
         "unavailable data replies must not carry a fake boundary: {children}"
     );
-    assert!(
-        children["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("no catalog activation stamp")),
-        "{children}"
-    );
+    assert_data_children_contract(&children);
 }
 
 #[test]
@@ -2536,12 +2522,7 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
     );
     assert_store_snapshot(&result["store_snapshot"]);
     assert_data_view_boundary(&result["data_view_boundary"]);
-    assert_contract(
-        &result,
-        "presentation-only",
-        "bounded typed data helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_data_children_contract(&result);
 }
 
 #[test]
@@ -2571,12 +2552,7 @@ fn data_read_returns_bounded_value_preview_when_enabled() {
     assert_eq!(result["value_truncated"], false, "{result}");
     assert_store_snapshot(&result["store_snapshot"]);
     assert_data_view_boundary(&result["data_view_boundary"]);
-    assert_contract(
-        &result,
-        "presentation-only",
-        "data value preview helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_data_read_contract(&result);
 }
 
 #[test]
@@ -2604,12 +2580,7 @@ fn data_children_returns_empty_page_for_absent_members() {
     assert_eq!(result["truncated"], false, "{result}");
     assert_eq!(result["cursor"], Json::Null, "{result}");
     assert_store_snapshot(&result["store_snapshot"]);
-    assert_contract(
-        &result,
-        "presentation-only",
-        "bounded typed data helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_data_children_contract(&result);
 }
 
 #[test]
@@ -2632,10 +2603,5 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
     assert_eq!(result["truncated"], false, "{result}");
     assert_eq!(result["cursor"], Json::Null, "{result}");
     assert_store_snapshot(&result["store_snapshot"]);
-    assert_contract(
-        &result,
-        "presentation-only",
-        "bounded typed data helper",
-        &["integrity and repair facts", "serve/attach data boundaries"],
-    );
+    assert_data_children_contract(&result);
 }

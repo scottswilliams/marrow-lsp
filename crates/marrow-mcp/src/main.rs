@@ -520,10 +520,7 @@ fn write_message(out: &mut impl Write, message: &Json) {
 mod tests {
     use super::*;
 
-    use marrow_lsp_core::mcp::{
-        DATA_CHILDREN_MISSING_FACTS, DATA_INTEGRITY_MISSING_FACTS, DATA_READ_MISSING_FACTS,
-        SAVED_DATA_MISSING_FACTS,
-    };
+    use marrow_lsp_core::mcp::DATA_INTEGRITY_MISSING_FACTS;
 
     /// Drive the server loop over an in-memory stdin and collect its line-framed
     /// replies as parsed JSON.
@@ -848,13 +845,14 @@ mod tests {
                 json!({
                     "available": false,
                     "roots": [],
-                    "contract": contract(
-                        "presentation-only",
-                        "saved-root listing helper",
-                        SAVED_DATA_MISSING_FACTS,
-                    ),
+                    "contract": {
+                        "status": "ready",
+                        "stableProductionApi": true,
+                        "description": "saved-root listing API",
+                        "missingFacts": [],
+                    },
                 }),
-                "saved-root listing helper (presentation-only: integrity and repair facts +1): data unavailable",
+                "saved-root listing API (ready): data unavailable",
             ),
             (
                 "mw_data_integrity",
@@ -877,13 +875,14 @@ mod tests {
                     "available": true,
                     "children": [{}, {}],
                     "truncated": true,
-                    "contract": contract(
-                        "presentation-only",
-                        "bounded typed data helper",
-                        DATA_CHILDREN_MISSING_FACTS,
-                    ),
+                    "contract": {
+                        "status": "ready",
+                        "stableProductionApi": true,
+                        "description": "bounded typed data children API",
+                        "missingFacts": [],
+                    },
                 }),
-                "bounded typed data helper (presentation-only: integrity and repair facts +1): 2 children (truncated)",
+                "bounded typed data children API (ready): 2 children (truncated)",
             ),
             (
                 "mw_data_read",
@@ -892,13 +891,14 @@ mod tests {
                     "presence": "value_only",
                     "value": "42",
                     "value_truncated": false,
-                    "contract": contract(
-                        "presentation-only",
-                        "data value preview helper",
-                        DATA_READ_MISSING_FACTS,
-                    ),
+                    "contract": {
+                        "status": "ready",
+                        "stableProductionApi": true,
+                        "description": "bounded typed data read API",
+                        "missingFacts": [],
+                    },
                 }),
-                "data value preview helper (presentation-only: integrity and repair facts +1): 42",
+                "bounded typed data read API (ready): 42",
             ),
             (
                 "mw_surface_read",

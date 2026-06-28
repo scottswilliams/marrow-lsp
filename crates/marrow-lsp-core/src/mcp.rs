@@ -58,12 +58,6 @@ use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
 use crate::workspace::Workspace;
 
-pub const SAVED_DATA_MISSING_FACTS: &[&str] =
-    &["integrity and repair facts", "serve/attach data boundaries"];
-pub const DATA_CHILDREN_MISSING_FACTS: &[&str] =
-    &["integrity and repair facts", "serve/attach data boundaries"];
-pub const DATA_READ_MISSING_FACTS: &[&str] =
-    &["integrity and repair facts", "serve/attach data boundaries"];
 pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
     "source/store compatibility verdicts",
     "drift witnesses",
@@ -139,16 +133,48 @@ fn surface_write_contract() -> Json {
     contract
 }
 
-fn saved_data_contract() -> Json {
-    presentation_contract("saved-root listing helper", SAVED_DATA_MISSING_FACTS)
+pub fn saved_roots_contract() -> Json {
+    let mut contract = production_contract("saved-root listing API");
+    contract["basis"] = json!("Marrow typed saved-root data-view facts");
+    contract["dataAccess"] = json!("gated");
+    contract["pathSurface"] = json!({
+        "rootOnly": true,
+        "childPaths": "absent",
+        "editorAuthoredSavedPath": "blocked",
+    });
+    contract
 }
 
-fn data_children_contract() -> Json {
-    presentation_contract("bounded typed data helper", DATA_CHILDREN_MISSING_FACTS)
+pub fn data_children_contract() -> Json {
+    let mut contract = production_contract("bounded typed data children API");
+    contract["basis"] = json!("Marrow typed data children tooling");
+    contract["dataAccess"] = json!("gated");
+    contract["boundedness"] = json!({
+        "page": "limit-clamped",
+        "unboundedWalk": false,
+    });
+    contract["pathSurface"] = json!({
+        "segments": "typed-saved-data-path",
+        "cursor": "typed",
+        "memberExpansion": "Marrow-owned",
+        "savedPathString": "absent",
+    });
+    contract
 }
 
-fn data_read_contract() -> Json {
-    presentation_contract("data value preview helper", DATA_READ_MISSING_FACTS)
+pub fn data_read_contract() -> Json {
+    let mut contract = production_contract("bounded typed data read API");
+    contract["basis"] = json!("Marrow typed data read tooling");
+    contract["dataAccess"] = json!("gated");
+    contract["boundedness"] = json!({
+        "valuePreview": "limit-clamped",
+    });
+    contract["presenceDetection"] = json!("Marrow-owned bounded read presence");
+    contract["pathSurface"] = json!({
+        "segments": "typed-saved-data-path",
+        "savedPathString": "absent",
+    });
+    contract
 }
 
 fn data_integrity_contract() -> Json {
@@ -674,7 +700,7 @@ fn store_stamp_json(stamp: StoreStamp) -> Json {
 /// no native store, or a store that cannot be read right now, answers
 /// `available: false`.
 pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
-    let contract = saved_data_contract();
+    let contract = saved_roots_contract();
     if !allow_data {
         return data_disabled(contract);
     }
