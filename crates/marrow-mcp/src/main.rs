@@ -251,27 +251,6 @@ fn summarize(name: &str, result: &Json) -> String {
                         .unwrap_or_else(|| "absent".to_string())
                 }
             }
-            "mw_data_integrity" => {
-                if result.get("available").and_then(Json::as_bool) != Some(true) {
-                    "data unavailable".to_string()
-                } else {
-                    let scanned = result.get("scanned").and_then(Json::as_u64).unwrap_or(0);
-                    let findings = array_len(result, "findings");
-                    let base = if findings == 0 {
-                        format!("clean, {scanned} scanned")
-                    } else {
-                        format!(
-                            "{findings} finding{}, {scanned} scanned",
-                            plural(findings as u64)
-                        )
-                    };
-                    if result.get("truncated").and_then(Json::as_bool) == Some(true) {
-                        format!("{base} (truncated)")
-                    } else {
-                        base
-                    }
-                }
-            }
             "mw_run" => run_summary(result),
             _ => "ok".to_string(),
         }
@@ -520,8 +499,6 @@ fn write_message(out: &mut impl Write, message: &Json) {
 mod tests {
     use super::*;
 
-    use marrow_lsp_core::mcp::DATA_INTEGRITY_MISSING_FACTS;
-
     /// Drive the server loop over an in-memory stdin and collect its line-framed
     /// replies as parsed JSON.
     fn drive(requests: &[Json], policy: Policy) -> Vec<Json> {
@@ -751,16 +728,6 @@ mod tests {
                 "error: {\"kind\":\"path\",\"value\":{\"code\":\"zero_limit\"}}",
             ),
             (
-                "mw_data_integrity",
-                json!({ "available": true, "findings": [], "scanned": 5, "truncated": false }),
-                "clean, 5 scanned",
-            ),
-            (
-                "mw_data_integrity",
-                json!({ "available": true, "findings": [{}], "scanned": 9, "truncated": false }),
-                "1 finding, 9 scanned",
-            ),
-            (
                 "mw_run",
                 json!({
                     "result": { "kind": "value", "value": { "kind": "int", "value": 42 } },
@@ -818,14 +785,6 @@ mod tests {
 
     #[test]
     fn summarize_prefixes_contract_bearing_results_and_preserves_contract() {
-        let contract = |status: &str, description: &str, missing_facts: &[&str]| {
-            json!({
-                "status": status,
-                "stableProductionApi": false,
-                "description": description,
-                "missingFacts": missing_facts,
-            })
-        };
         let cases: Vec<(&str, Json, &str)> = vec![
             (
                 "mw_complete",
@@ -853,21 +812,6 @@ mod tests {
                     },
                 }),
                 "saved-root listing API (ready): data unavailable",
-            ),
-            (
-                "mw_data_integrity",
-                json!({
-                    "available": true,
-                    "findings": [],
-                    "scanned": 10,
-                    "truncated": false,
-                    "contract": contract(
-                        "presentation-only",
-                        "debug/admin advisory",
-                        DATA_INTEGRITY_MISSING_FACTS,
-                    ),
-                }),
-                "debug/admin advisory (presentation-only: drift witnesses +2): clean, 10 scanned",
             ),
             (
                 "mw_data_children",
@@ -960,7 +904,6 @@ mod tests {
         for tool in [
             "mw_saved_roots",
             "mw_data_children",
-            "mw_data_integrity",
             "mw_surface_read",
             "mw_surface_write",
         ] {

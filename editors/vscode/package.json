@@ -56,11 +56,6 @@
         "title": "Reveal Saved Resource",
         "category": "Marrow",
         "icon": "$(target)"
-      },
-      {
-        "command": "marrow.checkDataIntegrity",
-        "title": "Marrow: Check Stored Data Integrity (Advisory)",
-        "category": "Marrow"
       }
     ],
     "menus": {
@@ -436,7 +431,7 @@
         "marrow.liveData": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Opt in to the production read-only data-view contract for the Saved Resource Inspector and to advisory stored-data integrity checks over native dev-store reads. Leave disabled to prevent editor-triggered reads of local stored data."
+          "markdownDescription": "Opt in to the production read-only data-view contract for the Saved Resource Inspector over native dev-store reads. Leave disabled to prevent editor-triggered reads of local stored data."
         }
       }
     }
@@ -445,8 +440,7 @@
     "compile": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "compile:release": "esbuild ./src/extension.ts --bundle --minify --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "vscode:prepublish": "npm run compile:release",
-    "check": "node ./scripts/checkGrammar.mjs && tsc --noEmit && npm run check:dataIntegrity && npm run check:savedResourceInspector && npm run check:copy && npm run check:bundleSmoke",
-    "check:dataIntegrity": "node ./scripts/checkDataIntegrity.mjs",
+    "check": "node ./scripts/checkGrammar.mjs && tsc --noEmit && npm run check:savedResourceInspector && npm run check:copy && npm run check:bundleSmoke",
     "check:savedResourceInspector": "node ./scripts/checkSavedResourceInspector.mjs",
     "check:copy": "node ./scripts/checkCopy.mjs",
     "check:bundleSmoke": "node ./scripts/checkBundleSmoke.mjs",

@@ -2250,10 +2250,6 @@ fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
     );
     assert!(
         response["result"].get("data_view_boundary").is_none(),
-        "unavailable dataIntegrity must not carry a boundary: {response}"
-    );
-    assert!(
-        response["result"].get("data_view_boundary").is_none(),
         "unavailable savedRoots must not carry a boundary: {response}"
     );
 
@@ -2314,24 +2310,6 @@ fn custom_live_data_requests_refuse_recomputed_unsaved_source_identity_drift() {
     assert!(
         response["result"].get("data_view_boundary").is_none(),
         "unavailable dataRead must not carry a boundary: {response}"
-    );
-
-    send(
-        &mut stdin,
-        &json!({ "jsonrpc": "2.0", "id": 6, "method": "marrow/dataIntegrity" }),
-    );
-    let response = wait_for_response(&mut stdout, 6, Duration::from_secs(10));
-    assert!(response.get("error").is_none(), "no error: {response:?}");
-    assert_eq!(response["result"]["available"], false, "{response}");
-    assert_eq!(response["result"]["scanned"], 0, "{response}");
-    assert_eq!(
-        response["result"]["findings"].as_array().map(Vec::len),
-        Some(0),
-        "{response}"
-    );
-    assert_eq!(
-        response["result"]["store_snapshot"],
-        serde_json::Value::Null
     );
 
     let _ = server.0.kill();
@@ -2422,21 +2400,7 @@ fn custom_data_requests_reject_invalid_typed_envelopes() {
 }
 
 #[test]
-fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    std::fs::write(
-        root.join("marrow.json"),
-        r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
-    )
-    .unwrap();
-    let src = root.join("src");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(root.join("data")).unwrap();
-    let source = "module shelf\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n\npub fn f()\n    return\n";
-    let file = src.join("shelf.mw");
-    std::fs::write(&file, source).unwrap();
-
+fn custom_data_integrity_method_is_not_registered() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
             .stdin(Stdio::piped())
@@ -2458,43 +2422,16 @@ fn custom_data_integrity_is_unavailable_without_live_data_opt_in() {
         &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
 
-    let uri = url::Url::from_file_path(&file).unwrap().to_string();
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/didOpen",
-            "params": {
-                "textDocument": { "uri": uri, "languageId": "marrow", "version": 1, "text": source }
-            }
-        }),
-    );
-    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
-
     send(
         &mut stdin,
         &json!({ "jsonrpc": "2.0", "id": 2, "method": "marrow/dataIntegrity" }),
     );
     let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
-    assert!(response.get("error").is_none(), "no error: {response:?}");
-    let result = &response["result"];
     assert_eq!(
-        result["available"].as_bool(),
-        Some(false),
-        "missing marrow.liveData opt-in should not read the store"
+        response["error"]["code"], -32601,
+        "retired advisory data-integrity method must not stay registered: {response}"
     );
-    assert_eq!(
-        result["scanned"].as_u64(),
-        Some(0),
-        "no store entries should be scanned"
-    );
-    assert_eq!(result["findings"].as_array().map(Vec::len), Some(0));
-    assert_eq!(result["truncated"].as_bool(), Some(false));
-    assert_eq!(result["store_snapshot"], serde_json::Value::Null);
-    assert!(
-        result.get("data_view_boundary").is_none(),
-        "disabled dataIntegrity must not carry a boundary: {response}"
-    );
+    assert!(response.get("result").is_none(), "{response}");
 
     let _ = server.0.kill();
 }

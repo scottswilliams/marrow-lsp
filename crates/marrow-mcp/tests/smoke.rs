@@ -141,8 +141,8 @@ fn initialize_list_tools_then_call_mw_check() {
     );
     assert!(names.contains(&"mw_run"), "mw_run listed, got {names:?}");
     assert!(
-        names.contains(&"mw_data_integrity"),
-        "mw_data_integrity listed, got {names:?}"
+        !names.contains(&"mw_data_integrity"),
+        "retired advisory data-integrity tool must not be listed, got {names:?}"
     );
     assert!(
         names.contains(&"mw_data_children"),

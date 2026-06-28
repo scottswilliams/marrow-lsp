@@ -10,26 +10,6 @@ use marrow_store::key::SavedKey;
 use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
 use marrow_store::value::{SavedValue, encode_value};
 
-fn assert_contract(result: &Json, status: &str, description: &str, missing_facts: &[&str]) {
-    let contract = &result["contract"];
-    assert_eq!(contract["status"], status, "contract status for {result}");
-    assert_eq!(
-        contract["stableProductionApi"], false,
-        "stableProductionApi must be false for {result}"
-    );
-    assert_eq!(
-        contract["description"], description,
-        "contract description for {result}"
-    );
-    let actual: Vec<&str> = contract["missingFacts"]
-        .as_array()
-        .unwrap_or_else(|| panic!("contract missingFacts must be an array: {result}"))
-        .iter()
-        .map(|fact| fact.as_str().expect("missing fact string"))
-        .collect();
-    assert_eq!(actual, missing_facts, "missing facts for {result}");
-}
-
 fn assert_run_contract(result: &Json) {
     assert_production_contract(result, "sandboxed execution API");
 }
@@ -2343,24 +2323,6 @@ fn data_tools_refuse_when_not_enabled() {
         "disabled data replies must not carry a fake boundary: {roots}"
     );
     assert_saved_roots_contract(&roots);
-    let integrity = data_integrity(&file, false);
-    assert_eq!(integrity["dataAccess"], "disabled");
-    assert_eq!(integrity["store_snapshot"], Json::Null);
-    assert!(
-        integrity.get("data_view_boundary").is_none(),
-        "disabled data replies must not carry a fake boundary: {integrity}"
-    );
-    assert_contract(
-        &integrity,
-        "presentation-only",
-        "debug/admin advisory",
-        &[
-            "drift witnesses",
-            "typed repair facts",
-            "production validation contracts",
-        ],
-    );
-
     let children = data_children(
         Path::new("/nope/project/src/main.mw"),
         crate::data_explorer::DataChildrenRequest {
@@ -2448,39 +2410,6 @@ fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
         "unavailable data replies must not carry a fake boundary: {children}"
     );
     assert_data_children_contract(&children);
-}
-
-#[test]
-fn data_integrity_returns_snapshot_metadata_when_enabled() {
-    let (_dir, file) = native_counter_project(1..=1);
-
-    let result = data_integrity(&file, true);
-
-    assert_eq!(result["available"], true, "{result}");
-    assert_store_snapshot(&result["store_snapshot"]);
-    assert_data_view_boundary(&result["data_view_boundary"]);
-    assert!(
-        result["scanned"]
-            .as_u64()
-            .is_some_and(|scanned| scanned > 0)
-    );
-    let codes = result["findings"]
-        .as_array()
-        .expect("findings array")
-        .iter()
-        .map(|finding| finding["code"].as_str().expect("finding code"))
-        .collect::<Vec<_>>();
-    assert!(codes.contains(&"data.incomplete"), "{result}");
-    assert_contract(
-        &result,
-        "presentation-only",
-        "debug/admin advisory",
-        &[
-            "drift witnesses",
-            "typed repair facts",
-            "production validation contracts",
-        ],
-    );
 }
 
 #[test]

@@ -12,7 +12,6 @@ import {
   SavedResourceProvider,
   type SavedResourceNode,
 } from "./savedResourceInspector";
-import { MarrowDataIntegrity } from "./dataIntegrity";
 
 let client: LanguageClient | undefined;
 
@@ -110,7 +109,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const dataTree = vscode.window.createTreeView<SavedResourceNode>("marrowData", {
     treeDataProvider: dataProvider,
   });
-  let dataIntegrity: MarrowDataIntegrity | undefined;
   let dataWatchTargets: SavedDataWatchTargetRegistry | undefined;
   const refreshWatchTargets = () => {
     void dataWatchTargets?.refresh();
@@ -124,13 +122,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("marrow.revealSavedResource", () => {
       void revealSavedResource(dataProvider, dataTree);
-    }),
-    vscode.commands.registerCommand("marrow.checkDataIntegrity", () => {
-      if (dataIntegrity === undefined) {
-        void vscode.window.showErrorMessage("Marrow: language server is not running.");
-        return;
-      }
-      void dataIntegrity.run();
     }),
     vscode.debug.registerDebugAdapterDescriptorFactory(
       "marrow",
@@ -196,7 +187,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   dataProvider.setClient(client);
 
-  dataIntegrity = new MarrowDataIntegrity(client);
   dataWatchTargets = new SavedDataWatchTargetRegistry(client, dataProvider);
   await dataWatchTargets.refresh();
 
@@ -206,7 +196,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   projectConfigWatcher.onDidDelete(refreshWatchTargets);
 
   context.subscriptions.push(
-    dataIntegrity,
     dataWatchTargets,
     projectConfigWatcher,
     vscode.window.onDidChangeActiveTextEditor(refreshWatchTargets),

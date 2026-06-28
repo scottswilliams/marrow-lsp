@@ -58,11 +58,6 @@ use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
 use crate::workspace::Workspace;
 
-pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
-    "drift witnesses",
-    "typed repair facts",
-    "production validation contracts",
-];
 const SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION: &str = "source.namespace.completion.v1";
 
 fn production_contract(description: &str) -> Json {
@@ -71,15 +66,6 @@ fn production_contract(description: &str) -> Json {
         "stableProductionApi": true,
         "description": description,
         "missingFacts": [],
-    })
-}
-
-fn presentation_contract(description: &str, missing_facts: &[&str]) -> Json {
-    json!({
-        "status": "presentation-only",
-        "stableProductionApi": false,
-        "description": description,
-        "missingFacts": missing_facts,
     })
 }
 
@@ -173,18 +159,6 @@ pub fn data_read_contract() -> Json {
         "segments": "typed-saved-data-path",
         "savedPathString": "absent",
     });
-    contract
-}
-
-pub fn data_integrity_contract() -> Json {
-    let mut contract = presentation_contract("debug/admin advisory", DATA_INTEGRITY_MISSING_FACTS);
-    contract["basis"] = json!("Marrow integrity sample DTO");
-    contract["dataAccess"] = json!("gated");
-    contract["scope"] = json!("capped-current-schema-advisory");
-    contract["advisory"] = json!(true);
-    contract["debugAdmin"] = json!(true);
-    contract["productionValidation"] = json!(false);
-    contract["repair"] = json!(false);
     contract
 }
 
@@ -851,49 +825,6 @@ fn data_session(workspace: &Workspace) -> Result<Option<SavedDataSession>, Strin
         .project()
         .ok_or_else(|| "no project resolved for the file".to_string())?;
     open_saved_data_session(project)
-}
-
-/// `mw_data_integrity`: the schema-change-impact advisory — a capped, on-demand
-/// scan of the project's real stored data that flags every record the *current*
-/// schema can no longer account for (an orphan path, or a value that no longer
-/// decodes as its declared type). Reuses the same classification as
-/// `marrow data integrity`, through a linked Marrow read session. Gated like
-/// [`saved_roots`]: with `allow_data = false` it returns a refusal envelope and
-/// never opens the store. A project with no native store, or a store that cannot
-/// be read right now, answers `available: false`.
-pub fn data_integrity(file: &Path, allow_data: bool) -> Json {
-    let contract = data_integrity_contract();
-    if !allow_data {
-        let mut disabled = data_disabled(contract);
-        disabled["store_snapshot"] = Json::Null;
-        return disabled;
-    }
-    let unavailable = json!({
-        "available": false,
-        "findings": [],
-        "scanned": 0,
-        "truncated": false,
-        "store_snapshot": Json::Null,
-    });
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            let mut value = unavailable.clone();
-            value["error"] = json!(error);
-            return with_contract(value, contract);
-        }
-    };
-    let session = match data_session(&workspace) {
-        Ok(session) => session,
-        Err(error) => {
-            let mut value = unavailable.clone();
-            value["error"] = json!(error);
-            return with_contract(value, contract);
-        }
-    };
-    let result = serde_json::to_value(crate::data_integrity::data_integrity(session.as_ref()))
-        .unwrap_or(unavailable);
-    with_contract(result, contract)
 }
 
 /// The refusal a data tool returns when data access is not enabled: a clear,

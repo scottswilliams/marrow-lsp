@@ -8,7 +8,6 @@ mod callables;
 mod catalog_binding;
 pub mod completion;
 pub mod data_explorer;
-pub mod data_integrity;
 pub mod diagnostics;
 pub mod documents;
 pub mod execution;

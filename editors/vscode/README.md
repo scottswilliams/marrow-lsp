@@ -62,8 +62,8 @@ same way, in order:
 - `marrow.dap.path` — absolute path to the `marrow-dap` debug adapter binary. Overrides the
   bundled and dev locations when the file exists.
 - `marrow.liveData` — opt in to the production read-only data-view contract for the Saved Resource
-  Inspector and to advisory data-integrity checks over native dev-store reads. Leave disabled to
-  prevent editor-triggered reads of local stored data.
+  Inspector over native dev-store reads. Leave disabled to prevent editor-triggered reads of local
+  stored data.
 
 ## Known limitations
 

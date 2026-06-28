@@ -11,7 +11,6 @@ use marrow_lsp_core::data_explorer::{
     session_data_child_views_page, session_data_read, validate_data_children_request,
     validate_data_read_request,
 };
-use marrow_lsp_core::data_integrity::{DataIntegrityResult, data_integrity};
 use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::Documents;
 use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
@@ -38,7 +37,7 @@ pub struct Backend {
     /// runs if it is still current when the debounce elapses, so a newer edit
     /// supersedes an in-flight recompute.
     edit_seq: Arc<AtomicU64>,
-    /// Whether to read real stored data for debug/admin saved-data requests.
+    /// Whether to read real stored data for saved-data requests.
     /// Mirrors the `marrow.liveData` setting, default off; enabling it permits
     /// the server to open the native dev store read-only.
     live_data: Arc<AtomicBool>,
@@ -131,19 +130,6 @@ impl Backend {
             },
             Err(error) => data_read_error(error),
         })
-    }
-
-    /// `marrow/dataIntegrity`: the schema-change-impact advisory. A capped,
-    /// on-demand scan of the project's saved data that flags every record the
-    /// current schema can no longer account for. Reads through the same
-    /// `marrow.liveData`-gated saved-data session as the inspector, so it never
-    /// opens the store when live data is off, and it is invoked only on explicit
-    /// request. A stale editor snapshot, no project, no native store, or an
-    /// unreadable store answers `available: false`.
-    pub async fn data_integrity(&self) -> jsonrpc::Result<DataIntegrityResult> {
-        let state = self.state.lock().await;
-        let session = self.data_session(&state);
-        Ok(data_integrity(session.as_ref()))
     }
 
     /// `marrow/dataWatchTargets`: filesystem inputs whose changes can make the

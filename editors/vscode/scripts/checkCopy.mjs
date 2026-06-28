@@ -14,7 +14,6 @@ const files = new Map([
   ["CHANGELOG.md", readExtensionFile("CHANGELOG.md")],
   ["package.json", readExtensionFile("package.json")],
   ["README.md", readExtensionFile("README.md")],
-  ["src/dataIntegrity.ts", readExtensionFile("src/dataIntegrity.ts")],
   ["src/extension.ts", readExtensionFile("src/extension.ts")],
 ]);
 const packageJson = JSON.parse(files.get("package.json"));
@@ -51,10 +50,6 @@ const forbiddenPhrases = [
   {
     file: "README.md",
     phrase: "persisted store schema",
-  },
-  {
-    file: "src/dataIntegrity.ts",
-    phrase: "No issues: stored data matches the schema",
   },
   {
     file: "README.md",
@@ -307,7 +302,8 @@ assertMentions(
   "production read-only data-view contract",
   /production\s+read-only\s+data-view\s+contract/i,
 );
-assertMentions(liveDataDescription, "marrow.liveData", "advisory integrity framing", /advisory/i);
+assertDoesNotMention(liveDataDescription, "marrow.liveData", "retired advisory framing", /advisory/i);
+assertDoesNotMention(liveDataDescription, "marrow.liveData", "retired integrity framing", /integrity/i);
 assertMentions(liveDataDescription, "marrow.liveData", "native dev-store reads", /native dev[- ]store/i);
 
 const marrowDebugger = packageJson.contributes.debuggers.find(
@@ -507,7 +503,18 @@ assertDoesNotMention(
   "stale catalog-evolution rename blocker",
   /until\s+Marrow\s+exposes\s+catalog-backed\s+evolution\s+facts/i,
 );
-assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveData[\s\S]*advisory/i);
+assertDoesNotMention(
+  readme,
+  "README.md",
+  "retired advisory live-data framing",
+  /marrow\.liveData[\s\S]*advisory/i,
+);
+assertDoesNotMention(
+  readme,
+  "README.md",
+  "retired integrity live-data framing",
+  /marrow\.liveData[\s\S]*integrity/i,
+);
 assertMentions(
   readmeF5,
   "README.md F5 bullet",
@@ -545,8 +552,20 @@ assertDoesNotMention(
   /\b(disabled|unavailable)\b/i,
 );
 
-const dataIntegrity = files.get("src/dataIntegrity.ts");
-assertMentions(dataIntegrity, "src/dataIntegrity.ts", "advisory framing", /Advisory/i);
-assertMentions(dataIntegrity, "src/dataIntegrity.ts", "opt-in live-data framing", /opt-in live data/i);
-assertMentions(dataIntegrity, "src/dataIntegrity.ts", "native dev-store framing", /native dev-store/i);
-assertMentions(dataIntegrity, "src/dataIntegrity.ts", "advisory findings", /advisory issue\(s\) found/i);
+const contributedCommands = packageJson.contributes.commands.map((command) => command.command);
+assert.equal(
+  contributedCommands.includes("marrow.checkDataIntegrity"),
+  false,
+  "VS Code must not contribute the retired advisory data-integrity command",
+);
+assert.equal(
+  Object.hasOwn(packageJson.scripts, "check:dataIntegrity"),
+  false,
+  "VS Code checks must not keep a retired data-integrity script",
+);
+assertDoesNotMention(
+  files.get("src/extension.ts"),
+  "src/extension.ts",
+  "retired data-integrity command wiring",
+  /dataIntegrity|DataIntegrity|checkDataIntegrity|marrow\.checkDataIntegrity/,
+);

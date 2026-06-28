@@ -341,18 +341,6 @@ pub fn tools() -> Json {
             },
         },
         {
-            "name": "mw_data_integrity",
-            "description": "Debug/admin advisory over Marrow integrity sample DTOs and data_view_boundary facts: scan the project's real stored data and report capped/current-schema advisory findings, such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type, plus Marrow store_snapshot metadata. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation or repair. Gated behind data access; returns a refusal envelope and reads nothing when disabled.",
-            "_meta": marrow_meta(mcp::data_integrity_contract()),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "file": string_prop("Absolute path to any .mw file inside the project."),
-                },
-                "required": ["file"],
-            },
-        },
-        {
             "name": "mw_run",
             "description": "Sandboxed execution API: execute Marrow to confirm behavior through Marrow's fresh in-memory project session and execution boundary under a locked-down host (fixed clock + captured log, no filesystem/env/maintenance) — the project's real store is never touched. `mode: \"run\"` resolves `entry` against Marrow's current entry descriptor, accepts typed `args`, and returns Marrow's run result/error DTO plus execution boundary with source analysis generation, entry descriptor, footprint, cost-shape, and store-open-mode facts. `mode: \"test\"` runs the project's test session, returns Marrow's test session execution boundary with source analysis generation, runs each test over its own fresh store, and does not accept args.",
             "_meta": marrow_meta(json!({
@@ -445,10 +433,6 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
             let file = required_path(arguments, "file")?;
             let request = data_read_request(arguments)?;
             Ok(mcp::data_read(&file, request, policy.allow_data))
-        }
-        "mw_data_integrity" => {
-            let file = required_path(arguments, "file")?;
-            Ok(mcp::data_integrity(&file, policy.allow_data))
         }
         "mw_run" => {
             let file = required_path(arguments, "file")?;
@@ -571,8 +555,6 @@ fn required_u32(arguments: &Json, key: &str) -> Result<u32, String> {
 mod tests {
     use super::*;
 
-    use marrow_lsp_core::mcp::DATA_INTEGRITY_MISSING_FACTS;
-
     #[test]
     fn the_catalog_lists_every_agent_tool_with_a_schema() {
         let tools = tools();
@@ -594,7 +576,6 @@ mod tests {
             "mw_saved_roots",
             "mw_data_children",
             "mw_data_read",
-            "mw_data_integrity",
             "mw_run",
         ] {
             assert!(
@@ -894,41 +875,16 @@ mod tests {
     }
 
     #[test]
-    fn catalog_exposes_data_integrity_advisory_contract() {
+    fn catalog_omits_data_integrity_advisory() {
         let catalog = tools();
         let tools = catalog.as_array().unwrap();
 
-        let integrity = contract(tools, "mw_data_integrity");
-        assert_eq!(integrity, &mcp::data_integrity_contract());
-        assert_eq!(integrity["status"], "presentation-only");
-        assert_eq!(integrity["stableProductionApi"], false);
-        assert_eq!(integrity["description"], "debug/admin advisory");
-        assert_eq!(integrity["basis"], "Marrow integrity sample DTO");
-        assert_eq!(
-            strings(&integrity["missingFacts"]),
-            DATA_INTEGRITY_MISSING_FACTS.to_vec()
-        );
-        let tool_description = tool(tools, "mw_data_integrity")["description"]
-            .as_str()
-            .expect("mw_data_integrity description");
         assert!(
-            tool_description.contains("data_view_boundary facts"),
-            "mw_data_integrity description should name data_view_boundary facts"
+            tools
+                .iter()
+                .all(|tool| tool["name"].as_str() != Some("mw_data_integrity")),
+            "retired advisory data-integrity tool must stay absent from the catalog"
         );
-        assert!(
-            tool_description.contains("store_snapshot metadata"),
-            "mw_data_integrity description should name store_snapshot metadata"
-        );
-        assert!(
-            !tool_description.contains("source/store compatibility"),
-            "mw_data_integrity description must not claim source/store compatibility validation"
-        );
-        assert_eq!(integrity["dataAccess"], "gated");
-        assert_eq!(integrity["scope"], "capped-current-schema-advisory");
-        assert_eq!(integrity["advisory"], true);
-        assert_eq!(integrity["debugAdmin"], true);
-        assert_eq!(integrity["productionValidation"], false);
-        assert_eq!(integrity["repair"], false);
     }
 
     #[test]
@@ -996,19 +952,25 @@ mod tests {
     }
 
     #[test]
+    fn retired_data_integrity_tool_is_not_callable() {
+        let policy = Policy { allow_data: false };
+        let result = call(
+            "mw_data_integrity",
+            &json!({ "file": "/nope/x.mw" }),
+            policy,
+        );
+        assert!(
+            result.is_err(),
+            "retired advisory data-integrity tool must not remain callable"
+        );
+    }
+
+    #[test]
     fn a_data_tool_refuses_when_the_policy_disallows_it() {
         let policy = Policy { allow_data: false };
         // A nonexistent file is fine: the gate is checked before any project load,
         // so the refusal envelope comes back without touching the filesystem.
         let result = call("mw_saved_roots", &json!({ "file": "/nope/x.mw" }), policy).unwrap();
-        assert_eq!(result["dataAccess"], "disabled");
-        // The schema-impact advisory reads the store, so it is gated the same way.
-        let result = call(
-            "mw_data_integrity",
-            &json!({ "file": "/nope/x.mw" }),
-            policy,
-        )
-        .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
         let result = call(
             "mw_data_children",
