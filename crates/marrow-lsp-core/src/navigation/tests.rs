@@ -506,6 +506,155 @@ pub fn g(): int
 }
 
 #[test]
+fn references_from_resource_constructor_use_honor_include_declaration() {
+    let source = "\
+module a
+
+resource Book
+    required title: string
+
+fn first()
+    const book = Book(title: \"Dune\")
+
+fn second()
+    const book = Book(title: \"Foundation\")
+";
+    let (snapshot, file, indices) = analyze(source);
+    let index = build_binding_index(&snapshot);
+    let line_index = indices.0.get(&file).unwrap();
+
+    let use_offset = offset_of(source, "Book(title: \"Dune\")") + 1;
+    let with = references(&snapshot, &index, &indices, &file, use_offset, true)
+        .expect("resource constructor references resolve through catalog facts");
+    let without = references(&snapshot, &index, &indices, &file, use_offset, false)
+        .expect("resource constructor references resolve through catalog facts");
+    let with_texts: Vec<&str> = with
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+    let without_texts: Vec<&str> = without
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+
+    assert_eq!(with_texts, vec!["Book", "Book", "Book"]);
+    assert_eq!(without_texts, vec!["Book", "Book"]);
+
+    let declaration = offset_of(source, "resource Book") + "resource ".len();
+    let declaration_range = range_for(source, declaration, declaration + "Book".len());
+    assert!(
+        with.iter()
+            .any(|location| location.range == declaration_range)
+    );
+    assert!(
+        without
+            .iter()
+            .all(|location| location.range != declaration_range)
+    );
+}
+
+#[test]
+fn references_from_qualified_resource_constructor_stay_on_the_catalog_resource() {
+    let state_source = "\
+module shelf::state
+
+resource Book
+    required title: string
+";
+    let app_source = "\
+module shelf::app
+
+use shelf::state
+
+resource Book
+    required label: string
+
+fn imported_one()
+    const book = state::Book(title: \"Dune\")
+
+fn imported_two()
+    const book = state::Book(title: \"Foundation\")
+
+fn local()
+    const book = Book(label: \"local\")
+";
+    let (snapshot, paths, indices) = analyze_files(&[
+        ("shelf/state.mw", state_source),
+        ("shelf/app.mw", app_source),
+    ]);
+    let state_file = &paths[0];
+    let app_file = &paths[1];
+    let index = build_binding_index(&snapshot);
+    let state_index = indices.0.get(state_file).unwrap();
+    let app_index = indices.0.get(app_file).unwrap();
+
+    let imported_book = offset_of(app_source, "state::Book(title") + "state::".len();
+    let refs = references(
+        &snapshot,
+        &index,
+        &indices,
+        app_file,
+        imported_book + 1,
+        true,
+    )
+    .expect("qualified constructor references resolve through catalog facts");
+    let state_texts: Vec<&str> = refs
+        .iter()
+        .filter(|location| location.uri == Url::from_file_path(state_file).unwrap())
+        .map(|location| range_text(state_source, state_index, location.range))
+        .collect();
+    let app_texts: Vec<&str> = refs
+        .iter()
+        .filter(|location| location.uri == Url::from_file_path(app_file).unwrap())
+        .map(|location| range_text(app_source, app_index, location.range))
+        .collect();
+
+    assert_eq!(state_texts, vec!["Book"]);
+    assert_eq!(app_texts, vec!["Book", "Book"]);
+
+    let local_declaration = offset_of(app_source, "resource Book") + "resource ".len();
+    let local_use = offset_of(app_source, "Book(label: \"local\")");
+    for start in [local_declaration, local_use] {
+        let range = range_for(app_source, start, start + "Book".len());
+        assert!(
+            refs.iter().all(|location| location.range != range),
+            "foreign constructor references must not include the local resource"
+        );
+    }
+}
+
+#[test]
+fn references_from_resource_declaration_keep_binding_resource_uses() {
+    let source = "\
+module a
+
+resource Book
+    required title: string
+
+store ^books(id: int): Book
+
+fn takes(book: Book)
+    return
+
+fn make()
+    const book = Book(title: \"Dune\")
+";
+    let (snapshot, file, indices) = analyze(source);
+    let index = build_binding_index(&snapshot);
+    let line_index = indices.0.get(&file).unwrap();
+
+    let declaration = offset_of(source, "resource Book") + "resource ".len();
+    let refs = references(&snapshot, &index, &indices, &file, declaration + 1, true)
+        .expect("resource declaration references fall back to binding resource uses");
+    let texts: Vec<&str> = refs
+        .iter()
+        .map(|location| range_text(source, line_index, location.range))
+        .collect();
+
+    assert_eq!(texts, vec!["Book", "Book", "Book", "Book"]);
+}
+
+#[test]
 fn references_of_a_param_returns_all_its_uses_shadowing_correct() {
     // The parameter `n` is used twice; an inner block shadows it with a local
     // `n` whose use must NOT be attributed to the parameter.
