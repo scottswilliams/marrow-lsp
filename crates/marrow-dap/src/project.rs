@@ -17,11 +17,9 @@ use marrow_syntax::Diagnose;
 
 /// The project config file whose directory is the project root.
 const CONFIG_FILE: &str = "marrow.json";
-const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
 const STATUS_INVALID_PARAMS: &str = "invalid-params";
 const STATUS_INVALID_PROJECT: &str = "invalid-project";
 const STATUS_INVALID_STATE: &str = "invalid-state";
-const READ_ADMISSION_FACTS: &str = "read-only debug store admission facts";
 
 /// A loaded project ready to debug through Marrow's protocol invocation.
 pub struct Launch {
@@ -52,7 +50,7 @@ pub enum LaunchError {
     EntryChanged,
     AnalysisChanged(String),
     NoEntry,
-    ReadAdmissionBlocked,
+    ReadAdmissionInvalid,
     CheckErrors(Vec<String>),
 }
 
@@ -75,9 +73,9 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "no entry to run: pass `entry` or configure `defaultEntry` in {CONFIG_FILE}"
             ),
-            Self::ReadAdmissionBlocked => write!(
+            Self::ReadAdmissionInvalid => write!(
                 f,
-                "blocked-on-marrow: DAP launch cannot admit the committed store or lock identity for read-only debug; use Marrow's production data flow or wait for read-only debug store admission facts"
+                "DAP launch cannot admit the committed store for read-only debug; use Marrow's production data flow before launching"
             ),
             Self::CheckErrors(errors) => {
                 write!(f, "the project has errors: {}", errors.join("; "))
@@ -96,13 +94,12 @@ impl LaunchError {
             Self::EntryArgs(_) => "dap.launchArgs.invalid",
             Self::EntryChanged => "dap.launch.changed",
             Self::AnalysisChanged(_) => "dap.launchAnalysis.changed",
-            Self::ReadAdmissionBlocked => "dap.launchReadAdmission.blocked",
+            Self::ReadAdmissionInvalid => "dap.launchReadAdmission.invalid",
         }
     }
 
     pub fn status(&self) -> &'static str {
         match self {
-            Self::ReadAdmissionBlocked => STATUS_BLOCKED_ON_MARROW,
             Self::Entry(_) | Self::EntryArgs(_) => STATUS_INVALID_PARAMS,
             Self::EntryChanged | Self::AnalysisChanged(_) => STATUS_INVALID_STATE,
             _ => STATUS_INVALID_PROJECT,
@@ -110,18 +107,7 @@ impl LaunchError {
     }
 
     pub fn blocked_on(&self) -> Option<&'static str> {
-        match self {
-            Self::ReadAdmissionBlocked => Some(READ_ADMISSION_FACTS),
-            Self::NoProject(_)
-            | Self::Config(_)
-            | Self::Session(_)
-            | Self::Entry(_)
-            | Self::EntryArgs(_)
-            | Self::EntryChanged
-            | Self::AnalysisChanged(_)
-            | Self::NoEntry
-            | Self::CheckErrors(_) => None,
-        }
+        None
     }
 }
 
@@ -266,11 +252,11 @@ fn from_read_only_session_error(error: ProjectSessionError) -> LaunchError {
         | ProjectSessionError::DurableStoreRequired
         | ProjectSessionError::UnstampedStore
         | ProjectSessionError::Store(_)
-        | ProjectSessionError::SchemaDrift { .. } => LaunchError::ReadAdmissionBlocked,
+        | ProjectSessionError::SchemaDrift { .. } => LaunchError::ReadAdmissionInvalid,
         ProjectSessionError::Io { error, .. }
             if error.kind() == std::io::ErrorKind::InvalidData =>
         {
-            LaunchError::ReadAdmissionBlocked
+            LaunchError::ReadAdmissionInvalid
         }
         error => from_session_error(error),
     }
@@ -279,7 +265,7 @@ fn from_read_only_session_error(error: ProjectSessionError) -> LaunchError {
 fn from_session_error(error: ProjectSessionError) -> LaunchError {
     match error {
         ProjectSessionError::Config { message, .. } => LaunchError::Config(message),
-        ProjectSessionError::Catalog { .. } => LaunchError::ReadAdmissionBlocked,
+        ProjectSessionError::Catalog { .. } => LaunchError::ReadAdmissionInvalid,
         ProjectSessionError::Check { report } => LaunchError::CheckErrors(check_errors(&report)),
         ProjectSessionError::NoEntry => LaunchError::NoEntry,
         ProjectSessionError::Io { path, error } => {
@@ -422,7 +408,7 @@ pub fn main()
     }
 
     #[test]
-    fn prepare_blocks_invalid_utf8_read_admission_without_writing() {
+    fn prepare_rejects_invalid_utf8_read_admission_without_writing() {
         let dir = write_project(
             "\
 module m
@@ -440,12 +426,9 @@ pub fn main()
         corrupt_catalog_utf8_with_empty_native_store(dir.path());
 
         let error = expect_error(prepare(dir.path(), None, &[]));
-        assert_eq!(error.code(), "dap.launchReadAdmission.blocked", "{error:?}");
-        assert_eq!(error.status(), "blocked-on-marrow");
-        assert_eq!(
-            error.blocked_on(),
-            Some("read-only debug store admission facts")
-        );
+        assert_eq!(error.code(), "dap.launchReadAdmission.invalid", "{error:?}");
+        assert_eq!(error.status(), "invalid-project");
+        assert_eq!(error.blocked_on(), None);
         assert_eq!(
             std::fs::read(dir.path().join(marrow_project::CATALOG_FILE_NAME)).unwrap(),
             [0xff],

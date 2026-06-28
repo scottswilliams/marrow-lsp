@@ -631,10 +631,6 @@ fn assert_response_marrow_error(
     }
 }
 
-fn assert_blocked_response(response: &Json, code: &str, blocked_on: &str) {
-    assert_response_marrow_error(response, code, "blocked-on-marrow", Some(blocked_on));
-}
-
 fn assert_verified_breakpoint(breakpoint: &Json, line: i64) {
     assert_eq!(breakpoint["verified"], true, "{breakpoint}");
     assert_eq!(breakpoint["line"], line, "{breakpoint}");
@@ -2071,7 +2067,7 @@ fn launch_accepts_valid_existing_native_store() {
 }
 
 #[test]
-fn launch_blocks_invalid_utf8_read_admission_without_writing() {
+fn launch_rejects_invalid_utf8_read_admission_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     write_native_identity_fixture(dir.path());
     corrupt_catalog_utf8_with_empty_native_store(dir.path());
@@ -2086,11 +2082,12 @@ fn launch_blocks_invalid_utf8_read_admission_without_writing() {
             "project": dir.path().display().to_string(),
         }),
     );
-    let blocked = client.response_for(launch);
-    assert_blocked_response(
-        &blocked,
-        "dap.launchReadAdmission.blocked",
-        "read-only debug store admission facts",
+    let rejected = client.response_for(launch);
+    assert_response_marrow_error(
+        &rejected,
+        "dap.launchReadAdmission.invalid",
+        "invalid-project",
+        None,
     );
     assert_eq!(
         std::fs::read(dir.path().join(marrow_project::CATALOG_FILE_NAME)).unwrap(),
