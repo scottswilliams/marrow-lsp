@@ -46,9 +46,6 @@ const STATUS_INVALID_PARAMS: &str = "invalid-params";
 const STATUS_INVALID_STATE: &str = "invalid-state";
 const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
-const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
-const ATTACH_BLOCKED: &str = "DAP attach requires Marrow served-process control boundary facts";
-const ATTACH_BLOCKED_ON: &str = "served-process control boundary facts";
 const BREAKPOINT_CONFIGURATION_NOT_READY: &str =
     "breakpoint verification requires launch configuration";
 const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expression";
@@ -70,7 +67,6 @@ const THREAD_ID_INVALID: &str = "missing or invalid threadId";
 const FRAME_ID_INVALID: &str = "missing or invalid frameId";
 const ERROR_UNSUPPORTED_REQUEST: DapError =
     DapError::new("dap.unsupportedRequest", STATUS_UNSUPPORTED_REQUEST);
-const ERROR_ATTACH_BLOCKED: DapError = DapError::blocked("dap.attach.blocked", ATTACH_BLOCKED_ON);
 const ERROR_ARGUMENTS_INVALID: DapError =
     DapError::new("dap.arguments.invalid", STATUS_INVALID_PARAMS);
 const ERROR_LAUNCH_PROJECT_INVALID_PARAMS: DapError =
@@ -142,14 +138,6 @@ impl DapError {
             code,
             status,
             blocked_on: None,
-        }
-    }
-
-    const fn blocked(code: &'static str, blocked_on: &'static str) -> Self {
-        Self {
-            code,
-            status: STATUS_BLOCKED_ON_MARROW,
-            blocked_on: Some(blocked_on),
         }
     }
 
@@ -479,12 +467,6 @@ impl<W: Write> Session<W> {
                 };
                 self.on_initialize(request, &arguments);
             }
-            "attach" => {
-                if self.arguments_or_reject(request).is_none() {
-                    return;
-                }
-                self.on_attach(request);
-            }
             "launch" => {
                 let Some(arguments) = self.arguments_or_reject(request) else {
                     return;
@@ -617,10 +599,6 @@ impl<W: Write> Session<W> {
                 "supportsEvaluateForHovers": true,
             }),
         );
-    }
-
-    fn on_attach(&mut self, request: &Json) {
-        self.respond_error(request, ATTACH_BLOCKED, ERROR_ATTACH_BLOCKED);
     }
 
     /// `launch`: validate and stash the launch arguments. The run does not start

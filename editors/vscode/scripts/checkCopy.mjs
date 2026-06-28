@@ -325,8 +325,20 @@ assert.equal(
 assertMentions(
   readmeAttachLimitation,
   "README.md attach limitation",
-  "served-process control blocker",
+  "unsupported attach framing",
+  /attach[\s\S]*unsupported/i,
+);
+assertMentions(
+  readmeAttachLimitation,
+  "README.md attach limitation",
+  "served-process control boundary facts",
   /served-process\s+control\s+boundary\s+facts/i,
+);
+assertDoesNotMention(
+  readmeAttachLimitation,
+  "README.md attach limitation",
+  "blocked attach contract",
+  /blocked\s+Marrow\s+contract/i,
 );
 assertDoesNotMention(
   readmeAttachLimitation,

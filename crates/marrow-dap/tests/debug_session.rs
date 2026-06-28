@@ -830,7 +830,6 @@ fn assert_dap_surface_serve_boundary(boundary: &Json) {
 fn malformed_request_arguments_fail_before_command_handlers() {
     for (command, arguments) in [
         ("initialize", json!([])),
-        ("attach", json!([])),
         ("launch", json!([])),
         ("setBreakpoints", json!([])),
         ("configurationDone", json!("bad")),
@@ -887,20 +886,22 @@ fn null_and_absent_request_arguments_remain_absent() {
 
 #[test]
 fn unsupported_commands_do_not_parse_request_arguments() {
-    let mut client = Client::spawn();
+    for command in ["madeUpCommand", "attach"] {
+        let mut client = Client::spawn();
 
-    let request = client.request("madeUpCommand", json!([]));
-    let response = client.response_for(request);
-    assert_response_marrow_error(
-        &response,
-        "dap.unsupportedRequest",
-        "unsupported-request",
-        None,
-    );
+        let request = client.request(command, json!([]));
+        let response = client.response_for(request);
+        assert_response_marrow_error(
+            &response,
+            "dap.unsupportedRequest",
+            "unsupported-request",
+            None,
+        );
+    }
 }
 
 #[test]
-fn attach_reports_served_process_control_blocker() {
+fn attach_is_not_supported_without_served_process_facts() {
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
@@ -910,16 +911,16 @@ fn attach_reports_served_process_control_blocker() {
     let attach = client.response_for(attach);
     assert_response_marrow_error(
         &attach,
-        "dap.attach.blocked",
-        "blocked-on-marrow",
-        Some("served-process control boundary facts"),
+        "dap.unsupportedRequest",
+        "unsupported-request",
+        None,
     );
 
     let threads = client.request("threads", json!({}));
     let threads = client.response_for(threads);
     assert_eq!(
         threads["success"], true,
-        "blocked attach must leave the protocol session usable: {threads}"
+        "unsupported attach must leave the protocol session usable: {threads}"
     );
 }
 
