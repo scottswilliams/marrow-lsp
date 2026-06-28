@@ -201,6 +201,29 @@ fn write_durable_debug_data_fixture(dir: &Path) -> std::path::PathBuf {
     file
 }
 
+fn write_durable_debug_transaction_fixture(dir: &Path) -> std::path::PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let source = "module shelf\n\
+                  \n\
+                  resource Book\n\
+                  \x20   required title: string\n\
+                  store ^books(id: int): Book\n\
+                  pub fn main()\n\
+                  \x20   ^books(1).title = \"draft\"\n\
+                  \x20   transaction\n\
+                  \x20       ^books(1).title = \"Dune\"\n\
+                  \x20       print(^books(1).title ?? \"\")\n";
+    let file = src.join("shelf.mw");
+    std::fs::write(&file, source).unwrap();
+    std::fs::write(
+        dir.join("marrow.json"),
+        "{ \"sourceRoots\": [\"src\"], \"run\": { \"defaultEntry\": \"shelf::main\" }, \"store\": { \"backend\": \"native\", \"dataDir\": \"data\" } }",
+    )
+    .unwrap();
+    file
+}
+
 fn write_durable_debug_data_paging_fixture(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -501,6 +524,55 @@ fn assert_runtime_store_snapshot(snapshot: &Json) {
         "runtime store commit should carry the committed source digest: {snapshot}"
     );
     assert!(object.contains_key("open_transaction"));
+}
+
+fn assert_runtime_open_transaction_snapshot(snapshot: &Json, depth: i64) {
+    let object = snapshot
+        .as_object()
+        .unwrap_or_else(|| panic!("store snapshot should be an object: {snapshot}"));
+    assert_eq!(
+        snapshot["profile_version"], "data.generation.v1",
+        "runtime data variables should carry Marrow data generation metadata: {snapshot}"
+    );
+    assert!(
+        object.contains_key("store_uid"),
+        "runtime data variables should carry the optional store UID field: {snapshot}"
+    );
+    assert!(
+        object.contains_key("catalog_digest"),
+        "runtime data variables should carry the optional catalog digest field: {snapshot}"
+    );
+    assert!(
+        snapshot["checked_source_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "runtime data variables should carry the checked source digest: {snapshot}"
+    );
+    assert!(
+        snapshot["commit"].is_null(),
+        "open transaction data reads should not claim a committed store snapshot: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["open_transaction"]["depth"], depth,
+        "open transaction data reads should identify the stopped transaction depth: {snapshot}"
+    );
+}
+
+fn assert_debug_data_boundary(boundary: &Json, store_snapshot: &Json) {
+    assert_eq!(
+        boundary["sourceAnalysisGeneration"]["profileVersion"], "analysis.generation.v1",
+        "debug data boundaries should carry Marrow source analysis generation: {boundary}"
+    );
+    assert!(
+        boundary["sourceAnalysisGeneration"]["sourceIdentity"]
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("sha256:")),
+        "debug data boundaries should carry source identity: {boundary}"
+    );
+    assert_eq!(
+        boundary["storeSnapshot"], *store_snapshot,
+        "debug data boundaries should bind the returned store snapshot: {boundary}"
+    );
 }
 
 fn assert_evaluate_runtime_debug_value(response: &Json, result: &str, variables_reference: i64) {
@@ -3421,6 +3493,13 @@ fn durable_data_scope_is_empty_without_saved_roots() {
     );
     let local_watch = client.response_for(local_watch);
     assert_evaluate_runtime_debug_value(&local_watch, "Dune", 0);
+    assert!(
+        local_watch["body"]
+            .get("marrowDebug")
+            .and_then(|debug| debug.get("debugDataBoundary"))
+            .is_none(),
+        "local-only watch evaluation should not claim a data boundary: {local_watch}"
+    );
 }
 
 #[test]
@@ -3460,13 +3539,77 @@ fn durable_watch_evaluates_against_frame_data() {
     );
     let durable_watch = client.response_for(durable_watch);
     assert_evaluate_runtime_debug_value(&durable_watch, "Dune", 0);
+    let store_snapshot =
+        &durable_watch["body"]["marrowDebug"]["debugDataBoundary"]["storeSnapshot"];
+    assert_runtime_store_snapshot(store_snapshot);
+    assert_debug_data_boundary(
+        &durable_watch["body"]["marrowDebug"]["debugDataBoundary"],
+        store_snapshot,
+    );
 
     let root_durable_watch = client.request(
         "evaluate",
-        json!({ "expression": "^books(id).title", "context": "watch" }),
+        json!({ "expression": "^books(id)", "context": "watch" }),
     );
     let root_durable_watch = client.response_for(root_durable_watch);
-    assert_evaluate_runtime_debug_value(&root_durable_watch, "Dune", 0);
+    assert_eq!(root_durable_watch["success"], true, "{root_durable_watch}");
+    let root_ref = root_durable_watch["body"]["variablesReference"]
+        .as_i64()
+        .expect("saved record watch expands");
+
+    let root_children = client.request("variables", json!({ "variablesReference": root_ref }));
+    let root_children = client.response_for(root_children);
+    let store_snapshot =
+        &root_children["body"]["marrowDebug"]["debugDataBoundary"]["storeSnapshot"];
+    assert_runtime_store_snapshot(store_snapshot);
+    assert_debug_data_boundary(
+        &root_children["body"]["marrowDebug"]["debugDataBoundary"],
+        store_snapshot,
+    );
+}
+
+#[test]
+fn durable_watch_inside_transaction_carries_open_transaction_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_durable_debug_transaction_fixture(dir.path());
+
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
+    );
+    assert_eq!(client.response_for(launch)["success"], true);
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 10 }],
+        }),
+    );
+    assert_eq!(client.response_for(set)["success"], true);
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+    step_to_line(&mut client, 10);
+
+    let durable_watch = client.request(
+        "evaluate",
+        json!({ "expression": "(^books(1).title ?? \"\")", "context": "watch" }),
+    );
+    let durable_watch = client.response_for(durable_watch);
+    assert_evaluate_runtime_debug_value(&durable_watch, "Dune", 0);
+
+    let boundary = &durable_watch["body"]["marrowDebug"]["debugDataBoundary"];
+    let store_snapshot = &boundary["storeSnapshot"];
+    assert_runtime_open_transaction_snapshot(store_snapshot, 1);
+    assert_debug_data_boundary(boundary, store_snapshot);
 }
 
 #[test]
@@ -3515,7 +3658,12 @@ fn durable_data_scope_expands_frame_data_paths() {
 
     let roots = client.request("variables", json!({ "variablesReference": durable_ref }));
     let roots = client.response_for(roots);
-    assert_runtime_store_snapshot(&roots["body"]["marrowDebug"]["storeSnapshot"]);
+    let store_snapshot = &roots["body"]["marrowDebug"]["storeSnapshot"];
+    assert_runtime_store_snapshot(store_snapshot);
+    assert_debug_data_boundary(
+        &roots["body"]["marrowDebug"]["debugDataBoundary"],
+        store_snapshot,
+    );
     let books = roots["body"]["variables"]
         .as_array()
         .unwrap()

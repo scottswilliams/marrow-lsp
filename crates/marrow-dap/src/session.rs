@@ -15,7 +15,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
 use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType, tooling};
-use marrow_lsp_core::execution::execution_boundary_json;
+use marrow_lsp_core::execution::{debug_data_boundary_json, execution_boundary_json};
 use marrow_run::{DebugValue, EntryArgument, EntryInvocation, SourceAnalysisAdmission};
 use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
@@ -194,7 +194,10 @@ struct CheckedBreakpointSpec {
 /// What a dynamic variable reference expands to. Resolved on the run-thread.
 #[derive(Clone)]
 enum Expandable {
-    Value(DebugValue),
+    Value {
+        value: DebugValue,
+        store_snapshot: Option<tooling::DataSnapshotStamp>,
+    },
     DataPath(Vec<tooling::DataPathSegment>),
 }
 
@@ -204,6 +207,7 @@ struct Running {
     control: Sender<Control>,
     events: Receiver<RunEvent>,
     terminate: Arc<AtomicBool>,
+    execution_boundary: Json,
     /// The most recent stop, kept so `stackTrace`/`scopes` answer without
     /// re-querying. `None` while the run is executing (not parked).
     stopped_at: Option<StopInfo>,
@@ -991,6 +995,7 @@ impl<W: Write> Session<W> {
                     control: running.control,
                     events: running.events,
                     terminate: running.terminate,
+                    execution_boundary: execution_boundary.clone(),
                     stopped_at: None,
                     pending_resume: None,
                     terminating: false,
@@ -1174,7 +1179,12 @@ impl<W: Write> Session<W> {
                     .and_then(crate::variables::child_counts);
                 let reference = local
                     .expand
-                    .map(|value| self.alloc_ref(Expandable::Value(value)))
+                    .map(|value| {
+                        self.alloc_ref(Expandable::Value {
+                            value,
+                            store_snapshot: None,
+                        })
+                    })
                     .unwrap_or(0);
                 variable_json(
                     &local.name,
@@ -1199,26 +1209,27 @@ impl<W: Write> Session<W> {
         page: ChildPage,
         filter: VariablesFilter,
     ) -> Result<Json, crate::debugger::RuntimeErrorDetail> {
-        let Some(value) = self
-            .expandables
-            .get(&reference)
-            .map(|expandable| match expandable {
-                Expandable::Value(value) => Ok(value.clone()),
-                Expandable::DataPath(path) => Err(path.clone()),
-            })
-        else {
+        let Some(expandable) = self.expandables.get(&reference).cloned() else {
             return Ok(variables_body(Vec::new()));
         };
-        let value = match value {
-            Ok(value) => value,
-            Err(path) => return self.data_variables(path, page),
+        let (value, store_snapshot) = match expandable {
+            Expandable::Value {
+                value,
+                store_snapshot,
+            } => (value, store_snapshot),
+            Expandable::DataPath(path) => return self.data_variables(path, page),
         };
         let children_truncated = value.children_truncated();
         let children = crate::variables::children(&value, page, filter);
-        let mut body = variables_body(self.child_variables(children));
+        let mut body = variables_body(self.child_variables(children, store_snapshot.as_ref()));
         body["marrowDebug"] = json!({
             "childrenTruncated": children_truncated,
         });
+        if let Some(store_snapshot) = store_snapshot {
+            let store_snapshot =
+                marrow_lsp_core::data_explorer::data_generation_stamp_to_json(&store_snapshot);
+            self.attach_debug_data_boundary(&mut body, store_snapshot);
+        }
         Ok(body)
     }
 
@@ -1257,12 +1268,26 @@ impl<W: Write> Session<W> {
         let mut body = variables_body(variables);
         body["marrowDebug"] = json!({
             "childrenTruncated": children_truncated,
-            "storeSnapshot": store_snapshot,
         });
+        self.attach_debug_data_boundary(&mut body, store_snapshot);
         Ok(body)
     }
 
-    fn child_variables(&mut self, children: Vec<crate::variables::Child>) -> Vec<Json> {
+    fn attach_debug_data_boundary(&self, body: &mut Json, store_snapshot: Json) {
+        body["marrowDebug"]["storeSnapshot"] = store_snapshot.clone();
+        let running = self
+            .running
+            .as_ref()
+            .expect("debug data responses require a running session");
+        body["marrowDebug"]["debugDataBoundary"] =
+            debug_data_boundary_json(&running.execution_boundary, store_snapshot);
+    }
+
+    fn child_variables(
+        &mut self,
+        children: Vec<crate::variables::Child>,
+        store_snapshot: Option<&tooling::DataSnapshotStamp>,
+    ) -> Vec<Json> {
         children
             .into_iter()
             .map(|child| {
@@ -1272,7 +1297,12 @@ impl<W: Write> Session<W> {
                     .and_then(crate::variables::child_counts);
                 let reference = child
                     .expand
-                    .map(|value| self.alloc_ref(Expandable::Value(value)))
+                    .map(|value| {
+                        self.alloc_ref(Expandable::Value {
+                            value,
+                            store_snapshot: store_snapshot.cloned(),
+                        })
+                    })
                     .unwrap_or(0);
                 variable_json(
                     &child.name,
@@ -1387,8 +1417,8 @@ impl<W: Write> Session<W> {
         match self.query(Query::Evaluate {
             expression: Box::new(expression),
         }) {
-            Some(QueryResult::Evaluate(Ok(value))) => {
-                let body = self.evaluate_body(value);
+            Some(QueryResult::Evaluate(Ok(snapshot))) => {
+                let body = self.evaluate_body(snapshot.value, snapshot.store_snapshot);
                 self.respond(request, true, body);
             }
             Some(QueryResult::Evaluate(Err(error))) => {
@@ -1426,13 +1456,20 @@ impl<W: Write> Session<W> {
             })
     }
 
-    fn evaluate_body(&mut self, value: DebugValue) -> Json {
+    fn evaluate_body(
+        &mut self,
+        value: DebugValue,
+        store_snapshot: Option<tooling::DataSnapshotStamp>,
+    ) -> Json {
         let result = value.preview();
         let counts = crate::variables::child_counts(&value);
         let children_truncated =
             crate::variables::is_expandable(&value).then(|| value.children_truncated());
         let reference = if crate::variables::is_expandable(&value) {
-            self.alloc_ref(Expandable::Value(value))
+            self.alloc_ref(Expandable::Value {
+                value: value.clone(),
+                store_snapshot: store_snapshot.clone(),
+            })
         } else {
             0
         };
@@ -1453,6 +1490,11 @@ impl<W: Write> Session<W> {
             body["marrowDebug"] = json!({
                 "childrenTruncated": children_truncated,
             });
+        }
+        if let Some(store_snapshot) = store_snapshot {
+            let store_snapshot =
+                marrow_lsp_core::data_explorer::data_generation_stamp_to_json(&store_snapshot);
+            self.attach_debug_data_boundary(&mut body, store_snapshot);
         }
         body
     }
@@ -2170,6 +2212,7 @@ mod tests {
             control: control_tx,
             events: events_rx,
             terminate: Arc::new(AtomicBool::new(false)),
+            execution_boundary: json!({ "sourceAnalysisGeneration": null }),
             stopped_at,
             pending_resume,
             terminating: false,

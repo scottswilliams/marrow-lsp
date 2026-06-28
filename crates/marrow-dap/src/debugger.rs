@@ -78,6 +78,12 @@ pub struct DataVariablesSnapshot {
     pub store_snapshot: tooling::DataSnapshotStamp,
 }
 
+#[derive(Debug, Clone)]
+pub struct EvaluationSnapshot {
+    pub value: DebugValue,
+    pub store_snapshot: Option<tooling::DataSnapshotStamp>,
+}
+
 /// Where the run stopped, sent to the protocol thread so it can raise a DAP
 /// `stopped` event and answer a `stackTrace` from cached data.
 #[derive(Debug, Clone)]
@@ -256,7 +262,7 @@ pub enum Query {
 #[derive(Debug)]
 pub enum QueryResult {
     Locals(LocalsSnapshot),
-    Evaluate(Result<DebugValue, RuntimeErrorDetail>),
+    Evaluate(Result<EvaluationSnapshot, RuntimeErrorDetail>),
     DataChildren(Result<DataVariablesSnapshot, RuntimeErrorDetail>),
 }
 
@@ -406,6 +412,32 @@ impl Debugger {
         })
     }
 
+    fn evaluate(
+        frame: &Frame<'_, '_>,
+        expression: &CheckedDebugExpression,
+    ) -> Result<EvaluationSnapshot, RuntimeErrorDetail> {
+        let needs_store_snapshot = matches!(
+            expression.data_access(),
+            marrow_check::DebugExpressionDataAccess::RequiresDurableData
+        );
+        let value = frame
+            .evaluate_debug_expression(expression)
+            .map_err(RuntimeErrorDetail::from)?;
+        let store_snapshot = if needs_store_snapshot {
+            Some(
+                frame
+                    .debug_data_snapshot()
+                    .map_err(RuntimeErrorDetail::from)?,
+            )
+        } else {
+            None
+        };
+        Ok(EvaluationSnapshot {
+            value,
+            store_snapshot,
+        })
+    }
+
     /// Answer one query from the live frame, returning owned data.
     fn answer(
         &self,
@@ -417,11 +449,9 @@ impl Debugger {
             Query::Locals { page, filter } => {
                 QueryResult::Locals(Self::snapshot_locals(frame, page, filter))
             }
-            Query::Evaluate { expression } => QueryResult::Evaluate(
-                frame
-                    .evaluate_debug_expression(expression.as_ref())
-                    .map_err(RuntimeErrorDetail::from),
-            ),
+            Query::Evaluate { expression } => {
+                QueryResult::Evaluate(Self::evaluate(frame, expression.as_ref()))
+            }
             Query::DataChildren { segments, page } => {
                 QueryResult::DataChildren(Self::snapshot_data_children(frame, segments, page))
             }
