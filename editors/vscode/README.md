@@ -21,7 +21,8 @@ Rust binaries. No parsing or position math runs in TypeScript.
   tooling facts, carries Marrow store snapshot metadata through expansions, refuses to mix child
   pages or value reads from a different snapshot, and automatically refreshes from LSP-supplied
   native dev-store and committed-lock watch targets when `marrow.liveData` is enabled. The view
-  title remains available for manual refreshes. It does not accept editor-authored saved paths.
+  title remains available for manual refreshes and for revealing a selected server-returned root.
+  It does not accept editor-authored saved paths.
 - **Debugging (F5)** — statement-level debugging through the `marrow-dap` adapter: launch a
   project's `defaultEntry`, or set `entry` and typed `args` in `launch.json`. Marrow admits
   the args; `int`, `date`, and `bytes` use exact string forms. F5 remains useful for launch,

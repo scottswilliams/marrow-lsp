@@ -442,6 +442,7 @@ try {
     assert.deepEqual(await malformedRootsProvider.getChildren(), [
       { kind: "unavailable", label: "store unavailable" },
     ]);
+    assert.deepEqual(await malformedRootsProvider.rootNodes(), []);
   }
 
   const provider = new SavedResourceProvider();
@@ -613,6 +614,11 @@ try {
 
   const roots = await provider.getChildren();
   assert.equal(roots.length, 2);
+  assert.deepEqual(
+    await provider.rootNodes(),
+    roots,
+    "root picker input should reuse the same server-backed roots as the tree",
+  );
 
   assert.deepEqual(roots[0], {
     kind: "root",

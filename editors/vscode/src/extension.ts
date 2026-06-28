@@ -8,7 +8,10 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
-import { SavedResourceProvider } from "./savedResourceInspector";
+import {
+  SavedResourceProvider,
+  type SavedResourceNode,
+} from "./savedResourceInspector";
 import { MarrowDataIntegrity } from "./dataIntegrity";
 
 let client: LanguageClient | undefined;
@@ -104,6 +107,9 @@ export class SavedDataWatchTargetRegistry implements vscode.Disposable {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const dataProvider = new SavedResourceProvider();
+  const dataTree = vscode.window.createTreeView<SavedResourceNode>("marrowData", {
+    treeDataProvider: dataProvider,
+  });
   let dataIntegrity: MarrowDataIntegrity | undefined;
   let dataWatchTargets: SavedDataWatchTargetRegistry | undefined;
   const refreshWatchTargets = () => {
@@ -111,10 +117,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   context.subscriptions.push(
-    vscode.window.registerTreeDataProvider("marrowData", dataProvider),
+    dataTree,
     vscode.commands.registerCommand("marrow.refreshData", () => {
       void dataWatchTargets?.refresh();
       dataProvider.refresh();
+    }),
+    vscode.commands.registerCommand("marrow.revealSavedResource", () => {
+      void revealSavedResource(dataProvider, dataTree);
     }),
     vscode.commands.registerCommand("marrow.checkDataIntegrity", () => {
       if (dataIntegrity === undefined) {
@@ -207,6 +216,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
   );
+}
+
+async function revealSavedResource(
+  provider: SavedResourceProvider,
+  tree: vscode.TreeView<SavedResourceNode>,
+): Promise<void> {
+  const roots = await provider.rootNodes();
+  if (roots.length === 0) {
+    void vscode.window.showInformationMessage("Marrow: no saved resources available.");
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    roots.map((root) => ({ label: root.label, root })),
+    { placeHolder: "Select a saved resource" },
+  );
+  if (picked === undefined) {
+    return;
+  }
+  await tree.reveal(picked.root, { focus: true, select: true, expand: true });
 }
 
 export async function deactivate(): Promise<void> {

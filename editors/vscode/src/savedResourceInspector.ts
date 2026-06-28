@@ -72,14 +72,14 @@ const REQUEST_DATA_READ = "marrow/dataRead";
 const DATA_PAGE_LIMIT = 200;
 const DATA_VALUE_PREVIEW_LIMIT = 2048;
 
-type SavedResourceNode =
+export type SavedResourceNode =
   | SavedRootNode
   | SavedSegmentNode
   | SavedValueNode
   | SavedMoreNode
   | SavedPlaceholderNode;
 
-interface SavedRootNode {
+export interface SavedRootNode {
   readonly kind: "root";
   readonly label: string;
   readonly segment: DataRootSegment;
@@ -131,6 +131,11 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     this.emitter.fire(undefined);
   }
 
+  async rootNodes(): Promise<SavedRootNode[]> {
+    const loaded = await this.loadRootNodes();
+    return loaded.kind === "roots" ? loaded.roots : [];
+  }
+
   getTreeItem(node: SavedResourceNode): vscode.TreeItem {
     const item = new vscode.TreeItem(
       node.label,
@@ -161,31 +166,49 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
       }
       return [];
     }
+    const loaded = await this.loadRootNodes();
+    if (loaded.kind === "noClient") {
+      return [];
+    }
+    if (loaded.kind === "unavailable") {
+      return [unavailableNode()];
+    }
+    return loaded.roots;
+  }
+
+  private async loadRootNodes(): Promise<
+    | { readonly kind: "noClient" }
+    | { readonly kind: "unavailable" }
+    | { readonly kind: "roots"; readonly roots: SavedRootNode[] }
+  > {
     const client = this.client;
     if (client === undefined) {
-      return [];
+      return { kind: "noClient" };
     }
     let result: SavedRootsResult;
     try {
       result = await client.sendRequest<SavedRootsResult>(REQUEST_SAVED_ROOTS);
     } catch {
-      return [unavailableNode()];
+      return { kind: "unavailable" };
     }
     if (!result.available) {
-      return [unavailableNode()];
+      return { kind: "unavailable" };
     }
     const boundary = dataViewBoundaryFromWire(result.data_view_boundary);
     if (boundary === undefined) {
-      return [unavailableNode()];
+      return { kind: "unavailable" };
     }
-    return result.roots.map(
-      (root): SavedRootNode => ({
-        kind: "root",
-        label: root.label,
-        segment: root.segment,
-        boundary,
-      }),
-    );
+    return {
+      kind: "roots",
+      roots: result.roots.map(
+        (root): SavedRootNode => ({
+          kind: "root",
+          label: root.label,
+          segment: root.segment,
+          boundary,
+        }),
+      ),
+    };
   }
 
   private async getDataChildren(

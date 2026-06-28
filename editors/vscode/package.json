@@ -52,6 +52,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "marrow.revealSavedResource",
+        "title": "Reveal Saved Resource",
+        "category": "Marrow",
+        "icon": "$(target)"
+      },
+      {
         "command": "marrow.checkDataIntegrity",
         "title": "Marrow: Check Stored Data Integrity (Advisory)",
         "category": "Marrow"
@@ -61,6 +67,11 @@
       "view/title": [
         {
           "command": "marrow.refreshData",
+          "when": "view == marrowData",
+          "group": "navigation"
+        },
+        {
+          "command": "marrow.revealSavedResource",
           "when": "view == marrowData",
           "group": "navigation"
         }
