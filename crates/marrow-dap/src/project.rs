@@ -11,7 +11,7 @@ use marrow_check::{AnalysisGeneration, AnalysisSnapshot, CheckReport, ProjectIoE
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryDescriptorError, EntryInvocation,
     ProjectOpen, ProjectSession, ProjectSessionError, ProjectSurfaceReadSession, RuntimeError,
-    SourceAnalysisAdmission,
+    SourceAnalysisAdmission, SurfaceServeBoundary,
 };
 use marrow_syntax::Diagnose;
 
@@ -30,6 +30,14 @@ pub struct Launch {
     pub analysis_snapshot: AnalysisSnapshot,
     pub source_analysis_admission: Option<SourceAnalysisAdmission>,
     pub invocation: EntryInvocation,
+}
+
+impl Launch {
+    pub fn surface_serve_boundary(&self) -> Result<SurfaceServeBoundary, LaunchError> {
+        self.session
+            .surface_serve_boundary()
+            .map_err(from_session_error)
+    }
 }
 
 /// Why a launch could not be prepared. Each renders to a single client-facing

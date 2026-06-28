@@ -31,6 +31,8 @@ Initial release.
   where `int`, `date`, and `bytes` use exact string forms, stop-on-entry, statement stepping,
   verified plain-line and conditional breakpoints, exact hit-count breakpoints, logpoints with
   Marrow-checked template expressions, watch/REPL/hover expression evaluation, variables, and the
-  Durable Data scope.
+  Durable Data scope. Launch responses carry Marrow's admitted serve-surface boundary with process
+  control marked not exposed; attach configurations remain absent until served-process control
+  boundary facts exist.
 - Per-platform release `.vsix` packages bundling the `marrow-lsp` server and `marrow-dap`
   debug adapter (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`).

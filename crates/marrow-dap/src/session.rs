@@ -15,7 +15,9 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
 use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType, tooling};
-use marrow_lsp_core::execution::{debug_data_boundary_json, execution_boundary_json};
+use marrow_lsp_core::execution::{
+    debug_data_boundary_json, execution_boundary_json, surface_serve_boundary_json,
+};
 use marrow_run::{DebugValue, EntryArgument, EntryInvocation, SourceAnalysisAdmission};
 use marrow_syntax::SourceSpan;
 use serde_json::{Value as Json, json};
@@ -45,8 +47,8 @@ const STATUS_INVALID_STATE: &str = "invalid-state";
 const STATUS_RUNTIME_ERROR: &str = "runtime-error";
 const STATUS_UNSUPPORTED_REQUEST: &str = "unsupported-request";
 const STATUS_BLOCKED_ON_MARROW: &str = "blocked-on-marrow";
-const ATTACH_BLOCKED: &str = "DAP attach requires Marrow serve/attach execution boundary facts";
-const ATTACH_BLOCKED_ON: &str = "serve/attach execution boundary facts";
+const ATTACH_BLOCKED: &str = "DAP attach requires Marrow served-process control boundary facts";
+const ATTACH_BLOCKED_ON: &str = "served-process control boundary facts";
 const BREAKPOINT_CONFIGURATION_NOT_READY: &str =
     "breakpoint verification requires launch configuration";
 const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expression";
@@ -668,6 +670,14 @@ impl<W: Write> Session<W> {
         match crate::project::prepare(&project_dir, entry, &args) {
             Ok(launch) => {
                 let execution_boundary = execution_boundary_json(&launch.session);
+                let surface_serve_boundary = match launch.surface_serve_boundary() {
+                    Ok(boundary) => surface_serve_boundary_json(&boundary),
+                    Err(error) => {
+                        let contract = DapError::from_launch_error(&error);
+                        self.respond_error(request, error.to_string(), contract);
+                        return;
+                    }
+                };
                 self.stop_points = Some(StopPointIndex::from_runtime(
                     launch.session.runtime_program(),
                     &launch.analysis_snapshot,
@@ -684,7 +694,12 @@ impl<W: Write> Session<W> {
                 self.respond(
                     request,
                     true,
-                    json!({ "marrowDebug": { "previewExecutionBoundary": execution_boundary } }),
+                    json!({
+                        "marrowDebug": {
+                            "previewExecutionBoundary": execution_boundary,
+                            "previewSurfaceServeBoundary": surface_serve_boundary,
+                        },
+                    }),
                 );
                 self.event("initialized", json!({}));
             }
@@ -990,6 +1005,7 @@ impl<W: Write> Session<W> {
         ) {
             Ok(running) => {
                 let execution_boundary = running.execution_boundary.clone();
+                let surface_serve_boundary = running.surface_serve_boundary.clone();
                 self.running = Some(Running {
                     handle: running.handle,
                     control: running.control,
@@ -1003,7 +1019,12 @@ impl<W: Write> Session<W> {
                 self.respond(
                     request,
                     true,
-                    json!({ "marrowDebug": { "executionBoundary": execution_boundary } }),
+                    json!({
+                        "marrowDebug": {
+                            "executionBoundary": execution_boundary,
+                            "surfaceServeBoundary": surface_serve_boundary,
+                        },
+                    }),
                 );
             }
             Err(crate::run::SpawnError::Launch(error)) => {

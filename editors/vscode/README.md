@@ -31,7 +31,8 @@ Rust binaries. No parsing or position math runs in TypeScript.
   the args; `int`, `date`, and `bytes` use exact string forms. F5 remains useful for launch,
   stop-on-entry, stepping, verified plain-line and conditional breakpoints, exact hit-count
   breakpoints, logpoints with Marrow-checked template expressions, watch/REPL/hover expression
-  evaluation, variables, and the Durable Data scope.
+  evaluation, variables, and the Durable Data scope. Debug launch responses carry Marrow's
+  admitted serve-surface boundary with process control marked not exposed.
 
 ## Requirements
 
@@ -75,7 +76,7 @@ same way, in order:
   "unavailable" rather than reporting an error.
 - Debugging is **statement-level** (not expression-level stepping).
 - Attaching to programs started with `marrow serve` is not advertised yet. The debug adapter
-  reports a blocked Marrow contract until serve/attach execution boundary facts exist.
+  reports a blocked Marrow contract until served-process control boundary facts exist.
 
 ## Development
 

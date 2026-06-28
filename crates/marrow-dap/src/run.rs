@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 
 use marrow_check::AnalysisGeneration;
-use marrow_lsp_core::execution::execution_boundary_json;
+use marrow_lsp_core::execution::{execution_boundary_json, surface_serve_boundary_json};
 use marrow_run::{
     DebugValue, EntryInvocation, Host, ProjectInvokeError, ProjectSession, RunOutput, SessionEntry,
     SourceAnalysisAdmission, SystemNondeterminism,
@@ -39,6 +39,7 @@ pub struct RunHandle {
     pub events: Receiver<RunEvent>,
     pub terminate: Arc<AtomicBool>,
     pub execution_boundary: Json,
+    pub surface_serve_boundary: Json,
 }
 
 #[derive(Debug)]
@@ -58,6 +59,11 @@ struct RunRequest {
     terminate: Arc<AtomicBool>,
 }
 
+struct RunStart {
+    execution_boundary: Json,
+    surface_serve_boundary: Json,
+}
+
 /// Start the run on a dedicated thread.
 pub fn spawn(
     project_dir: std::path::PathBuf,
@@ -70,7 +76,7 @@ pub fn spawn(
 ) -> Result<RunHandle, SpawnError> {
     let (event_tx, event_rx) = channel::<RunEvent>();
     let (control_tx, control_rx) = channel::<Control>();
-    let (start_tx, start_rx) = channel::<Result<Json, crate::project::LaunchError>>();
+    let (start_tx, start_rx) = channel::<Result<RunStart, crate::project::LaunchError>>();
     let terminate = Arc::new(AtomicBool::new(false));
     let request = RunRequest {
         project_dir,
@@ -88,8 +94,8 @@ pub fn spawn(
         .spawn(move || run_on_thread(request, event_tx, control_rx, start_tx))
         .map_err(|error| SpawnError::Thread(format!("could not start the run thread: {error}")))?;
 
-    let execution_boundary = match start_rx.recv() {
-        Ok(Ok(boundary)) => boundary,
+    let start = match start_rx.recv() {
+        Ok(Ok(start)) => start,
         Ok(Err(error)) => {
             let _ = handle.join();
             return Err(SpawnError::Launch(error));
@@ -107,7 +113,8 @@ pub fn spawn(
         control: control_tx,
         events: event_rx,
         terminate,
-        execution_boundary,
+        execution_boundary: start.execution_boundary,
+        surface_serve_boundary: start.surface_serve_boundary,
     })
 }
 
@@ -119,7 +126,7 @@ fn run_on_thread(
     request: RunRequest,
     events: Sender<RunEvent>,
     control: Receiver<Control>,
-    start: Sender<Result<Json, crate::project::LaunchError>>,
+    start: Sender<Result<RunStart, crate::project::LaunchError>>,
 ) -> Option<Outcome> {
     let RunRequest {
         project_dir,
@@ -148,12 +155,30 @@ fn run_on_thread(
             });
         }
     };
+    let surface_serve_boundary = match launch.surface_serve_boundary() {
+        Ok(boundary) => surface_serve_boundary_json(&boundary),
+        Err(error) => {
+            let message = error.to_string();
+            let _ = start.send(Err(error));
+            return Some(Outcome {
+                output: String::new(),
+                result: Err(message),
+            });
+        }
+    };
+    let execution_boundary = execution_boundary_json(&launch.session);
     let crate::project::Launch {
         session,
         invocation,
         ..
     } = launch;
-    if start.send(Ok(execution_boundary_json(&session))).is_err() {
+    if start
+        .send(Ok(RunStart {
+            execution_boundary,
+            surface_serve_boundary,
+        }))
+        .is_err()
+    {
         return None;
     }
     let debugger = Debugger::new(stop_on_entry, breakpoints, events, control, terminate);

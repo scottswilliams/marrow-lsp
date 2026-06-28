@@ -802,6 +802,30 @@ fn assert_dap_execution_boundary(boundary: &Json, store_kind: &str, stamped: boo
     }
 }
 
+fn assert_dap_surface_serve_boundary(boundary: &Json) {
+    assert_eq!(boundary["serveMode"], "write", "{boundary}");
+    assert_eq!(
+        boundary["dataViewBoundary"]["sourceAnalysisGeneration"]["profileVersion"],
+        "analysis.generation.v1",
+        "{boundary}"
+    );
+    assert_eq!(
+        boundary["dataViewBoundary"]["compatibility"],
+        json!({ "verdict": "admitted" }),
+        "{boundary}"
+    );
+    assert_eq!(
+        boundary["processControl"],
+        json!({ "kind": "not_exposed" }),
+        "{boundary}"
+    );
+    assert_eq!(
+        boundary["dataViewBoundary"]["watchTargets"],
+        json!([]),
+        "isolated debug launch must not publish live store watch targets: {boundary}"
+    );
+}
+
 #[test]
 fn malformed_request_arguments_fail_before_command_handlers() {
     for (command, arguments) in [
@@ -876,7 +900,7 @@ fn unsupported_commands_do_not_parse_request_arguments() {
 }
 
 #[test]
-fn attach_reports_serve_boundary_blocker() {
+fn attach_reports_served_process_control_blocker() {
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
@@ -888,7 +912,7 @@ fn attach_reports_serve_boundary_blocker() {
         &attach,
         "dap.attach.blocked",
         "blocked-on-marrow",
-        Some("serve/attach execution boundary facts"),
+        Some("served-process control boundary facts"),
     );
 
     let threads = client.request("threads", json!({}));
@@ -1971,6 +1995,9 @@ fn launch_accepts_configured_default_entry_with_isolated_writes() {
         "plain_memory",
         false,
     );
+    assert_dap_surface_serve_boundary(
+        &response["body"]["marrowDebug"]["previewSurfaceServeBoundary"],
+    );
 
     let done = client.request("configurationDone", json!({}));
     let done = client.response_for(done);
@@ -1980,6 +2007,7 @@ fn launch_accepts_configured_default_entry_with_isolated_writes() {
         "plain_memory",
         false,
     );
+    assert_dap_surface_serve_boundary(&done["body"]["marrowDebug"]["surfaceServeBoundary"]);
 
     let output = client.event("output");
     assert!(
@@ -2024,6 +2052,9 @@ fn launch_accepts_valid_existing_native_store() {
         "isolated",
         true,
     );
+    assert_dap_surface_serve_boundary(
+        &response["body"]["marrowDebug"]["previewSurfaceServeBoundary"],
+    );
 
     let done = client.request("configurationDone", json!({}));
     let done = client.response_for(done);
@@ -2033,6 +2064,7 @@ fn launch_accepts_valid_existing_native_store() {
         "isolated",
         true,
     );
+    assert_dap_surface_serve_boundary(&done["body"]["marrowDebug"]["surfaceServeBoundary"]);
     client.event("output");
     client.event("terminated");
 }

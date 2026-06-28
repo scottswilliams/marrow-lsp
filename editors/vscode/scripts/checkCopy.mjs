@@ -122,6 +122,11 @@ const changelogSourceIntelligence = markdownBullet(
 );
 const readme = files.get("README.md");
 const readmeSavedInspector = markdownBullet(readme, "README.md", "Saved Resource Inspector");
+const readmeAttachLimitation = markdownBullet(
+  readme,
+  "README.md",
+  "Attaching to programs",
+);
 assertMentions(
   changelogSourceIntelligence,
   "CHANGELOG.md source intelligence bullet",
@@ -319,7 +324,19 @@ assert.equal(
 assert.equal(
   Object.hasOwn(marrowDebugger.configurationAttributes, "attach"),
   false,
-  "VS Code must not advertise attach until Marrow exposes serve/attach execution boundary facts",
+  "VS Code must not advertise attach until Marrow exposes served-process control facts",
+);
+assertMentions(
+  readmeAttachLimitation,
+  "README.md attach limitation",
+  "served-process control blocker",
+  /served-process\s+control\s+boundary\s+facts/i,
+);
+assertDoesNotMention(
+  readmeAttachLimitation,
+  "README.md attach limitation",
+  "generic serve boundary blocker",
+  /serve\/attach\s+execution\s+boundary\s+facts/i,
 );
 const launchProperties = marrowDebugger.configurationAttributes.launch.properties;
 assert.equal(
