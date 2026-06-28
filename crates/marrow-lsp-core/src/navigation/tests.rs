@@ -134,8 +134,29 @@ fn catalog_navigation_does_not_keep_lsp_type_annotation_classifier() {
 
 #[test]
 fn catalog_navigation_consumes_marrow_navigation_facts() {
+    let symbols_source = include_str!("symbols.rs");
     let catalog_uses_source = include_str!("catalog_uses.rs");
 
+    let catalog_definition = symbols_source
+        .find("catalog_uses::definition")
+        .expect("public definition path calls catalog navigation");
+    let binding_definition = symbols_source
+        .find("index.definition(file, offset)")
+        .expect("public definition path has BindingIndex fallback");
+    assert!(
+        catalog_definition < binding_definition,
+        "definition must try Marrow catalog navigation before BindingIndex fallback"
+    );
+    let catalog_references = symbols_source
+        .find("catalog_uses::references")
+        .expect("public references path calls catalog navigation");
+    let binding_references = symbols_source
+        .find("let definition = index.definition(file, offset)?")
+        .expect("public references path has BindingIndex fallback");
+    assert!(
+        catalog_references < binding_references,
+        "references must try Marrow catalog navigation before BindingIndex fallback"
+    );
     assert!(
         catalog_uses_source.contains("source_catalog_definition_fact_at"),
         "catalog definitions must consume Marrow source catalog navigation facts"
@@ -623,6 +644,38 @@ fn local()
             declaration + "Book".len(),
         )
     );
+
+    let store_resource = offset_of(library_source, "store ^library_books(id: int): Book")
+        + "store ^library_books(id: int): ".len();
+    let store_catalog_location =
+        super::catalog_uses::definition(&snapshot, &indices, library_file, store_resource + 1)
+            .expect("store resource leaf resolves through the catalog navigation adapter");
+    let store_location = definition(
+        &snapshot,
+        &index,
+        &indices,
+        library_file,
+        store_resource + 1,
+    )
+    .expect("store resource leaf resolves through catalog facts");
+
+    assert_eq!(
+        range_text(library_source, library_index, store_location.range),
+        "Book"
+    );
+    assert_eq!(
+        store_location, store_catalog_location,
+        "public navigation should return the catalog adapter result for this cursor"
+    );
+    assert_eq!(
+        store_location,
+        location_for(
+            library_file,
+            library_source,
+            declaration,
+            declaration + "Book".len(),
+        )
+    );
 }
 
 #[test]
@@ -693,6 +746,31 @@ fn archived()
         catalog_facts.len(),
         "LSP references should be the Marrow catalog fact set, not BindingIndex fallback"
     );
+
+    let store_resource = offset_of(library_source, "store ^library_books(id: int): Book")
+        + "store ^library_books(id: int): ".len();
+    let store_catalog_refs = super::catalog_uses::references(
+        &snapshot,
+        &indices,
+        library_file,
+        store_resource + 1,
+        true,
+    )
+    .expect("store resource leaf resolves through the catalog navigation adapter");
+    let store_refs = references(
+        &snapshot,
+        &index,
+        &indices,
+        library_file,
+        store_resource + 1,
+        true,
+    )
+    .expect("store resource leaf references resolve through catalog facts");
+    assert_eq!(
+        store_refs, store_catalog_refs,
+        "public navigation should return the catalog adapter result for this cursor"
+    );
+    assert_eq!(store_refs, refs);
 
     for expected in [
         location_for(
