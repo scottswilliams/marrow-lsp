@@ -57,8 +57,9 @@ cannot replace these local gates.
 ## Graduation Work
 
 The remaining work is not LSP-side hardening debt unless the ledger says Marrow
-already exposes the needed fact. Each item below must either consume a canonical
-Marrow API or remain blocked.
+already exposes the needed fact. Semantic items below must either consume a
+canonical Marrow API or remain blocked; non-semantic editor and packaging rows
+must explicitly avoid language, catalog, runtime, or storage authority.
 
 | Area | Graduation requirement |
 | --- | --- |
@@ -66,7 +67,7 @@ Marrow API or remain blocked.
 | Data views | Read-only saved-root, child-page, and value-read inspection is a production data-view contract through Marrow typed saved-data DTOs, data-view boundaries, watch targets, and checked-program admission. Standalone stopped-frame durable reads are production-semantic through Marrow debug-data facts and boundaries. Integrity, repair, and served-process data views stay absent until Marrow exposes their production facts. |
 | MCP run | Served-process boundaries over the existing Marrow run/test sessions. Current run mode stays sandboxed over a fresh in-memory store without opening, reading, copying, or writing the configured project store, and returns Marrow run result/error DTOs plus versioned analysis generation, entry descriptor, footprint, cost-shape, and store-open-mode facts after entry admission. |
 | DAP | Standalone isolated launch is production-semantic through Marrow project sessions, entry admission, runtime stop-point facts, debug-expression facts, execution boundaries, serve-boundary metadata with `processControl.kind = "not_exposed"`, local debug facts, and stopped-frame durable-data boundaries. Served-process attach/debug launch remains absent until Marrow exposes served-process control boundaries. |
-| VS Code | Editor commands and snippets may expose only ready or presentation-only contracts. Blocked semantic inputs stay absent from schemas and snippets; exposed standalone debug entry/arg inputs remain DAP-owned schema only. |
+| VS Code | Editor commands, snippets, grammar, activation, and launcher plumbing expose only ready contracts. Future semantic inputs stay absent from schemas and snippets until Marrow exposes the required facts; exposed standalone debug entry/arg inputs remain DAP-owned schema only. |
 
 ## Maintenance Rules
 
