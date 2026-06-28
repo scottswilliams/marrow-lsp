@@ -11,7 +11,7 @@ use marrow_lsp_core::data_explorer::{
     DataChildrenRequest, DataReadRequest, DataRequestValidationError, data_key_input_schema,
     data_path_segment_input_schema, validate_data_children_request, validate_data_read_request,
 };
-use marrow_lsp_core::mcp::{self, DATA_INTEGRITY_MISSING_FACTS, RunMode, SurfaceRouteScope};
+use marrow_lsp_core::mcp::{self, RunMode, SurfaceRouteScope};
 use serde_json::{Value as Json, json};
 
 /// The MCP protocol version this server speaks, echoed in the `initialize` reply.
@@ -342,20 +342,8 @@ pub fn tools() -> Json {
         },
         {
             "name": "mw_data_integrity",
-            "description": "Debug/admin advisory over the current schema and real store: scan the project's real stored data and report capped/current-schema advisory findings, such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type, plus Marrow store_snapshot metadata. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation. Gated behind data access; returns a refusal envelope and reads nothing when disabled. This is not source/store compatibility validation or repair.",
-            "_meta": marrow_meta(json!({
-                "status": "presentation-only",
-                "stableProductionApi": false,
-                "description": "debug/admin advisory",
-                "basis": "current schema and real store",
-                "missingFacts": DATA_INTEGRITY_MISSING_FACTS,
-                "dataAccess": "gated",
-                "scope": "capped-current-schema-advisory",
-                "advisory": true,
-                "debugAdmin": true,
-                "productionValidation": false,
-                "repair": false,
-            })),
+            "description": "Debug/admin advisory over Marrow integrity sample DTOs and data_view_boundary facts: scan the project's real stored data and report capped/current-schema advisory findings, such as orphan paths (roots or members the schema no longer declares) or values that no longer decode as their declared type, plus Marrow store_snapshot metadata. This is the capped, on-demand schema-change-impact advisory — the same check `marrow data integrity` runs — not complete production validation or repair. Gated behind data access; returns a refusal envelope and reads nothing when disabled.",
+            "_meta": marrow_meta(mcp::data_integrity_contract()),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -582,6 +570,8 @@ fn required_u32(arguments: &Json, key: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use marrow_lsp_core::mcp::DATA_INTEGRITY_MISSING_FACTS;
 
     #[test]
     fn the_catalog_lists_every_agent_tool_with_a_schema() {
@@ -909,18 +899,29 @@ mod tests {
         let tools = catalog.as_array().unwrap();
 
         let integrity = contract(tools, "mw_data_integrity");
+        assert_eq!(integrity, &mcp::data_integrity_contract());
         assert_eq!(integrity["status"], "presentation-only");
         assert_eq!(integrity["stableProductionApi"], false);
         assert_eq!(integrity["description"], "debug/admin advisory");
-        assert_eq!(integrity["basis"], "current schema and real store");
+        assert_eq!(integrity["basis"], "Marrow integrity sample DTO");
         assert_eq!(
             strings(&integrity["missingFacts"]),
             DATA_INTEGRITY_MISSING_FACTS.to_vec()
         );
+        let tool_description = tool(tools, "mw_data_integrity")["description"]
+            .as_str()
+            .expect("mw_data_integrity description");
         assert!(
-            tool(tools, "mw_data_integrity")["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("store_snapshot metadata"))
+            tool_description.contains("data_view_boundary facts"),
+            "mw_data_integrity description should name data_view_boundary facts"
+        );
+        assert!(
+            tool_description.contains("store_snapshot metadata"),
+            "mw_data_integrity description should name store_snapshot metadata"
+        );
+        assert!(
+            !tool_description.contains("source/store compatibility"),
+            "mw_data_integrity description must not claim source/store compatibility validation"
         );
         assert_eq!(integrity["dataAccess"], "gated");
         assert_eq!(integrity["scope"], "capped-current-schema-advisory");

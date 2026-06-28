@@ -867,7 +867,7 @@ mod tests {
                         DATA_INTEGRITY_MISSING_FACTS,
                     ),
                 }),
-                "debug/admin advisory (presentation-only: source/store compatibility verdicts +3): clean, 10 scanned",
+                "debug/admin advisory (presentation-only: drift witnesses +2): clean, 10 scanned",
             ),
             (
                 "mw_data_children",

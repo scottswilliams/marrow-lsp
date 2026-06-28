@@ -59,7 +59,6 @@ use crate::types::render_type;
 use crate::workspace::Workspace;
 
 pub const DATA_INTEGRITY_MISSING_FACTS: &[&str] = &[
-    "source/store compatibility verdicts",
     "drift witnesses",
     "typed repair facts",
     "production validation contracts",
@@ -177,9 +176,15 @@ pub fn data_read_contract() -> Json {
     contract
 }
 
-fn data_integrity_contract() -> Json {
+pub fn data_integrity_contract() -> Json {
     let mut contract = presentation_contract("debug/admin advisory", DATA_INTEGRITY_MISSING_FACTS);
     contract["basis"] = json!("Marrow integrity sample DTO");
+    contract["dataAccess"] = json!("gated");
+    contract["scope"] = json!("capped-current-schema-advisory");
+    contract["advisory"] = json!(true);
+    contract["debugAdmin"] = json!(true);
+    contract["productionValidation"] = json!(false);
+    contract["repair"] = json!(false);
     contract
 }
 

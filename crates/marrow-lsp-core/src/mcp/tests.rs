@@ -2355,7 +2355,6 @@ fn data_tools_refuse_when_not_enabled() {
         "presentation-only",
         "debug/admin advisory",
         &[
-            "source/store compatibility verdicts",
             "drift witnesses",
             "typed repair facts",
             "production validation contracts",
@@ -2477,7 +2476,6 @@ fn data_integrity_returns_snapshot_metadata_when_enabled() {
         "presentation-only",
         "debug/admin advisory",
         &[
-            "source/store compatibility verdicts",
             "drift witnesses",
             "typed repair facts",
             "production validation contracts",
