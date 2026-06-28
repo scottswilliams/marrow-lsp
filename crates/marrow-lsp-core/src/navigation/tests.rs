@@ -81,6 +81,13 @@ fn range_for(source: &str, start: usize, end: usize) -> Range {
     LineIndex::new(source.to_string()).range(start, end)
 }
 
+fn location_for(file: &Path, source: &str, start: usize, end: usize) -> lsp_types::Location {
+    lsp_types::Location {
+        uri: Url::from_file_path(file).unwrap(),
+        range: range_for(source, start, end),
+    }
+}
+
 #[test]
 fn saved_root_navigation_suppression_consumes_marrow_cursor_fact() {
     let navigation_source = include_str!("../navigation.rs");
@@ -551,6 +558,231 @@ fn second()
             .iter()
             .all(|location| location.range != declaration_range)
     );
+}
+
+#[test]
+fn definition_from_qualified_resource_type_annotation_jumps_to_foreign_resource() {
+    let library_source = "\
+module shelf::library
+
+resource Book
+    required title: string
+
+store ^library_books(id: int): Book
+";
+    let app_source = "\
+module shelf::app
+
+use shelf::library
+
+resource Book
+    required label: string
+
+fn imported()
+    const book: library::Book = library::Book(title: \"Dune\")
+
+fn local()
+    const book: Book = Book(label: \"local\")
+";
+    let (snapshot, paths, indices) = analyze_files(&[
+        ("shelf/library.mw", library_source),
+        ("shelf/app.mw", app_source),
+    ]);
+    let library_file = &paths[0];
+    let app_file = &paths[1];
+    let index = build_binding_index(&snapshot);
+    let library_index = indices.0.get(library_file).unwrap();
+
+    let annotation_leaf =
+        offset_of(app_source, "const book: library::Book") + "const book: library::".len();
+    let catalog_fact = marrow_check::tooling::source_catalog_definition_fact_at(
+        &snapshot,
+        app_file,
+        annotation_leaf + 1,
+    )
+    .expect("Marrow emits a catalog definition fact for the resource annotation");
+    let location = definition(&snapshot, &index, &indices, app_file, annotation_leaf + 1)
+        .expect("resource annotation resolves through catalog facts");
+
+    assert_eq!(
+        range_text(library_source, library_index, location.range),
+        "Book"
+    );
+    let declaration = offset_of(library_source, "resource Book") + "resource ".len();
+    assert_eq!(catalog_fact.file, *library_file);
+    assert_eq!(
+        catalog_fact.span.start_byte, declaration,
+        "LSP navigation should be backed by the Marrow catalog fact for this cursor"
+    );
+    assert_eq!(
+        location,
+        location_for(
+            library_file,
+            library_source,
+            declaration,
+            declaration + "Book".len(),
+        )
+    );
+}
+
+#[test]
+fn references_from_resource_declaration_use_catalog_resource_facts() {
+    let library_source = "\
+module shelf::library
+
+resource Book
+    required title: string
+
+store ^library_books(id: int): Book
+
+fn template()
+    const book: Book = Book(title: \"Catalog\")
+";
+    let app_source = "\
+module shelf::app
+
+use shelf::library
+
+resource Book
+    required label: string
+
+fn imported()
+    const book: library::Book = library::Book(title: \"Dune\")
+
+fn local()
+    const book: Book = Book(label: \"local\")
+";
+    let archive_source = "\
+module shelf::archive
+
+resource Book
+    required code: string
+
+fn archived()
+    const book: Book = Book(code: \"old\")
+";
+    let (snapshot, paths, indices) = analyze_files(&[
+        ("shelf/library.mw", library_source),
+        ("shelf/app.mw", app_source),
+        ("shelf/archive.mw", archive_source),
+    ]);
+    let library_file = &paths[0];
+    let app_file = &paths[1];
+    let archive_file = &paths[2];
+    let index = build_binding_index(&snapshot);
+    let declaration = offset_of(library_source, "resource Book") + "resource ".len();
+    let catalog_facts = marrow_check::tooling::source_catalog_reference_facts_at(
+        &snapshot,
+        library_file,
+        declaration + 1,
+        true,
+    )
+    .expect("Marrow emits catalog references for resource declarations");
+
+    let refs = references(
+        &snapshot,
+        &index,
+        &indices,
+        library_file,
+        declaration + 1,
+        true,
+    )
+    .expect("resource declaration references resolve through catalog facts");
+    assert_eq!(
+        refs.len(),
+        catalog_facts.len(),
+        "LSP references should be the Marrow catalog fact set, not BindingIndex fallback"
+    );
+
+    for expected in [
+        location_for(
+            library_file,
+            library_source,
+            declaration,
+            declaration + "Book".len(),
+        ),
+        location_for(
+            library_file,
+            library_source,
+            offset_of(library_source, "const book: Book") + "const book: ".len(),
+            offset_of(library_source, "const book: Book") + "const book: Book".len(),
+        ),
+        location_for(
+            library_file,
+            library_source,
+            offset_of(library_source, "store ^library_books(id: int): Book")
+                + "store ^library_books(id: int): ".len(),
+            offset_of(library_source, "store ^library_books(id: int): Book")
+                + "store ^library_books(id: int): Book".len(),
+        ),
+        location_for(
+            library_file,
+            library_source,
+            offset_of(library_source, "Book(title: \"Catalog\")"),
+            offset_of(library_source, "Book(title: \"Catalog\")") + "Book".len(),
+        ),
+        location_for(
+            app_file,
+            app_source,
+            offset_of(app_source, "const book: library::Book") + "const book: library::".len(),
+            offset_of(app_source, "const book: library::Book") + "const book: library::Book".len(),
+        ),
+        location_for(
+            app_file,
+            app_source,
+            offset_of(app_source, "library::Book(title") + "library::".len(),
+            offset_of(app_source, "library::Book(title") + "library::Book".len(),
+        ),
+    ] {
+        assert!(
+            refs.contains(&expected),
+            "missing expected location {expected:?}"
+        );
+    }
+
+    for excluded in [
+        location_for(
+            app_file,
+            app_source,
+            offset_of(app_source, "resource Book") + "resource ".len(),
+            offset_of(app_source, "resource Book") + "resource Book".len(),
+        ),
+        location_for(
+            app_file,
+            app_source,
+            offset_of(app_source, "const book: Book") + "const book: ".len(),
+            offset_of(app_source, "const book: Book") + "const book: Book".len(),
+        ),
+        location_for(
+            app_file,
+            app_source,
+            offset_of(app_source, "Book(label: \"local\")"),
+            offset_of(app_source, "Book(label: \"local\")") + "Book".len(),
+        ),
+        location_for(
+            archive_file,
+            archive_source,
+            offset_of(archive_source, "resource Book") + "resource ".len(),
+            offset_of(archive_source, "resource Book") + "resource Book".len(),
+        ),
+        location_for(
+            archive_file,
+            archive_source,
+            offset_of(archive_source, "const book: Book") + "const book: ".len(),
+            offset_of(archive_source, "const book: Book") + "const book: Book".len(),
+        ),
+        location_for(
+            archive_file,
+            archive_source,
+            offset_of(archive_source, "Book(code: \"old\")"),
+            offset_of(archive_source, "Book(code: \"old\")") + "Book".len(),
+        ),
+    ] {
+        assert!(
+            !refs.contains(&excluded),
+            "same-named sibling should not be included: {excluded:?}"
+        );
+    }
 }
 
 #[test]
