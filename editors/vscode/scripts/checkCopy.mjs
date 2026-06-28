@@ -144,7 +144,7 @@ assertMentions(
   changelogSourceIntelligence,
   "CHANGELOG.md source intelligence bullet",
   "editor aid caveat",
-  /Hover,\s+rename,\s+and\s+remaining\s+navigation\s+helpers\s+stay\s+editor\s+aids/i,
+  /Hover\s+and\s+remaining\s+navigation\s+helpers\s+stay\s+editor\s+aids/i,
 );
 assertDoesNotMention(
   changelog,
@@ -155,8 +155,14 @@ assertDoesNotMention(
 assertMentions(
   changelogSourceIntelligence,
   "CHANGELOG.md source intelligence bullet",
-  "Marrow-owned typed facts",
-  /remaining\s+hover\/navigation\/rename\s+facts stay owned by Marrow/i,
+  "source-only rename fact framing",
+  /Source-only\s+prepare\s+rename\s+and\s+editor\s+rename\s+edits\s+are\s+backed\s+by\s+Marrow\s+rename\s+facts/i,
+);
+assertMentions(
+  changelogSourceIntelligence,
+  "CHANGELOG.md source intelligence bullet",
+  "remaining rename application caveat",
+  /saved-data-backed\s+rename\s+application[\s\S]*remaining\s+hover\/navigation\s+facts stay owned by Marrow/i,
 );
 assertMentions(
   readme,
@@ -452,15 +458,38 @@ assertMentions(
   readmeSourceIntelligence,
   "README.md source intelligence bullet",
   "editor aid caveat",
-  /Hover,\s+rename,\s+and\s+remaining\s+navigation\s+helpers\s+stay\s+editor\s+aids/i,
+  /Hover\s+and\s+remaining\s+navigation\s+helpers\s+stay\s+editor\s+aids/i,
 );
 assertMentions(
   readmeSourceIntelligence,
   "README.md source intelligence bullet",
-  "Marrow-owned typed facts",
-  /remaining\s+hover\/navigation\/rename\s+facts stay owned by Marrow/i,
+  "source-only rename fact framing",
+  /Source-only\s+prepare\s+rename\s+and\s+editor\s+rename\s+edits\s+are\s+backed\s+by\s+Marrow\s+rename\s+facts/i,
 );
-assertMentions(readme, "README.md", "rename catalog-evolution caveat", /catalog-backed evolution facts/i);
+assertMentions(
+  readmeSourceIntelligence,
+  "README.md source intelligence bullet",
+  "remaining rename application caveat",
+  /saved-data-backed\s+rename\s+application[\s\S]*remaining\s+hover\/navigation\s+facts stay owned by Marrow/i,
+);
+assertMentions(
+  readme,
+  "README.md",
+  "rename source-only contract",
+  /editor\s+rename\s+for\s+Marrow-admitted\s+source-only\s+bindings/i,
+);
+assertMentions(
+  readme,
+  "README.md",
+  "rename editor application caveat",
+  /evolve\s+rename\s+intent\s+has\s+a\s+canonical\s+editor\s+application\s+contract/i,
+);
+assertDoesNotMention(
+  `${readme}\n${changelog}`,
+  "VS Code copy",
+  "stale catalog-evolution rename blocker",
+  /until\s+Marrow\s+exposes\s+catalog-backed\s+evolution\s+facts/i,
+);
 assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveData[\s\S]*advisory/i);
 assertMentions(
   readmeF5,
