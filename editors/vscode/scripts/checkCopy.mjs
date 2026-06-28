@@ -115,25 +115,60 @@ const changelogSavedInspector = markdownBullet(
   "CHANGELOG.md",
   "Saved Resource Inspector",
 );
+const changelogSourceIntelligence = markdownBullet(
+  changelog,
+  "CHANGELOG.md",
+  "Source-intelligence helpers",
+);
 const readme = files.get("README.md");
 const readmeSavedInspector = markdownBullet(readme, "README.md", "Saved Resource Inspector");
 assertMentions(
-  changelog,
-  "CHANGELOG.md",
+  changelogSourceIntelligence,
+  "CHANGELOG.md source intelligence bullet",
   "fact-backed completion framing",
   /completion are backed by Marrow facts/i,
 );
 assertMentions(
-  changelog,
-  "CHANGELOG.md",
-  "editor aid caveat",
-  /Hover, go-to definition, find references, and rename remain editor aids/i,
+  changelogSourceIntelligence,
+  "CHANGELOG.md source intelligence bullet",
+  "catalog navigation ready contract",
+  /catalog-backed\s+go-to\s+definition\s+and\s+find\s+references[\s\S]*Marrow\s+navigation\s+facts/i,
+);
+assertDoesNotMention(
+  changelogSourceIntelligence,
+  "CHANGELOG.md source intelligence bullet",
+  "store resource leaf graduation",
+  /store\s+catalog\s+leaves/i,
 );
 assertMentions(
+  changelogSourceIntelligence,
+  "CHANGELOG.md source intelligence bullet",
+  "editor aid caveat",
+  /Hover,\s+rename,\s+and\s+remaining\s+navigation\s+helpers\s+stay\s+editor\s+aids/i,
+);
+assertDoesNotMention(
   changelog,
   "CHANGELOG.md",
+  "undifferentiated navigation caveat",
+  /go-to\s+definition,\s+find\s+references,\s+and\s+rename\s+remain\s+editor\s+aids/i,
+);
+assertMentions(
+  changelogSourceIntelligence,
+  "CHANGELOG.md source intelligence bullet",
   "Marrow-owned typed facts",
-  /typed\s+hover\/navigation facts stay owned by Marrow/i,
+  /remaining\s+hover\/navigation\/rename\s+facts stay owned by Marrow/i,
+);
+assertMentions(
+  readme,
+  "README.md",
+  "catalog navigation ready contract",
+  /catalog-backed\s+go-to\s+definition\s+and\s+find\s+references[\s\S]*Marrow\s+navigation\s+facts/i,
+);
+assertDoesNotMention(
+  readme,
+  "README.md",
+  "undifferentiated navigation caveat",
+  /go-to\s+definition,\s+find\s+references,\s+and\s+rename\s+remain\s+editor\s+aids/i,
 );
 assertMentions(
   changelog,
@@ -404,14 +439,26 @@ assertMentions(
 assertMentions(
   readmeSourceIntelligence,
   "README.md source intelligence bullet",
+  "catalog navigation ready contract",
+  /Catalog-backed\s+go-to\s+definition\s+and\s+find\s+references[\s\S]*Marrow\s+navigation\s+facts/i,
+);
+assertDoesNotMention(
+  readmeSourceIntelligence,
+  "README.md source intelligence bullet",
+  "store resource leaf graduation",
+  /store\s+catalog\s+leaves/i,
+);
+assertMentions(
+  readmeSourceIntelligence,
+  "README.md source intelligence bullet",
   "editor aid caveat",
-  /Hover, go-to definition,\s+find references, and rename remain editor aids/i,
+  /Hover,\s+rename,\s+and\s+remaining\s+navigation\s+helpers\s+stay\s+editor\s+aids/i,
 );
 assertMentions(
   readmeSourceIntelligence,
   "README.md source intelligence bullet",
   "Marrow-owned typed facts",
-  /typed hover\/navigation facts stay owned by Marrow/i,
+  /remaining\s+hover\/navigation\/rename\s+facts stay owned by Marrow/i,
 );
 assertMentions(readme, "README.md", "rename catalog-evolution caveat", /catalog-backed evolution facts/i);
 assertMentions(readme, "README.md", "advisory setting framing", /marrow\.liveData[\s\S]*advisory/i);

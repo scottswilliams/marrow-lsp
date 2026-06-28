@@ -10,9 +10,11 @@ Rust binaries. No parsing or position math runs in TypeScript.
 
 - **Diagnostics** — parse, type, and schema errors reported as you edit.
 - **Source intelligence** — diagnostics, formatting, symbols, semantic tokens, signature help,
-  and completion are backed by Marrow facts over the current analysis. Hover, go-to definition,
-  find references, and rename remain editor aids where the LSP contract says so; durable identity,
-  catalog evolution, and typed hover/navigation facts stay owned by Marrow.
+  and completion are backed by Marrow facts over the current analysis. Catalog-backed go-to
+  definition and find references are backed by Marrow navigation facts for saved roots, resource
+  catalog leaves, enum leaves, type annotations, members, and indexes. Hover, rename, and remaining
+  navigation helpers stay editor aids where the LSP contract says so; durable identity, catalog
+  evolution, and remaining hover/navigation/rename facts stay owned by Marrow.
 - **Rename** — editor rename for supported source bindings; saved-data-backed edits are refused
   until Marrow exposes catalog-backed evolution facts.
 - **Formatting** — format a `.mw` document.

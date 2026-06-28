@@ -14,8 +14,10 @@ Initial release.
 - Diagnostics (parse, type, and schema errors) for `.mw` files.
 - Source-intelligence helpers over current Marrow analysis: diagnostics, formatting, document and
   workspace symbols, semantic tokens, signature help, and completion are backed by Marrow facts.
-  Hover, go-to definition, find references, and rename remain editor aids while typed
-  hover/navigation facts stay owned by Marrow.
+  Catalog-backed go-to definition and find references are backed by Marrow navigation facts for
+  saved roots, resource catalog leaves, enum leaves, type annotations, members, and indexes. Hover,
+  rename, and remaining navigation helpers stay editor aids while remaining hover/navigation/rename
+  facts stay owned by Marrow.
 - Rename refuses saved-data-backed edits until Marrow exposes catalog-backed evolution facts.
 - Document formatting.
 - The Saved Resource Inspector view for the opt-in production read-only data-view contract over
