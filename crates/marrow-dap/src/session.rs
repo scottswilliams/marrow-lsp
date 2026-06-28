@@ -50,13 +50,13 @@ const BREAKPOINT_CONDITION_INVALID: &str = "invalid conditional breakpoint expre
 const BREAKPOINT_HIT_CONDITION_INVALID: &str = "hitCondition must be a positive integer string";
 const BREAKPOINT_LOG_MESSAGE_INVALID: &str = "invalid logMessage expression";
 const BREAKPOINT_SOURCE_INVALID: &str = "missing or invalid breakpoint source";
-const BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: &str =
-    "DAP sourceReference breakpoint sources are not supported";
+const BREAKPOINT_SOURCE_REFERENCE_INVALID: &str = "unknown DAP sourceReference";
 const BREAKPOINTS_INVALID: &str = "`breakpoints` must be an array";
 const BREAKPOINT_INVALID_LINE: &str = "missing or invalid breakpoint line";
 const BREAKPOINT_NO_STOP_POINT: &str = "no executable Marrow stop point at this source line";
 const EVALUATE_EXPRESSION_INVALID: &str = "missing or invalid evaluate expression";
 const EVALUATE_CONTEXT_INVALID: &str = "invalid evaluate context";
+const SOURCE_REFERENCE_INVALID: &str = "missing or unknown DAP sourceReference";
 const VARIABLES_REFERENCE_INVALID: &str = "missing or invalid variablesReference";
 const VARIABLES_PAGE_INVALID: &str = "invalid variables paging arguments";
 const VARIABLES_FILTER_INVALID: &str = "invalid variables filter";
@@ -87,9 +87,9 @@ const ERROR_BREAKPOINT_LOG_MESSAGE_INVALID: DapError =
     DapError::new("dap.breakpoint.logMessageInvalid", STATUS_INVALID_PARAMS);
 const ERROR_BREAKPOINT_SOURCE_INVALID: DapError =
     DapError::new("dap.breakpoint.sourceInvalid", STATUS_INVALID_PARAMS);
-const ERROR_BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED: DapError = DapError::new(
-    "dap.breakpoint.sourceReferenceUnsupported",
-    STATUS_UNSUPPORTED_REQUEST,
+const ERROR_BREAKPOINT_SOURCE_REFERENCE_INVALID: DapError = DapError::new(
+    "dap.breakpoint.sourceReferenceInvalid",
+    STATUS_INVALID_PARAMS,
 );
 const ERROR_BREAKPOINTS_INVALID: DapError =
     DapError::new("dap.breakpoint.breakpointsInvalid", STATUS_INVALID_PARAMS);
@@ -108,6 +108,8 @@ const ERROR_EVALUATE_CONTEXT_INVALID: DapError =
     DapError::new("dap.evaluate.contextInvalid", STATUS_INVALID_PARAMS);
 const ERROR_EVALUATE_RUNTIME: DapError =
     DapError::new("dap.evaluate.runtimeError", STATUS_RUNTIME_ERROR);
+const ERROR_SOURCE_REFERENCE_INVALID: DapError =
+    DapError::new("dap.source.sourceReferenceInvalid", STATUS_INVALID_PARAMS);
 const ERROR_VARIABLES_REFERENCE_INVALID: DapError =
     DapError::new("dap.variables.referenceInvalid", STATUS_INVALID_PARAMS);
 const ERROR_VARIABLES_PAGE_INVALID: DapError =
@@ -237,12 +239,14 @@ enum RequestedBreakpoint {
 
 enum BreakpointSource {
     Path(PathBuf),
-    SourceReference,
+    SourceReference(i64),
 }
 
 #[derive(Clone, Default)]
 struct StopPointIndex {
     stops_by_canonical_file: HashMap<PathBuf, HashMap<u32, Vec<RuntimeStop>>>,
+    sources_by_reference: HashMap<i64, DapSourceFile>,
+    references_by_canonical_file: HashMap<PathBuf, i64>,
 }
 
 #[derive(Clone)]
@@ -251,8 +255,27 @@ struct RuntimeStop {
     span: SourceSpan,
 }
 
+#[derive(Clone)]
+struct DapSourceFile {
+    canonical_path: PathBuf,
+    source: String,
+}
+
 impl StopPointIndex {
-    fn from_runtime(program: &marrow_check::CheckedRuntimeProgram) -> Self {
+    fn from_runtime(
+        program: &marrow_check::CheckedRuntimeProgram,
+        analysis: &AnalysisSnapshot,
+    ) -> Self {
+        let source_by_canonical_file: HashMap<PathBuf, &str> = analysis
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    normalize_existing_path(file.path.clone()),
+                    file.source.as_str(),
+                )
+            })
+            .collect();
         let mut index = Self::default();
         for point in program.stop_points() {
             let Some(path) = program.file_path(point.file_id) else {
@@ -260,6 +283,9 @@ impl StopPointIndex {
             };
             let runtime_path = path.to_path_buf();
             let canonical_path = normalize_existing_path(runtime_path.clone());
+            if let Some(source) = source_by_canonical_file.get(&canonical_path) {
+                index.register_source(canonical_path.clone(), source);
+            }
             index
                 .stops_by_canonical_file
                 .entry(canonical_path)
@@ -274,11 +300,39 @@ impl StopPointIndex {
         index
     }
 
+    fn register_source(&mut self, canonical_path: PathBuf, source: &str) {
+        if self
+            .references_by_canonical_file
+            .contains_key(&canonical_path)
+        {
+            return;
+        }
+        let reference = i64::try_from(self.sources_by_reference.len() + 1)
+            .expect("DAP sourceReference count fits in i64");
+        self.references_by_canonical_file
+            .insert(canonical_path.clone(), reference);
+        self.sources_by_reference.insert(
+            reference,
+            DapSourceFile {
+                canonical_path,
+                source: source.to_string(),
+            },
+        );
+    }
+
     fn stops(&self, source: &Path, line: u32) -> Option<&[RuntimeStop]> {
         self.stops_by_canonical_file
             .get(source)
             .and_then(|lines| lines.get(&line))
             .map(Vec::as_slice)
+    }
+
+    fn source_reference(&self, source: &Path) -> Option<i64> {
+        self.references_by_canonical_file.get(source).copied()
+    }
+
+    fn source_file(&self, reference: i64) -> Option<&DapSourceFile> {
+        self.sources_by_reference.get(&reference)
     }
 }
 
@@ -437,6 +491,12 @@ impl<W: Write> Session<W> {
                 };
                 self.on_stack_trace(request, &arguments);
             }
+            "source" => {
+                let Some(arguments) = self.arguments_or_reject(request) else {
+                    return;
+                };
+                self.on_source(request, &arguments);
+            }
             "scopes" => {
                 let Some(arguments) = self.arguments_or_reject(request) else {
                     return;
@@ -546,10 +606,7 @@ impl<W: Write> Session<W> {
             );
             return;
         }
-        self.pending = None;
-        self.analysis = None;
-        self.stop_points = None;
-        self.breakpoints.clear();
+        self.clear_launch_configuration();
         let project = match parse_project(arguments) {
             Ok(project) => project,
             Err(error) => {
@@ -587,6 +644,7 @@ impl<W: Write> Session<W> {
                 let execution_boundary = execution_boundary_json(&launch.session);
                 self.stop_points = Some(StopPointIndex::from_runtime(
                     launch.session.runtime_program(),
+                    &launch.analysis_snapshot,
                 ));
                 self.analysis = Some(launch.analysis_snapshot);
                 self.pending = Some(PendingLaunch {
@@ -616,14 +674,22 @@ impl<W: Write> Session<W> {
     fn on_set_breakpoints(&mut self, request: &Json, arguments: &Json) {
         let source = match breakpoint_source(arguments) {
             Ok(BreakpointSource::Path(source)) => source,
-            Ok(BreakpointSource::SourceReference) => {
-                self.respond_error(
-                    request,
-                    BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED,
-                    ERROR_BREAKPOINT_SOURCE_REFERENCE_UNSUPPORTED,
-                );
-                return;
-            }
+            Ok(BreakpointSource::SourceReference(reference)) => match self
+                .stop_points
+                .as_ref()
+                .and_then(|stops| stops.source_file(reference))
+                .map(|source| source.canonical_path.clone())
+            {
+                Some(source) => source,
+                None => {
+                    self.respond_error(
+                        request,
+                        BREAKPOINT_SOURCE_REFERENCE_INVALID,
+                        ERROR_BREAKPOINT_SOURCE_REFERENCE_INVALID,
+                    );
+                    return;
+                }
+            },
             Err(error) => {
                 self.respond_error(request, error.message, error.contract);
                 return;
@@ -915,6 +981,7 @@ impl<W: Write> Session<W> {
             }
             Err(crate::run::SpawnError::Launch(error)) => {
                 let contract = DapError::from_launch_error(&error);
+                self.clear_launch_configuration();
                 self.respond_error(request, error.to_string(), contract);
             }
             Err(crate::run::SpawnError::Thread(error)) => {
@@ -957,12 +1024,54 @@ impl<W: Write> Session<W> {
             "column": stop.column.max(1),
         });
         if let Some(path) = &stop.file {
-            frame["source"] = json!({ "path": path });
+            let mut source = json!({ "path": path });
+            if let Some(reference) = self
+                .stop_points
+                .as_ref()
+                .and_then(|stops| stops.source_reference(&normalize_existing_path(path.clone())))
+            {
+                source["sourceReference"] = json!(reference);
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    source["name"] = json!(name);
+                }
+            }
+            frame["source"] = source;
         }
         self.respond(
             request,
             true,
             json!({ "stackFrames": [frame], "totalFrames": 1 }),
+        );
+    }
+
+    /// `source`: return the launch-time source text behind a DAP sourceReference.
+    fn on_source(&mut self, request: &Json, arguments: &Json) {
+        let reference = match parse_source_reference(arguments) {
+            Ok(reference) => reference,
+            Err(error) => {
+                self.respond_error(request, error.message, error.contract);
+                return;
+            }
+        };
+        let Some(source) = self
+            .stop_points
+            .as_ref()
+            .and_then(|stops| stops.source_file(reference))
+        else {
+            self.respond_error(
+                request,
+                SOURCE_REFERENCE_INVALID,
+                ERROR_SOURCE_REFERENCE_INVALID,
+            );
+            return;
+        };
+        self.respond(
+            request,
+            true,
+            json!({
+                "content": source.source.as_str(),
+                "mimeType": "text/x-marrow",
+            }),
         );
     }
 
@@ -1529,6 +1638,13 @@ impl<W: Write> Session<W> {
         }
         self.done = true;
     }
+
+    fn clear_launch_configuration(&mut self) {
+        self.pending = None;
+        self.analysis = None;
+        self.stop_points = None;
+        self.breakpoints.clear();
+    }
 }
 
 /// Which depth-relative step a client requested.
@@ -1696,6 +1812,20 @@ fn parse_variables_reference(arguments: &Json) -> Result<i64, DapInputError> {
     Ok(reference)
 }
 
+fn parse_source_reference(arguments: &Json) -> Result<i64, DapInputError> {
+    let Some(reference) = arguments
+        .get("sourceReference")
+        .and_then(Json::as_i64)
+        .filter(|reference| *reference > 0)
+    else {
+        return Err(DapInputError::new(
+            SOURCE_REFERENCE_INVALID,
+            ERROR_SOURCE_REFERENCE_INVALID,
+        ));
+    };
+    Ok(reference)
+}
+
 fn parse_thread_id(arguments: &Json) -> Result<(), DapInputError> {
     parse_singleton_id(
         arguments,
@@ -1738,10 +1868,14 @@ fn breakpoint_source(arguments: &Json) -> Result<BreakpointSource, DapInputError
     };
     if source
         .get("sourceReference")
-        .and_then(Json::as_u64)
+        .and_then(Json::as_i64)
         .is_some_and(|reference| reference > 0)
     {
-        return Ok(BreakpointSource::SourceReference);
+        let reference = source
+            .get("sourceReference")
+            .and_then(Json::as_i64)
+            .expect("positive sourceReference was checked");
+        return Ok(BreakpointSource::SourceReference(reference));
     }
     if let Some(path) = source.get("path") {
         return path
@@ -2069,7 +2203,10 @@ mod tests {
     fn checked_evaluate_expression_admits_durable_data_access() {
         let dir = write_durable_debug_project();
         let launch = crate::project::prepare(dir.path(), None, &[]).expect("launch");
-        let stop_points = StopPointIndex::from_runtime(launch.session.runtime_program());
+        let stop_points = StopPointIndex::from_runtime(
+            launch.session.runtime_program(),
+            &launch.analysis_snapshot,
+        );
         let file = dir.path().join("src").join("shelf.mw");
         let stop = stop_points
             .stops(&normalize_existing_path(file), 11)
@@ -2105,6 +2242,7 @@ mod tests {
         let mut session = Session::new(Vec::new());
         session.stop_points = Some(StopPointIndex::from_runtime(
             launch.session.runtime_program(),
+            &launch.analysis_snapshot,
         ));
         let request = json!({ "seq": 1, "command": "setBreakpoints" });
 

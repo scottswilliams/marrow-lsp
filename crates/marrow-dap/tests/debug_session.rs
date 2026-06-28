@@ -739,6 +739,7 @@ fn malformed_request_arguments_fail_before_command_handlers() {
         ("configurationDone", json!("bad")),
         ("threads", json!(false)),
         ("stackTrace", json!(1)),
+        ("source", json!(1)),
         ("scopes", json!([])),
         ("variables", json!([])),
         ("evaluate", json!(true)),
@@ -979,7 +980,31 @@ fn malformed_breakpoint_source_envelopes_fail_the_request() {
 }
 
 #[test]
-fn source_reference_breakpoint_sources_are_adapter_unsupported() {
+fn malformed_source_reference_requests_fail_the_request() {
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+
+    for arguments in [
+        json!({}),
+        json!({ "sourceReference": 0 }),
+        json!({ "sourceReference": -1 }),
+        json!({ "sourceReference": "1" }),
+    ] {
+        let request = client.request("source", arguments);
+        let response = client.response_for(request);
+        assert_response_marrow_error(
+            &response,
+            "dap.source.sourceReferenceInvalid",
+            "invalid-params",
+            None,
+        );
+    }
+}
+
+#[test]
+fn unknown_source_reference_breakpoint_sources_are_rejected() {
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
@@ -995,34 +1020,114 @@ fn source_reference_breakpoint_sources_are_adapter_unsupported() {
     let response = client.response_for(set);
     assert_breakpoint_envelope_error(
         &response,
-        "dap.breakpoint.sourceReferenceUnsupported",
-        "unsupported-request",
+        "dap.breakpoint.sourceReferenceInvalid",
+        "invalid-params",
     );
 }
 
 #[test]
 fn positive_source_reference_takes_precedence_over_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
     let mut client = Client::spawn();
 
     let init = client.request("initialize", json!({}));
     assert_eq!(client.response_for(init)["success"], true);
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+    client.event("initialized");
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    client.event("stopped");
+    step_to_line(&mut client, 6);
+
+    let threads = client.request("threads", json!({}));
+    let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let stack = client.request("stackTrace", json!({ "threadId": thread_id }));
+    let frames = client.response_for(stack);
+    let source_reference = frames["body"]["stackFrames"][0]["source"]["sourceReference"]
+        .as_i64()
+        .expect("stack source exposes a reference");
 
     let set = client.request(
         "setBreakpoints",
         json!({
             "source": {
                 "path": "ignored.mw",
-                "sourceReference": 1,
+                "sourceReference": source_reference,
             },
             "breakpoints": [{ "line": 6 }],
         }),
     );
     let response = client.response_for(set);
-    assert_breakpoint_envelope_error(
-        &response,
-        "dap.breakpoint.sourceReferenceUnsupported",
-        "unsupported-request",
+    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
+    assert_eq!(breakpoints.len(), 1, "{response}");
+    assert_verified_breakpoint(&breakpoints[0], 6);
+
+    let expected_source = file.canonicalize().unwrap();
+    assert_eq!(
+        frames["body"]["stackFrames"][0]["source"]["path"],
+        expected_source.display().to_string(),
+        "{frames}"
     );
+}
+
+#[test]
+fn source_reference_returns_launch_snapshot_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    assert_eq!(client.response_for(init)["success"], true);
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+    client.event("initialized");
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    client.event("stopped");
+    step_to_line(&mut client, 6);
+
+    let threads = client.request("threads", json!({}));
+    let thread_id = client.response_for(threads)["body"]["threads"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let stack = client.request("stackTrace", json!({ "threadId": thread_id }));
+    let frames = client.response_for(stack);
+    let source_reference = frames["body"]["stackFrames"][0]["source"]["sourceReference"]
+        .as_i64()
+        .filter(|reference| *reference > 0)
+        .expect("stack source exposes a positive sourceReference");
+
+    std::fs::write(
+        &file,
+        "module shelf\n\npub fn main()\n    print(\"changed\")\n",
+    )
+    .unwrap();
+
+    let source = client.request("source", json!({ "sourceReference": source_reference }));
+    let source = client.response_for(source);
+    assert_eq!(source["success"], true, "{source}");
+    assert_eq!(source["body"]["content"], SHELF_SOURCE, "{source}");
+    assert_eq!(source["body"]["mimeType"], "text/x-marrow", "{source}");
 }
 
 #[test]
@@ -1431,6 +1536,27 @@ fn configuration_done_rejects_source_changed_after_launch() {
         "dap.launchAnalysis.changed",
         "invalid-state",
         None,
+    );
+
+    let source = client.request("source", json!({ "sourceReference": 1 }));
+    assert_response_marrow_error(
+        &client.response_for(source),
+        "dap.source.sourceReferenceInvalid",
+        "invalid-params",
+        None,
+    );
+
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "sourceReference": 1 },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+    assert_breakpoint_envelope_error(
+        &client.response_for(set),
+        "dap.breakpoint.sourceReferenceInvalid",
+        "invalid-params",
     );
 }
 
@@ -2264,7 +2390,18 @@ fn breakpoint_set_on_real_path_arms_symlinked_runtime_source_root() {
     assert_eq!(client.response_for(done)["success"], true);
     let stopped = client.event("stopped");
     assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
-    assert_eq!(stop_line(&mut client), 6);
+    let stack = client.request("stackTrace", json!({ "threadId": 1 }));
+    let stack = client.response_for(stack);
+    let frame = &stack["body"]["stackFrames"][0];
+    assert_eq!(frame["line"], 6, "{stack}");
+    let source_reference = frame["source"]["sourceReference"]
+        .as_i64()
+        .filter(|reference| *reference > 0)
+        .expect("symlinked source frame exposes a positive sourceReference");
+    let source = client.request("source", json!({ "sourceReference": source_reference }));
+    let source = client.response_for(source);
+    assert_eq!(source["success"], true, "{source}");
+    assert_eq!(source["body"]["content"], SHELF_SOURCE, "{source}");
 
     let cont = client.request("continue", json!({ "threadId": 1 }));
     assert_eq!(client.response_for(cont)["success"], true);
