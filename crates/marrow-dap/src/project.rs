@@ -377,11 +377,11 @@ pub fn main(): int
         );
         assert!(
             !dir.path().join(marrow_project::CATALOG_FILE_NAME).exists(),
-            "a presentation-only debug prepare must not write the committed lock"
+            "isolated debug prepare must not write the committed lock"
         );
         assert!(
             !dir.path().join("data").join("marrow.redb").exists(),
-            "a presentation-only debug prepare must not open the native store"
+            "isolated debug prepare must not open the native store"
         );
     }
 
