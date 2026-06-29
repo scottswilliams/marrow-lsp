@@ -785,9 +785,9 @@ fn to_core_position(position: Position) -> CorePosition {
     }
 }
 
-/// Ensure a snapshot exists, then build and cache its binding index only when
-/// the target file and every analyzed source still matches the editor-visible
-/// source world.
+/// Ensure a parse-clean snapshot exists, then build and cache its binding index
+/// only when the target file and every analyzed source still matches the
+/// editor-visible source world.
 /// Returns `None` for stale text or for a file outside any project.
 fn ensure_fresh_index<'a>(
     workspace: &'a mut Workspace,
@@ -798,13 +798,21 @@ fn ensure_fresh_index<'a>(
     if workspace.latest().is_none() {
         let _ = workspace.recompute(file, documents);
     }
-    if !snapshot_has_document_text(workspace.latest(), file, text) {
+    let snapshot = workspace.latest()?;
+    if !snapshot_has_document_text(Some(snapshot), file, text) {
+        return None;
+    }
+    if snapshot_has_parse_errors(snapshot) {
         return None;
     }
     if !workspace.latest_matches_sources(documents) {
         return None;
     }
     workspace.binding_index()
+}
+
+fn snapshot_has_parse_errors(snapshot: &AnalysisSnapshot) -> bool {
+    snapshot.files.iter().any(|file| file.parsed.has_errors())
 }
 
 enum WatchedProjectChange {

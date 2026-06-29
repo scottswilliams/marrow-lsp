@@ -6,6 +6,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
@@ -26,10 +28,16 @@ fn send(stdin: &mut impl Write, message: &Value) {
 /// Read one framed JSON-RPC message: parse the `Content-Length` header, then read
 /// exactly that many body bytes.
 fn recv(reader: &mut impl BufRead) -> Value {
+    recv_message(reader).expect("a framed JSON-RPC message")
+}
+
+fn recv_message(reader: &mut impl BufRead) -> Option<Value> {
     let mut content_length = None;
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
         let line = line.trim_end();
         if line.is_empty() {
             break;
@@ -38,10 +46,10 @@ fn recv(reader: &mut impl BufRead) -> Value {
             content_length = Some(value.trim().parse::<usize>().unwrap());
         }
     }
-    let length = content_length.expect("a Content-Length header");
+    let length = content_length?;
     let mut body = vec![0u8; length];
-    reader.read_exact(&mut body).unwrap();
-    serde_json::from_slice(&body).unwrap()
+    reader.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
 }
 
 fn fixture_root() -> PathBuf {
@@ -228,6 +236,44 @@ fn initialized_server() -> (Server, ChildStdin, BufReader<ChildStdout>, Value) {
         &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     (server, stdin, stdout, initialize)
+}
+
+fn initialized_server_with_message_channel() -> (Server, ChildStdin, mpsc::Receiver<Value>, Value) {
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let stdout = server.0.stdout.take().unwrap();
+    let (messages_tx, messages_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut stdout = BufReader::new(stdout);
+        while let Some(message) = recv_message(&mut stdout) {
+            if messages_tx.send(message).is_err() {
+                break;
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        }),
+    );
+    let initialize = recv_channel_message(&messages_rx, Duration::from_secs(10));
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+    (server, stdin, messages_rx, initialize)
 }
 
 #[test]
@@ -727,6 +773,55 @@ pub fn caller(): string
     );
 
     let _ = server.0.kill();
+}
+
+#[test]
+fn hover_on_syntax_error_responds_over_stdio() {
+    let (_server, mut stdin, messages, _initialize) = initialized_server_with_message_channel();
+
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let broken = "module shelf::sample\n\npub fn main():\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": broken
+                }
+            }
+        }),
+    );
+    let diagnostic = wait_for_diagnostic_from_channel(&messages, &uri, Duration::from_secs(10));
+    assert_eq!(
+        diagnostic["code"], "parse.syntax",
+        "broken function header should publish the parse diagnostic first"
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 2, "character": 7 }
+            }
+        }),
+    );
+
+    let hover = wait_for_response_from_channel(&messages, 2, Duration::from_secs(2));
+    assert_eq!(
+        hover["result"],
+        Value::Null,
+        "syntax-error hovers should complete with no hover so the editor can dismiss its loading UI"
+    );
 }
 
 #[test]
@@ -2472,12 +2567,57 @@ fn wait_for_diagnostic(reader: &mut impl BufRead, uri: &str, timeout: Duration) 
     panic!("no diagnostic published within the timeout");
 }
 
+fn recv_channel_message(messages: &mpsc::Receiver<Value>, timeout: Duration) -> Value {
+    messages
+        .recv_timeout(timeout)
+        .expect("a JSON-RPC message before the timeout")
+}
+
+fn wait_for_diagnostic_from_channel(
+    messages: &mpsc::Receiver<Value>,
+    uri: &str,
+    timeout: Duration,
+) -> Value {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let message = recv_channel_message(messages, remaining);
+        if message["method"] == "textDocument/publishDiagnostics" {
+            let params = &message["params"];
+            let diagnostics = params["diagnostics"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if params["uri"] == uri && !diagnostics.is_empty() {
+                return diagnostics[0].clone();
+            }
+        }
+    }
+    panic!("no diagnostic published within the timeout");
+}
+
 /// Read messages until the response with `id` arrives, skipping the interleaved
 /// diagnostic notifications a recompute publishes.
 fn wait_for_response(reader: &mut impl BufRead, id: i64, timeout: Duration) -> Value {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let message = recv(reader);
+        if message["id"] == id {
+            return message;
+        }
+    }
+    panic!("no response for request {id} within the timeout");
+}
+
+fn wait_for_response_from_channel(
+    messages: &mpsc::Receiver<Value>,
+    id: i64,
+    timeout: Duration,
+) -> Value {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let message = recv_channel_message(messages, remaining);
         if message["id"] == id {
             return message;
         }
