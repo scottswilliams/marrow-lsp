@@ -492,6 +492,7 @@ dependencies = [
  "marrow-run",
  "marrow-store",
  "marrow-syntax",
+ "marrow-terminal",
  "serde_json",
  "tempfile",
 ]
@@ -518,6 +519,7 @@ dependencies = [
  "marrow-project",
  "marrow-run",
  "marrow-store",
+ "marrow-terminal",
  "serde_json",
  "tempfile",
  "tokio",
@@ -550,6 +552,7 @@ dependencies = [
  "marrow-lsp-core",
  "marrow-run",
  "marrow-store",
+ "marrow-terminal",
  "serde_json",
  "tempfile",
 ]
@@ -595,6 +598,10 @@ dependencies = [
 
 [[package]]
 name = "marrow-syntax"
+version = "0.1.0"
+
+[[package]]
+name = "marrow-terminal"
 version = "0.1.0"
 
 [[package]]

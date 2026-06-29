@@ -27,13 +27,19 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
+use marrow_terminal::{Style, paint_stderr};
 use session::Session;
+
+fn stderr_notice(label: &str) -> String {
+    paint_stderr(Style::Notice, label)
+}
 
 fn main() {
     // Startup is observable in the editor's debug-adapter output channel; protocol
     // messages go to stdout, so this note goes to stderr.
     eprintln!(
-        "marrow-dap: starting (version {})",
+        "{} starting (version {})",
+        stderr_notice("marrow-dap:"),
         env!("CARGO_PKG_VERSION")
     );
     let stdout = std::io::stdout();

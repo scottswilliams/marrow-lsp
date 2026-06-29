@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 marrow-lsp-core = { path = "../marrow-lsp-core" }
+marrow-terminal.workspace = true
 marrow-syntax.workspace = true
 marrow-check.workspace = true
 marrow-project.workspace = true

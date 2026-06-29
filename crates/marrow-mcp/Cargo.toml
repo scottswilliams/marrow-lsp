@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 marrow-lsp-core = { path = "../marrow-lsp-core" }
+marrow-terminal.workspace = true
 marrow-run.workspace = true
 serde_json = "1"
 

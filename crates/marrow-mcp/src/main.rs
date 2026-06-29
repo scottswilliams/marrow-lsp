@@ -21,9 +21,18 @@ mod server;
 
 use std::io::{BufRead, Write};
 
+use marrow_terminal::{Style, paint_stderr};
 use serde_json::{Value as Json, json};
 
 use server::Policy;
+
+fn stderr_notice(label: &str) -> String {
+    paint_stderr(Style::Notice, label)
+}
+
+fn stderr_error(label: &str) -> String {
+    paint_stderr(Style::Error, label)
+}
 
 /// The JSON-RPC invalid-params error code, for malformed request parameters.
 const INVALID_PARAMS: i64 = -32602;
@@ -37,7 +46,8 @@ fn main() {
     // Startup is observable in the agent's stderr/output channel; note whether the
     // data tools are armed so an operator can confirm the gate's state at a glance.
     eprintln!(
-        "marrow-mcp: starting (version {}, data tools {})",
+        "{} starting (version {}, data tools {})",
+        stderr_notice("marrow-mcp:"),
         env!("CARGO_PKG_VERSION"),
         if policy.allow_data {
             "enabled"
@@ -79,7 +89,10 @@ fn serve(input: impl BufRead, out: &mut impl Write, policy: Policy) {
             // not to write a non-message to stdout, and a parse error with no id
             // has nowhere to go, so it is dropped (logged to stderr).
             Err(error) => {
-                eprintln!("marrow-mcp: ignoring unparseable line: {error}");
+                eprintln!(
+                    "{} ignoring unparseable line: {error}",
+                    stderr_error("marrow-mcp:")
+                );
                 continue;
             }
         };

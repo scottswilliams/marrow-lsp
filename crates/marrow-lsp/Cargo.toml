@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 marrow-lsp-core = { path = "../marrow-lsp-core" }
+marrow-terminal.workspace = true
 lsp-types.workspace = true
 tower-lsp.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "sync", "time"] }

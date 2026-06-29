@@ -11,15 +11,25 @@ mod backend;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use marrow_terminal::{Style, paint_stderr};
 use tokio::io::{AsyncRead, ReadBuf, Stdin};
 use tower_lsp::{LspService, Server};
 
 use backend::Backend;
 
+pub(crate) fn stderr_notice(label: &str) -> String {
+    paint_stderr(Style::Notice, label)
+}
+
+pub(crate) fn stderr_error(label: &str) -> String {
+    paint_stderr(Style::Error, label)
+}
+
 #[tokio::main]
 async fn main() {
     eprintln!(
-        "marrow-lsp: starting (version {})",
+        "{} starting (version {})",
+        stderr_notice("marrow-lsp:"),
         env!("CARGO_PKG_VERSION")
     );
 
@@ -39,7 +49,7 @@ async fn main() {
 
     // Reached only when stdin closes (EOF) without an `exit` notification — an
     // editor that dropped the pipe. The `exit` path terminates inside the watcher.
-    eprintln!("marrow-lsp: stdin closed, stopping");
+    eprintln!("{} stdin closed, stopping", stderr_notice("marrow-lsp:"));
 }
 
 /// tower-lsp 0.20 routes the LSP `exit` notification through an internal layer
@@ -83,7 +93,10 @@ impl ExitWatcher {
             if is_exit_notification(body) {
                 // The frame has already been forwarded to tower-lsp by the read
                 // that delivered it, so the service has seen `exit`; exit cleanly.
-                eprintln!("marrow-lsp: exit notification received, stopping");
+                eprintln!(
+                    "{} exit notification received, stopping",
+                    stderr_notice("marrow-lsp:")
+                );
                 std::process::exit(0);
             }
             self.buffer.drain(..frame_len);

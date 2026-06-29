@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/marrow-terminal",
     "crates/marrow-lsp-core",
     "crates/marrow-lsp",
     "crates/marrow-mcp",
@@ -30,6 +31,7 @@ marrow-schema = { path = "../marrow/crates/marrow-schema" }
 marrow-store = { path = "../marrow/crates/marrow-store", features = ["native"] }
 marrow-run = { path = "../marrow/crates/marrow-run" }
 marrow-project = { path = "../marrow/crates/marrow-project" }
+marrow-terminal = { path = "crates/marrow-terminal" }
 
 # The LSP wire types. Pinned to the exact version tower-lsp 0.20 re-exports so the
 # server and the core link one lsp-types and exchange the same `Diagnostic`, `Url`,

@@ -190,7 +190,8 @@ impl Backend {
                 Err(error) => {
                     if !matches!(error, marrow_lsp_core::workspace::WorkspaceError::NoProject) {
                         eprintln!(
-                            "marrow-lsp: recompute failed for {}: {error}",
+                            "{} recompute failed for {}: {error}",
+                            crate::stderr_error("marrow-lsp:"),
                             file.display()
                         );
                     }
