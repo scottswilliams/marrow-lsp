@@ -409,6 +409,69 @@ fn opening_shelf_fixture_publishes_no_diagnostics() {
 }
 
 #[test]
+fn changed_buffer_diagnostics_publish_after_editor_idle() {
+    let (_server, mut stdin, mut stdout, _) = initialized_server();
+
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let clean = "module shelf::sample\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n\npub fn drop()\n    return\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+
+    let erroring = "module shelf::sample\n\nresource Book\n    required title: string\n\nstore ^books(id: int): Book\n\npub fn drop()\n    delete ^\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": erroring } ]
+            }
+        }),
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/documentSymbol",
+            "params": { "textDocument": { "uri": uri } }
+        }),
+    );
+
+    let (_, early_diagnostics) =
+        wait_for_response_collecting_diagnostics(&mut stdout, 2, &uri, Duration::from_secs(10));
+    assert!(
+        early_diagnostics.is_empty(),
+        "diagnostics should wait until the editor has been idle, got {early_diagnostics:?}"
+    );
+
+    let diagnostic = wait_for_diagnostic(&mut stdout, &uri, Duration::from_secs(10));
+    let code = diagnostic["code"].as_str().unwrap_or_default();
+    assert!(
+        code.starts_with("parse."),
+        "the broken edit should eventually publish a syntax diagnostic, got {diagnostic}"
+    );
+}
+
+#[test]
 fn signature_help_returns_null_without_a_checked_program() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("scratch.mw");
@@ -2620,6 +2683,32 @@ fn wait_for_response_from_channel(
         let message = recv_channel_message(messages, remaining);
         if message["id"] == id {
             return message;
+        }
+    }
+    panic!("no response for request {id} within the timeout");
+}
+
+fn wait_for_response_collecting_diagnostics(
+    reader: &mut impl BufRead,
+    id: i64,
+    uri: &str,
+    timeout: Duration,
+) -> (Value, Vec<Value>) {
+    let deadline = Instant::now() + timeout;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        let message = recv(reader);
+        if message["method"] == "textDocument/publishDiagnostics" && message["params"]["uri"] == uri
+        {
+            seen.extend(
+                message["params"]["diagnostics"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
+        if message["id"] == id {
+            return (message, seen);
         }
     }
     panic!("no response for request {id} within the timeout");

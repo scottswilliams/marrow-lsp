@@ -28,7 +28,7 @@ use tower_lsp::{Client, LanguageServer, jsonrpc};
 
 /// How long to wait after an edit before checking the project, so a burst of
 /// keystrokes settles into one recompute.
-const DEBOUNCE: Duration = Duration::from_millis(150);
+const DEBOUNCE: Duration = Duration::from_millis(700);
 
 pub struct Backend {
     client: Client,
