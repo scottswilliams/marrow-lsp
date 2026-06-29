@@ -97,7 +97,8 @@
     ],
     "configurationDefaults": {
       "[marrow]": {
-        "editor.semanticHighlighting.enabled": true
+        "editor.semanticHighlighting.enabled": true,
+        "editor.formatOnType": true
       }
     },
     "semanticTokenTypes": [

@@ -357,6 +357,67 @@ fn initialize_then_open_erroring_buffer_publishes_a_diagnostic() {
 }
 
 #[test]
+fn on_type_formatting_newline_reindents_after_return_over_stdio() {
+    let (_server, mut stdin, mut stdout, initialize) = initialized_server();
+    assert_eq!(
+        initialize["result"]["capabilities"]["documentOnTypeFormattingProvider"]["firstTriggerCharacter"],
+        "\n",
+        "initialize should advertise newline-triggered on-type formatting"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("scratch.mw");
+    let source = "module scratch\n\npub fn f()\n    return\n        next";
+    std::fs::write(&file, source).unwrap();
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": source
+                }
+            }
+        }),
+    );
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/onTypeFormatting",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 4, "character": 0 },
+                "ch": "\n",
+                "options": { "tabSize": 4, "insertSpaces": true }
+            }
+        }),
+    );
+
+    let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
+    assert_eq!(
+        response["result"],
+        json!([
+            {
+                "range": {
+                    "start": { "line": 4, "character": 0 },
+                    "end": { "line": 4, "character": 8 }
+                },
+                "newText": ""
+            }
+        ]),
+        "on-type formatting should return one edit for the current line indentation: {response}"
+    );
+}
+
+#[test]
 fn opening_shelf_fixture_publishes_no_diagnostics() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))

@@ -18,20 +18,12 @@
   ],
   "onEnterRules": [
     {
-      "beforeText": "^\\s*(if|else|else\\s+if|while|for|fn|resource|transaction|lock|try|catch|finally|module)\\b.*$",
-      "action": { "indent": "indent" }
-    },
-    {
-      "beforeText": "^\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\([^)]*\\)\\s*$",
-      "action": { "indent": "indent" }
-    },
-    {
-      "beforeText": "^\\s*(pub\\s+)?fn\\b.*$",
+      "beforeText": "^\\s*((pub\\s+)?(fn|enum)|if|else|else\\s+if|while|for|resource|surface|evolve|match|transaction|try|catch)\\b.*$",
       "action": { "indent": "indent" }
     }
   ],
   "indentationRules": {
-    "increaseIndentPattern": "^\\s*(if|else|else\\s+if|while|for|fn|pub\\s+fn|resource|transaction|lock|try|catch|finally)\\b.*$",
-    "decreaseIndentPattern": "^\\s*(else|else\\s+if|catch|finally)\\b.*$"
+    "increaseIndentPattern": "^\\s*((pub\\s+)?(fn|enum)|if|else|else\\s+if|while|for|resource|surface|evolve|match|transaction|try|catch)\\b.*$",
+    "decreaseIndentPattern": "^\\s*(else|else\\s+if|catch)\\b.*$"
   }
 }

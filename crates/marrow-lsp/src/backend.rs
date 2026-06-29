@@ -20,7 +20,8 @@ use marrow_lsp_core::store::{
 };
 use marrow_lsp_core::workspace::{AnalysisSnapshot, Workspace, url_to_path};
 use marrow_lsp_core::{
-    completion, formatting, hover, navigation, semantic_tokens, signature_help, symbols,
+    completion, formatting, hover, indentation, navigation, semantic_tokens, signature_help,
+    symbols,
 };
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
@@ -318,6 +319,10 @@ impl LanguageServer for Backend {
                     ),
                 ),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "\n".to_string(),
+                    more_trigger_character: None,
+                }),
                 ..ServerCapabilities::default()
             },
         })
@@ -769,6 +774,29 @@ impl LanguageServer for Backend {
             &document.text,
             &document.parsed,
             &document.index,
+        ))
+    }
+
+    /// Format the indentation of the current line after a newline. Reads only the
+    /// open document's cached lex/source and never recomputes the project.
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> jsonrpc::Result<Option<Vec<TextEdit>>> {
+        if params.ch != "\n" {
+            return Ok(None);
+        }
+        let url = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let state = self.state.lock().await;
+        let Some(document) = state.documents.get(&url) else {
+            return Ok(None);
+        };
+        Ok(indentation::newline_indentation(
+            &document.text,
+            &document.lexed,
+            position,
+            &params.options,
         ))
     }
 }

@@ -13,6 +13,7 @@ pub mod documents;
 pub mod execution;
 pub mod formatting;
 pub mod hover;
+pub mod indentation;
 pub mod mcp;
 pub mod navigation;
 pub mod positions;
