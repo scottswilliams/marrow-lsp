@@ -27,20 +27,25 @@ use crate::positions::LineIndex;
 pub fn document_symbols(file: &SourceFile, index: &LineIndex) -> Vec<DocumentSymbol> {
     marrow_document_symbols(file, index.text())
         .into_iter()
-        .map(|symbol| document_symbol_from_fact(symbol, index))
+        .filter_map(|symbol| document_symbol_from_fact(symbol, index))
         .collect()
 }
 
-fn document_symbol_from_fact(symbol: MarrowDocumentSymbol, index: &LineIndex) -> DocumentSymbol {
-    let children = (!symbol.children.is_empty()).then(|| {
-        symbol
-            .children
-            .into_iter()
-            .map(|child| document_symbol_from_fact(child, index))
-            .collect()
-    });
+fn document_symbol_from_fact(
+    symbol: MarrowDocumentSymbol,
+    index: &LineIndex,
+) -> Option<DocumentSymbol> {
+    if symbol.name.is_empty() {
+        return None;
+    }
+    let children: Vec<_> = symbol
+        .children
+        .into_iter()
+        .filter_map(|child| document_symbol_from_fact(child, index))
+        .collect();
+    let children = (!children.is_empty()).then_some(children);
     #[allow(deprecated)]
-    DocumentSymbol {
+    Some(DocumentSymbol {
         name: symbol.name,
         detail: symbol.detail,
         kind: document_symbol_kind(symbol.kind),
@@ -52,7 +57,7 @@ fn document_symbol_from_fact(symbol: MarrowDocumentSymbol, index: &LineIndex) ->
             symbol.selection_span.end_byte,
         ),
         children,
-    }
+    })
 }
 
 fn document_symbol_kind(kind: DocumentSymbolKind) -> SymbolKind {
@@ -328,6 +333,27 @@ surface Books from ^books
     }
 
     #[test]
+    fn document_symbols_skip_incomplete_declarations_without_names() {
+        let source = concat!(
+            "resource Book\n",
+            "    required title: string\n",
+            "\n",
+            "fn \n",
+            "resource \n",
+            "enum \n",
+        );
+        let index = LineIndex::new(source);
+        let symbols = document_symbols(&parse(source), &index);
+
+        let names: Vec<&str> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert_eq!(names, ["Book"]);
+        assert!(
+            all_names_are_non_empty(&symbols),
+            "LSP document symbols must not contain empty names: {symbols:#?}"
+        );
+    }
+
+    #[test]
     fn document_symbols_do_not_own_outline_assembly() {
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -354,6 +380,16 @@ surface Books from ^books
                 "document symbols should consume marrow-check outline facts, not own `{obsolete}`"
             );
         }
+    }
+
+    fn all_names_are_non_empty(symbols: &[DocumentSymbol]) -> bool {
+        symbols.iter().all(|symbol| {
+            !symbol.name.is_empty()
+                && symbol
+                    .children
+                    .as_deref()
+                    .is_none_or(all_names_are_non_empty)
+        })
     }
 
     /// Analyze a one-file project through the production project pipeline.
