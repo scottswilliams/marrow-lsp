@@ -801,6 +801,12 @@ fn hover_over_a_parameter_use_returns_its_signature_fragment() {
             }
         }),
     );
+    let diagnostics = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+    assert_eq!(
+        diagnostics["params"]["diagnostics"],
+        json!([]),
+        "the clean parameter-hover overlay should check without diagnostics"
+    );
 
     // Hover over the `n` in `return n` on line 3 (zero-based), character 11.
     send(
@@ -968,12 +974,6 @@ fn hover_on_syntax_error_responds_over_stdio() {
             }
         }),
     );
-    let diagnostic = wait_for_diagnostic_from_channel(&messages, &uri, Duration::from_secs(10));
-    assert_eq!(
-        diagnostic["code"], "parse.syntax",
-        "broken function header should publish the parse diagnostic first"
-    );
-
     send(
         &mut stdin,
         &json!({
@@ -992,6 +992,12 @@ fn hover_on_syntax_error_responds_over_stdio() {
         hover["result"],
         Value::Null,
         "syntax-error hovers should complete with no hover so the editor can dismiss its loading UI"
+    );
+
+    let diagnostic = wait_for_diagnostic_from_channel(&messages, &uri, Duration::from_secs(10));
+    assert_eq!(
+        diagnostic["code"], "parse.syntax",
+        "broken function header should still publish the parse diagnostic"
     );
 }
 

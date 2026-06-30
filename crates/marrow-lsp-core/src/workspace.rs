@@ -19,7 +19,7 @@ use marrow_project::{
 pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
 
 use crate::catalog_binding::CatalogBindingCache;
-use crate::documents::Documents;
+use crate::documents::{DocumentAnalysisSnapshot, Documents};
 
 /// The name of a Marrow project's configuration file; its directory is the root.
 const CONFIG_FILE: &str = "marrow.json";
@@ -172,10 +172,15 @@ impl Workspace {
 
     /// Whether the latest snapshot still matches the editor-visible source world.
     pub fn latest_matches_sources(&self, documents: &Documents) -> bool {
+        self.latest_matches_snapshot(&documents.analysis_snapshot())
+    }
+
+    /// Whether the latest snapshot still matches a captured editor-visible source world.
+    pub fn latest_matches_snapshot(&self, documents: &DocumentAnalysisSnapshot) -> bool {
         let (Some(snapshot), Some(project)) = (self.latest.as_ref(), self.project.as_ref()) else {
             return false;
         };
-        let current_open_analysis_paths = open_analysis_paths(project, documents);
+        let current_open_analysis_paths = open_analysis_paths_snapshot(project, documents);
         if current_open_analysis_paths != self.latest_open_analysis_paths {
             return false;
         }
@@ -184,7 +189,7 @@ impl Workspace {
             && snapshot
                 .files
                 .iter()
-                .all(|file| match open_document_text(documents, &file.path) {
+                .all(|file| match documents.text_for_path(&file.path) {
                     Some(source) => source == file.source.as_str(),
                     None => std::fs::read_to_string(&file.path)
                         .is_ok_and(|source| source == file.source.as_str()),
@@ -193,20 +198,45 @@ impl Workspace {
 
     /// The latest snapshot only when it still matches the editor-visible sources.
     pub fn fresh_latest(&self, documents: &Documents) -> Option<&AnalysisSnapshot> {
-        self.latest_matches_sources(documents)
+        self.latest_matches_snapshot(&documents.analysis_snapshot())
+            .then_some(self.latest.as_ref()?)
+    }
+
+    pub fn fresh_latest_from_snapshot(
+        &self,
+        documents: &DocumentAnalysisSnapshot,
+    ) -> Option<&AnalysisSnapshot> {
+        self.latest_matches_snapshot(documents)
             .then_some(self.latest.as_ref()?)
     }
 
     /// The current checked program only when it belongs to the fresh snapshot.
     pub fn fresh_program(&self, documents: &Documents) -> Option<&CheckedProgram> {
-        self.fresh_latest(documents)
+        self.fresh_latest_from_snapshot(&documents.analysis_snapshot())
+            .map(|snapshot| &snapshot.program)
+            .filter(|program| !program.modules.is_empty())
+    }
+
+    pub fn fresh_program_from_snapshot(
+        &self,
+        documents: &DocumentAnalysisSnapshot,
+    ) -> Option<&CheckedProgram> {
+        self.fresh_latest_from_snapshot(documents)
             .map(|snapshot| &snapshot.program)
             .filter(|program| !program.modules.is_empty())
     }
 
     /// The latest snapshot's program, even when empty, when the snapshot is fresh.
     pub fn fresh_program_or_empty(&self, documents: &Documents) -> Option<&CheckedProgram> {
-        self.fresh_latest(documents)
+        self.fresh_latest_from_snapshot(&documents.analysis_snapshot())
+            .map(|snapshot| &snapshot.program)
+    }
+
+    pub fn fresh_program_or_empty_from_snapshot(
+        &self,
+        documents: &DocumentAnalysisSnapshot,
+    ) -> Option<&CheckedProgram> {
+        self.fresh_latest_from_snapshot(documents)
             .map(|snapshot| &snapshot.program)
     }
 
@@ -223,6 +253,14 @@ impl Workspace {
         file: &Path,
         documents: &Documents,
     ) -> Result<&AnalysisSnapshot, WorkspaceError> {
+        self.recompute_from_snapshot(file, &documents.analysis_snapshot())
+    }
+
+    pub fn recompute_from_snapshot(
+        &mut self,
+        file: &Path,
+        documents: &DocumentAnalysisSnapshot,
+    ) -> Result<&AnalysisSnapshot, WorkspaceError> {
         if !self
             .project
             .as_ref()
@@ -233,8 +271,8 @@ impl Workspace {
         }
         let project = self.project.as_ref().expect("project resolved just above");
 
-        let latest_open_analysis_paths = open_analysis_paths(project, documents);
-        let sources = overlay(&project.root, documents);
+        let latest_open_analysis_paths = open_analysis_paths_snapshot(project, documents);
+        let sources = overlay_snapshot(&project.root, documents);
         let binding = self
             .catalog_binding
             .bind(&project.root, &project.config)
@@ -308,22 +346,24 @@ fn resolve_project(file: &Path) -> Result<Project, WorkspaceError> {
 
 /// Build a source overlay from every open buffer whose file lives under `root`.
 /// A buffer outside the project is left out so it cannot perturb the analysis.
-fn overlay(root: &Path, documents: &Documents) -> ProjectSources {
+fn overlay_snapshot(root: &Path, documents: &DocumentAnalysisSnapshot) -> ProjectSources {
     let mut sources = ProjectSources::new();
-    for (url, document) in documents.iter() {
-        if let Some(path) = url_to_path(url)
-            && path.starts_with(root)
-        {
-            sources.insert(path, document.text.clone());
+    for document in documents.open_documents() {
+        if document.path.starts_with(root) {
+            sources.insert(document.path.clone(), document.text.clone());
         }
     }
     sources
 }
 
-fn open_analysis_paths(project: &Project, documents: &Documents) -> Vec<PathBuf> {
+fn open_analysis_paths_snapshot(
+    project: &Project,
+    documents: &DocumentAnalysisSnapshot,
+) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = documents
+        .open_documents()
         .iter()
-        .filter_map(|(url, _)| url_to_path(url))
+        .map(|document| document.path.clone())
         .filter(|path| project.analyzes_file(path))
         .collect();
     paths.sort();
@@ -355,12 +395,6 @@ fn snapshot_paths(snapshot: &AnalysisSnapshot) -> Vec<PathBuf> {
     paths.sort();
     paths.dedup();
     paths
-}
-
-fn open_document_text<'a>(documents: &'a Documents, path: &Path) -> Option<&'a str> {
-    documents.iter().find_map(|(url, document)| {
-        (url_to_path(url).as_deref() == Some(path)).then_some(document.text.as_str())
-    })
 }
 
 /// The filesystem path of a `file://` URL, or `None` for any other scheme.

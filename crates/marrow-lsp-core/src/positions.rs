@@ -17,6 +17,7 @@ pub struct Position {
 
 /// A per-document index from byte offsets to line/character positions and back.
 /// Built once per document edit.
+#[derive(Clone)]
 pub struct LineIndex {
     /// Byte offset of the first character of each line. Always starts with `0`.
     line_starts: Vec<usize>,

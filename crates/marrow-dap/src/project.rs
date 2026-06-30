@@ -550,7 +550,7 @@ pub fn main()
 
         let error = expect_error(prepare(dir.path(), None, &[]));
 
-        assert!(matches!(error, LaunchError::Session(_)), "{error}");
+        assert!(matches!(error, LaunchError::Config(_)), "{error}");
         assert_eq!(error.to_string(), expected);
     }
 
