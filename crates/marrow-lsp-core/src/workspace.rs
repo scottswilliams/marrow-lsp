@@ -432,6 +432,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn recompute_accepts_omitted_store_for_storeless_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("marrow.json"), r#"{ "sourceRoots": ["src"] }"#).unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        std::fs::write(&file, "module app\n\npub fn main()\n    print(\"hi\")\n").unwrap();
+
+        let mut workspace = Workspace::new();
+        let documents = Documents::new();
+        let (diagnostics_empty, diagnostics) = {
+            let snapshot = workspace.recompute(&file, &documents).unwrap();
+            (
+                snapshot.report.diagnostics.is_empty(),
+                format!("{:?}", snapshot.report.diagnostics),
+            )
+        };
+
+        assert_eq!(
+            workspace.project().unwrap().config.store.backend,
+            marrow_project::StoreBackend::Memory
+        );
+        assert!(
+            diagnostics_empty,
+            "storeless source project should recompute without diagnostics, got {diagnostics}"
+        );
+    }
+
     /// A project whose one library file is clean on disk; an open buffer overlays a
     /// version with a type error. Analysis must report the error against the buffer
     /// while the same project checked from disk alone reports none.
