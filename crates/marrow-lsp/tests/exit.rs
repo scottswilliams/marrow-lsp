@@ -6,7 +6,7 @@
 //! an editor keeps the pipe open and expects the server to exit on the
 //! notification alone. This drives the real binary and asserts it does.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -92,6 +92,53 @@ fn exit_notification_terminates_the_process_with_stdin_open() {
         code,
         Some(0),
         "the server must exit with code 0 on the exit notification (it hung or exited non-zero)"
+    );
+}
+
+#[test]
+fn initialized_notification_writes_a_ready_notice() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the marrow-lsp binary runs");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }),
+    );
+    let response = recv(&mut stdout);
+    assert_eq!(response["result"]["serverInfo"]["name"], "marrow-lsp");
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "shutdown" }),
+    );
+    let response = recv(&mut stdout);
+    assert_eq!(response["id"], 2, "shutdown is answered");
+    send(&mut stdin, &json!({ "jsonrpc": "2.0", "method": "exit" }));
+
+    let code = wait_for_exit(&mut child, Duration::from_secs(2));
+    drop(stdin);
+    assert_eq!(code, Some(0), "the server exits cleanly");
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(
+        stderr.contains("marrow-lsp: initialized"),
+        "stderr should make the initialized lifecycle visible, got {stderr:?}"
     );
 }
 

@@ -179,9 +179,18 @@ impl Backend {
             match workspace.recompute(file, documents) {
                 Ok(snapshot) => {
                     let urls: Vec<Url> = documents.urls().cloned().collect();
-                    Some(snapshot_to_diagnostics(snapshot, &urls, |url| {
+                    let diagnostics = snapshot_to_diagnostics(snapshot, &urls, |url| {
                         documents.get(url).map(|document| &document.index)
-                    }))
+                    });
+                    Some(
+                        diagnostics
+                            .into_iter()
+                            .map(|(url, diagnostics)| {
+                                let version = documents.version(&url);
+                                (url, diagnostics, version)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                 }
                 // A buffer outside any project, or a project that cannot be walked,
                 // has nothing to publish; the editor keeps whatever it last showed.
@@ -202,8 +211,8 @@ impl Backend {
         };
 
         if let Some(published) = published {
-            for (url, diagnostics) in published {
-                client.publish_diagnostics(url, diagnostics, None).await;
+            for (url, diagnostics, version) in published {
+                client.publish_diagnostics(url, diagnostics, version).await;
             }
         }
     }
@@ -332,12 +341,18 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
+    async fn initialized(&self, _: InitializedParams) {
+        eprintln!("{} initialized", crate::stderr_notice("marrow-lsp:"));
+    }
+
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let document = params.text_document;
         let url = document.uri;
         {
             let mut state = self.state.lock().await;
-            state.documents.open(url.clone(), document.text);
+            state
+                .documents
+                .open_with_version(url.clone(), document.text, Some(document.version));
         }
         if let Some(path) = url_to_path(&url) {
             self.schedule_recompute(path);
@@ -352,7 +367,11 @@ impl LanguageServer for Backend {
         };
         {
             let mut state = self.state.lock().await;
-            state.documents.change(&url, change.text);
+            state.documents.change_with_version(
+                &url,
+                change.text,
+                Some(params.text_document.version),
+            );
         }
         if let Some(path) = url_to_path(&url) {
             self.schedule_recompute(path);

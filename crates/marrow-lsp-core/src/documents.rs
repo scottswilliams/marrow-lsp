@@ -22,6 +22,7 @@ use crate::positions::LineIndex;
 /// present even while the buffer has errors.
 pub struct Document {
     pub text: String,
+    pub version: Option<i32>,
     pub index: LineIndex,
     pub lexed: LexedSource,
     pub parsed: ParsedSource,
@@ -29,12 +30,13 @@ pub struct Document {
 
 impl Document {
     /// Build a document from its text, computing the index, lex, and parse once.
-    fn new(text: String) -> Self {
+    fn new(text: String, version: Option<i32>) -> Self {
         let index = LineIndex::new(text.clone());
         let lexed = lex_source(&text);
         let parsed = parse_source(&text);
         Self {
             text,
+            version,
             index,
             lexed,
             parsed,
@@ -55,14 +57,26 @@ impl Documents {
 
     /// Record a newly opened buffer, replacing any buffer already at `url`.
     pub fn open(&mut self, url: Url, text: String) {
-        self.documents.insert(url, Document::new(text));
+        self.open_with_version(url, text, None);
+    }
+
+    /// Record an opened buffer with the editor's document version, when the
+    /// transport has one to echo back on diagnostics.
+    pub fn open_with_version(&mut self, url: Url, text: String, version: Option<i32>) {
+        self.documents.insert(url, Document::new(text, version));
     }
 
     /// Replace an open buffer's whole text (full-text sync), rebuilding its index,
     /// lex, and parse. A change for a URL that is not open is ignored.
     pub fn change(&mut self, url: &Url, text: String) {
+        self.change_with_version(url, text, None);
+    }
+
+    /// Replace an open buffer and preserve the editor's current document version
+    /// for the next diagnostics publish.
+    pub fn change_with_version(&mut self, url: &Url, text: String, version: Option<i32>) {
         if let Some(document) = self.documents.get_mut(url) {
-            *document = Document::new(text);
+            *document = Document::new(text, version);
         }
     }
 
@@ -73,6 +87,11 @@ impl Documents {
 
     pub fn get(&self, url: &Url) -> Option<&Document> {
         self.documents.get(url)
+    }
+
+    /// The editor version for an open buffer, if the transport supplied one.
+    pub fn version(&self, url: &Url) -> Option<i32> {
+        self.get(url).and_then(|document| document.version)
     }
 
     /// The URLs of every open buffer.

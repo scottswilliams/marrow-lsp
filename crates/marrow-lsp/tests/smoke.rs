@@ -533,6 +533,53 @@ fn changed_buffer_diagnostics_publish_after_editor_idle() {
 }
 
 #[test]
+fn diagnostics_publish_the_current_document_version() {
+    let (_server, mut stdin, mut stdout, _) = initialized_server();
+
+    let file = fixture_root().join("src/shelf/sample.mw");
+    let uri = url::Url::from_file_path(&file).unwrap().to_string();
+    let clean = "module shelf::sample\n\npub fn answer(): int\n    return 1\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": clean
+                }
+            }
+        }),
+    );
+    let opened = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+    assert_eq!(
+        opened["params"]["version"], 1,
+        "diagnostics for the opened buffer should carry its document version"
+    );
+
+    let erroring = "module shelf::sample\n\npub fn answer(): int\n    return \"nope\"\n";
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": erroring } ]
+            }
+        }),
+    );
+    let changed = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
+    assert_eq!(
+        changed["params"]["version"], 2,
+        "diagnostics after an edit should carry the changed document version"
+    );
+}
+
+#[test]
 fn signature_help_returns_null_without_a_checked_program() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("scratch.mw");
