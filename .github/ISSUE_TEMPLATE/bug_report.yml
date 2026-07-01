@@ -1,0 +1,73 @@
+name: General bug
+description: Report a bug in the Marrow LSP, MCP, DAP, or editor tooling.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for Marrow editor and tool-server behavior. If the issue is about Marrow language semantics, the CLI, or runtime behavior rather than LSP/editor integration, it likely belongs in the Marrow repository once public issue routing is confirmed.
+  - type: input
+    id: version
+    attributes:
+      label: Marrow LSP version or commit
+      description: Include the release version, commit SHA, or branch you are running.
+      placeholder: "0.1.0, 5f8546f, or release/lsp-issue-templates"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Include OS name, version, and architecture.
+      placeholder: "macOS 15.5 arm64"
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Editor or tool client
+      description: Name the client and version when relevant.
+      placeholder: "VSCode 1.101.0, Neovim 0.11, or custom LSP client"
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command or request
+      description: Name the command, LSP request, MCP operation, DAP request, or editor action that failed.
+      placeholder: "textDocument/hover, textDocument/formatting, initialize, or launch"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest project, file, command, or request sequence that reproduces the issue.
+      placeholder: |
+        1. Open this workspace...
+        2. Run this command or send this request...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Paste relevant server logs, client logs, diagnostics, or command output.
+      render: shell
+    validations:
+      required: false

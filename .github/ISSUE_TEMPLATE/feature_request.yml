@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest an improvement for Marrow LSP, MCP, DAP, or editor tooling.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for editor and tool-server workflows. If the request depends on new Marrow language semantics, CLI behavior, or runtime facts, call that out so the upstream Marrow work can be considered separately.
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Affected surface
+      description: Choose the main surface this request affects.
+      options:
+        - LSP
+        - MCP
+        - DAP
+        - VSCode
+        - Multiple or unsure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult, missing, or unclear today?
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed workflow
+      description: Describe how the feature should behave from the user's point of view.
+    validations:
+      required: true
+  - type: textarea
+    id: upstream_fact
+    attributes:
+      label: Upstream Marrow fact needed
+      description: If this depends on a new or changed Marrow analysis, runtime, or schema fact, describe it here.
+      placeholder: "No new Marrow fact needed, or describe the required fact."
+    validations:
+      required: false
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility notes
+      description: Note any client, editor, protocol, project, or release compatibility concerns.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or alternate designs have you considered?
+    validations:
+      required: false

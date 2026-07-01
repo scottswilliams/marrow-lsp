@@ -1,0 +1,84 @@
+name: Editor bug
+description: Report a VSCode extension or editor-integration bug.
+title: "[Editor bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for editor integration, extension packaging, and editor-client behavior. If the issue is about Marrow language semantics, the CLI, or runtime behavior rather than editor integration, it likely belongs in the Marrow repository once public issue routing is confirmed.
+  - type: input
+    id: vscode_version
+    attributes:
+      label: VSCode version
+      description: Include the exact VSCode or compatible editor version.
+      placeholder: "VSCode 1.101.0"
+    validations:
+      required: true
+  - type: input
+    id: extension_version
+    attributes:
+      label: Extension version or VSIX filename
+      description: Include the installed extension version or the VSIX filename you installed.
+      placeholder: "marrow-lsp-0.1.0.vsix"
+    validations:
+      required: true
+  - type: input
+    id: platform_target
+    attributes:
+      label: Platform target
+      description: Include OS, architecture, and extension target when known.
+      placeholder: "darwin-arm64 on macOS 15.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: server_path_override
+    attributes:
+      label: marrow.server.path override
+      description: Is the LSP server path overridden in settings?
+      options:
+        - Not set
+        - Set to a local path
+        - Unsure
+    validations:
+      required: true
+  - type: dropdown
+    id: dap_path_override
+    attributes:
+      label: marrow.dap.path override
+      description: Is the DAP adapter path overridden in settings?
+      options:
+        - Not set
+        - Set to a local path
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal .mw reproduction
+      description: Provide the smallest Marrow file or workspace shape that triggers the editor issue.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected editor behavior
+      description: What should the editor or extension have done?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual editor behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Extension, LSP, or DAP logs
+      description: Paste relevant output from the Marrow extension, language server, debug adapter, or editor developer tools.
+      render: shell
+    validations:
+      required: false
