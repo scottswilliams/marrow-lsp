@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout marrow-lsp
+        uses: actions/checkout@v4
+        with:
+          path: marrow-lsp
+
+      - name: Checkout marrow
+        uses: actions/checkout@v4
+        with:
+          repository: scottswilliams/marrow
+          path: marrow
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+          rustup default stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check Rust formatting
+        working-directory: marrow-lsp
+        run: cargo fmt --all -- --check
+
+      - name: Build Rust workspace
+        working-directory: marrow-lsp
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Test Rust workspace
+        working-directory: marrow-lsp
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Lint Rust workspace
+        working-directory: marrow-lsp
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Check for unsafe Rust
+        working-directory: marrow-lsp
+        run: "! grep -RInE '\\bunsafe\\b' crates editors/vscode/src"
+
+      - name: Install VS Code extension dependencies
+        working-directory: marrow-lsp/editors/vscode
+        run: npm ci
+
+      - name: Check VS Code extension
+        working-directory: marrow-lsp/editors/vscode
+        run: npm run check
+
+      - name: Compile VS Code extension
+        working-directory: marrow-lsp/editors/vscode
+        run: npm run compile
