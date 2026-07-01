@@ -17,7 +17,9 @@ surface-status contract.
 - Work in short-lived, file-disjoint worktrees outside the tracked repo, with each lane using its
   own external build-output directory. Place LSP worktrees directly under
   the same workspace parent as `<marrow-checkout>` so the workspace path dependency `../marrow`
-  still resolves to the live Marrow checkout.
+  still resolves to the live Marrow checkout, unless a paired Marrow/LSP lane explicitly names a
+  detached upstream worktree. In that case, the lane contract controls the path dependency and the
+  live checkout remains unused.
 - Keep lanes small enough to review adversarially and merge often.
 - Before every integration, re-check `main`, rebase the lane onto current `main`, fast-forward only
   when conflicts are mechanical, and preserve user-owned commits and dirty work.
@@ -71,6 +73,10 @@ Current watch items:
 - Decide upstream in Marrow whether identity decoding should reject non-canonical bool key bytes.
   The LSP must keep following `marrow-run`'s canonical identity decoder rather than becoming
   stricter on its own.
+- L11 entity-query adaptation waits for Marrow-owned query-native analysis facts with explicit
+  snapshot and version semantics. Until those facts land, `marrow-lsp` must not introduce local
+  `resolve_at`, `SemanticEntity`, cursor-resolution tables, type identity tables, or equivalent
+  semantic authority.
 
 ## Roadmap
 
@@ -243,6 +249,57 @@ Likely LSP files:
 - `crates/marrow-lsp-core/src/hover.rs`
 - `crates/marrow-lsp-core/src/completion.rs`
 - `fixtures/shelf/src/shelf/sample.mw`
+
+### Lane 11: Entity-Query Lockstep
+
+Goal: adapt editor, MCP, and DAP semantic consumers to Marrow's recorded semantic model without
+creating an LSP-owned semantic layer.
+
+Expected outcomes:
+
+- Consume canonical Marrow query-native analysis facts with snapshot and version semantics.
+- Replace direct use of narrow `*_fact_at` endpoints only after Marrow exposes equivalent
+  query categories for cursor entities, definitions/references, source edits, token roles,
+  completion contexts, callable signatures, source symbols, surface operations, data views, and
+  debug views.
+- Keep hover, navigation, source-only rename, semantic tokens, completion, signature help, MCP
+  resource/surface/data tools, VS Code data views, and standalone DAP views as thin renderers over
+  Marrow facts.
+- Keep saved-data-backed rename, repair/integrity tools, served-process data views, and DAP attach
+  blocked until Marrow exposes explicit editor-application, admin, served-data, and process-control
+  facts.
+- Do not add local `resolve_at`, `SemanticEntity`, binding side tables, type identity tables,
+  source-spelling identity recovery, or compatibility shims in `marrow-lsp`.
+
+Likely LSP files:
+
+- `crates/marrow-lsp-core/src/hover.rs`
+- `crates/marrow-lsp-core/src/navigation.rs`
+- `crates/marrow-lsp-core/src/navigation/symbols.rs`
+- `crates/marrow-lsp-core/src/semantic_tokens.rs`
+- `crates/marrow-lsp-core/src/completion.rs`
+- `crates/marrow-lsp-core/src/signature_help.rs`
+- `crates/marrow-lsp-core/src/mcp.rs`
+- `crates/marrow-dap/src/session.rs`
+- `crates/marrow-dap/src/debugger.rs`
+- `crates/marrow-dap/src/run.rs`
+- `crates/marrow-dap/src/project.rs`
+- `crates/marrow-dap/src/variables.rs`
+
+Upstream dependency:
+
+- Marrow L11 recorded semantic model and entity-query analysis facts. These names are conceptual;
+  the LSP lane follows the landed Marrow API rather than predefining it.
+
+Paired-lane contract:
+
+- Run the LSP adaptation in its own `marrow-lsp` worktree paired with a detached Marrow L11
+  worktree checked out at the reviewed L11 head.
+- Wire `marrow-lsp` path dependencies to that detached Marrow checkout for the lane; do not
+  symlink, reuse, or read from the live `<marrow-checkout>`.
+- Gate both the `marrow-lsp` lane and the detached Marrow L11 checkout against the landed API before
+  integration. If the detached head changes, rebase both lane worktrees and re-run the required
+  checks before reporting readiness.
 
 ## Merge Cadence
 

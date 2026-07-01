@@ -43,6 +43,28 @@ the next work as LSP adoption unless a lane proves a narrower upstream gap:
 Rows below that mention these APIs are current implementation limits, not
 proof that Marrow lacks the fact.
 
+## L11 Entity-Query Migration Contract
+
+L11 adoption depends on canonical Marrow query-native analysis facts with
+snapshot and version semantics. Query names below are categories, not an API
+commitment. `marrow-lsp` must not prototype local `resolve_at`,
+`SemanticEntity`, cursor-resolution tables, type identity tables, or equivalent
+semantic authority while waiting for Marrow.
+
+| Current consumer | Future Marrow query category | LSP contract |
+| --- | --- | --- |
+| Hover | Cursor entity, type identity, callable docs, source docs, saved-place docs, and effect summary queries | Render Marrow facts only; do not combine source spelling, diagnostic prose, or local classifiers into semantic hover meaning. |
+| Navigation | Entity definition, reference, module-path, catalog identity, saved-place, and use-site relation queries | Map returned spans to LSP locations; do not recover identity from tokens, path text, or local binding fallbacks. |
+| Rename refusal and source-only rename | Source-edit eligibility, occurrence, replacement validation, and typed refusal queries | Apply only Marrow-provided source edits; continue refusing saved-data-backed and catalog evolution edits until Marrow exposes an editor application target. |
+| Semantic tokens | Snapshot-bound token-role stream and parse-only fallback token-role queries | Translate roles and modifiers to the protocol legend; do not own language role classification in the mapper. |
+| Completion | Cursor completion-context, namespace, saved-path, type-position, callable-argument, enum-member, and in-scope-value queries | Render candidate DTOs and profile versions; do not infer candidates from source text when a Marrow fact exists. |
+| Signature help | Callable resolution, active-argument, parameter, resource-constructor, builtin, standard-library, and documentation queries | Render protocol `SignatureHelp`; lexical tolerance stays transport-facing and must not choose callable semantics. |
+| Document and workspace symbols | Source outline, entity search, container ownership, and ranking queries | Translate Marrow symbol facts; do not duplicate search, ranking, or kind ownership from source spelling. |
+| MCP source/resource tools | Type-at, completion, namespace completion, resource schema, and named entity lookup queries | Return stable protocol-free envelopes over Marrow facts; MCP owns argument decoding and JSON rendering only. |
+| MCP surface tools | Surface route, operation identity, request admission, read/write execution, and operation error queries | Delegate route and execution semantics to Marrow; local code only gates transport access and encodes envelopes. |
+| MCP and VS Code data views | Data-view boundary, typed root/path segment, child-page, bounded value, preview, watch-target, and admission queries | Preserve typed DTOs and boundary checks; do not parse saved paths, infer store compatibility, or add repair/integrity meaning locally. |
+| DAP launch and runtime views | Entry admission, execution boundary, stop point, debug expression, frame value, data boundary, and source-reference queries | Keep standalone debug UI over Marrow runtime/debug facts; served-process attach remains absent until Marrow exposes control-boundary facts. |
+
 ## LSP Adoption Candidates
 
 These surfaces are safe in their current narrowed form, but must no longer be
