@@ -16,15 +16,15 @@ surface-status contract.
 
 - Work in short-lived, file-disjoint worktrees outside the tracked repo, with each lane using its
   own external build-output directory. Place LSP worktrees directly under
-  `/Users/scottwilliams/Dev/` so the workspace path dependency `../marrow` still resolves to the
-  live Marrow checkout.
+  the same workspace parent as `<marrow-checkout>` so the workspace path dependency `../marrow`
+  still resolves to the live Marrow checkout.
 - Keep lanes small enough to review adversarially and merge often.
 - Before every integration, re-check `main`, rebase the lane onto current `main`, fast-forward only
   when conflicts are mechanical, and preserve user-owned commits and dirty work.
-- Treat `/Users/scottwilliams/Dev/marrow/docs/language/` as the source of truth for language
+- Treat `<marrow-checkout>/docs/language/` as the source of truth for language
   behavior. When Marrow language agents change semantics, adapt the LSP through canonical Marrow
   crate APIs rather than reimplementing behavior in the LSP repo.
-- Treat the live `/Users/scottwilliams/Dev/marrow` checkout as read-only for LSP lanes. If an
+- Treat the live `<marrow-checkout>` as read-only for LSP lanes. If an
   editor feature needs new language facts or checker APIs, stop the LSP lane and record a
   `blocked-on-marrow` handoff for the Marrow project lead.
 - Prefer upstream Marrow APIs for missing facts. The Marrow project lead owns any needed
@@ -57,9 +57,9 @@ Use narrower checks first inside a lane, then run the full bar before merge.
 
 At the start of each lane:
 
-1. Check `git -C /Users/scottwilliams/Dev/marrow status --short --branch`.
-2. Check recent Marrow language commits with `git -C /Users/scottwilliams/Dev/marrow log --oneline -8`.
-3. Re-read only the relevant files under `/Users/scottwilliams/Dev/marrow/docs/language/`.
+1. Check `git -C <marrow-checkout> status --short --branch`.
+2. Check recent Marrow language commits with `git -C <marrow-checkout> log --oneline -8`.
+3. Re-read only the relevant files under `<marrow-checkout>/docs/language/`.
 4. Confirm whether the needed facts already exist in `marrow-check`, `marrow-schema`,
    `marrow-syntax`, or `marrow-run`.
 
@@ -93,13 +93,13 @@ Expected outcomes:
 
 Likely LSP files:
 
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/hover.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/navigation.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/semantic_tokens.rs`
+- `crates/marrow-lsp-core/src/hover.rs`
+- `crates/marrow-lsp-core/src/navigation.rs`
+- `crates/marrow-lsp-core/src/semantic_tokens.rs`
 
 Upstream candidates, only in a separate Marrow worktree:
 
-- `/Users/scottwilliams/Dev/marrow/crates/marrow-check/src/binding.rs`
+- `<marrow-checkout>/crates/marrow-check/src/binding.rs`
 
 ### Lane 2: Rich Semantic Tokens
 
@@ -120,10 +120,10 @@ Expected outcomes:
 
 Likely LSP files:
 
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/semantic_tokens.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp/src/backend.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/editors/vscode/package.json`
-- `/Users/scottwilliams/Dev/marrow-lsp/editors/vscode/syntaxes/marrow.tmLanguage.json`
+- `crates/marrow-lsp-core/src/semantic_tokens.rs`
+- `crates/marrow-lsp/src/backend.rs`
+- `editors/vscode/package.json`
+- `editors/vscode/syntaxes/marrow.tmLanguage.json`
 
 ### Lane 3: Hover That Explains The Symbol
 
@@ -146,13 +146,13 @@ Expected outcomes:
 
 Likely LSP files:
 
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/hover.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/types.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp/src/backend.rs`
+- `crates/marrow-lsp-core/src/hover.rs`
+- `crates/marrow-lsp-core/src/types.rs`
+- `crates/marrow-lsp/src/backend.rs`
 
 Upstream candidates, only in a separate Marrow worktree:
 
-- `/Users/scottwilliams/Dev/marrow/crates/marrow-schema/src/stdlib.rs`
+- `<marrow-checkout>/crates/marrow-schema/src/stdlib.rs`
 
 ### Lane 4: Navigation Coverage
 
@@ -175,12 +175,12 @@ Expected outcomes:
 
 Likely LSP files:
 
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/navigation.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp/tests/smoke.rs`
+- `crates/marrow-lsp-core/src/navigation.rs`
+- `crates/marrow-lsp/tests/smoke.rs`
 
 Upstream candidates, only in a separate Marrow worktree:
 
-- `/Users/scottwilliams/Dev/marrow/crates/marrow-check/src/binding.rs`
+- `<marrow-checkout>/crates/marrow-check/src/binding.rs`
 
 ### Lane 5: Completion And Signature Help
 
@@ -197,10 +197,10 @@ Expected outcomes:
 
 Likely LSP files:
 
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/completion.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/signature_help.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp/src/backend.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/editors/vscode/package.json`
+- `crates/marrow-lsp-core/src/completion.rs`
+- `crates/marrow-lsp-core/src/signature_help.rs`
+- `crates/marrow-lsp/src/backend.rs`
+- `editors/vscode/package.json`
 
 ### Lane 6: Resource-Aware Dev Experience
 
@@ -218,10 +218,10 @@ Expected outcomes:
 
 Likely LSP files:
 
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/hover.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/data_explorer.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/store.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/editors/vscode/src/savedResourceInspector.ts`
+- `crates/marrow-lsp-core/src/hover.rs`
+- `crates/marrow-lsp-core/src/data_explorer.rs`
+- `crates/marrow-lsp-core/src/store.rs`
+- `editors/vscode/src/savedResourceInspector.ts`
 
 ### Lane 7: Cleanup And Drift Hardening
 
@@ -239,10 +239,10 @@ Expected outcomes:
 
 Likely LSP files:
 
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/types.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/hover.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/crates/marrow-lsp-core/src/completion.rs`
-- `/Users/scottwilliams/Dev/marrow-lsp/fixtures/shelf/src/shelf/sample.mw`
+- `crates/marrow-lsp-core/src/types.rs`
+- `crates/marrow-lsp-core/src/hover.rs`
+- `crates/marrow-lsp-core/src/completion.rs`
+- `fixtures/shelf/src/shelf/sample.mw`
 
 ## Merge Cadence
 

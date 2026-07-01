@@ -11,7 +11,7 @@ transports, and editor workflows over canonical Marrow facts.
 
 ### Marrow Project Lead
 
-The project lead drives upstream foundation lanes in `/Users/scottwilliams/Dev/marrow`:
+The project lead drives upstream foundation lanes in `<marrow-checkout>`:
 
 1. Finish prototype rejection and docs alignment.
    Canonical docs must stop presenting `@id`, broad `merge`, `lock`, raw paths,
@@ -36,7 +36,7 @@ canonical Marrow API first or records the LSP work as blocked.
 
 ### LSP Orchestrator
 
-The LSP orchestrator can safely run file-disjoint lanes in `/Users/scottwilliams/Dev/marrow-lsp`
+The LSP orchestrator can safely run file-disjoint lanes in `<marrow-lsp-checkout>`
 while Marrow foundation work continues:
 
 1. Fact-consumption audit.
