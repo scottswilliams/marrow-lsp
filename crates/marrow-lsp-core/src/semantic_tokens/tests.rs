@@ -288,6 +288,82 @@ fn f(): bool
 }
 
 #[test]
+fn absent_keyword_and_optional_type_suffix_are_classified() {
+    let source = "\
+module m
+
+fn label(tag: string?): string
+    return tag ?? \"untitled\"
+
+fn find(): string?
+    return absent
+";
+    let (index, decoded) = decoded_for(source);
+
+    // The empty optional `absent` colors as a keyword value.
+    assert_token_type(
+        source,
+        &index,
+        &decoded,
+        "    return absent",
+        "absent",
+        legend_index(&SemanticTokenType::KEYWORD),
+    );
+
+    // The `?` type suffix does not steal the type token: `string` in `string?`
+    // stays a type annotation.
+    assert_token_type(
+        source,
+        &index,
+        &decoded,
+        "fn label(tag: string?): string",
+        "string",
+        legend_index(&SemanticTokenType::TYPE),
+    );
+
+    // `??` remains an operator alongside the optional it resolves.
+    assert_token_type(
+        source,
+        &index,
+        &decoded,
+        "    return tag ?? \"untitled\"",
+        "??",
+        legend_index(&SemanticTokenType::OPERATOR),
+    );
+}
+
+#[test]
+fn optional_annotation_and_absent_are_classified_through_analysis() {
+    let source = "\
+module m
+
+fn label(tag: string?): string
+    return tag ?? \"untitled\"
+
+fn find(): string?
+    return absent
+";
+    let (index, decoded) = decoded_for_checked(source);
+
+    assert_token_type(
+        source,
+        &index,
+        &decoded,
+        "fn label(tag: string?): string",
+        "string",
+        legend_index(&SemanticTokenType::TYPE),
+    );
+    assert_token_type(
+        source,
+        &index,
+        &decoded,
+        "    return absent",
+        "absent",
+        legend_index(&SemanticTokenType::KEYWORD),
+    );
+}
+
+#[test]
 fn coalesce_colors_as_operator() {
     let source = "\
 module m

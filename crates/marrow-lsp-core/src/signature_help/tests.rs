@@ -467,6 +467,22 @@ fn std_operation_uses_canonical_table_signature() {
 }
 
 #[test]
+fn signature_help_renders_optional_parameter_and_return_types() {
+    let help = help_in_single_file_at(
+        "module app\n\
+        fn label(tag: string?): string?\n    \
+        return tag\n\
+        fn run(): string?\n    \
+        return label(|\n",
+    )
+    .expect("signature help");
+
+    assert_eq!(signature_label(&help), "label(tag: string?): string?");
+    assert_eq!(parameter_labels(&help), vec!["tag: string?".to_string()]);
+    assert_eq!(help.active_parameter, Some(0));
+}
+
+#[test]
 fn imported_std_operation_uses_contextual_callable_signature() {
     let help = help_in_single_file_at(
         "module app\n\

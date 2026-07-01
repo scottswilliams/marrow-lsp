@@ -1261,3 +1261,67 @@ fn completion_works_with_a_parse_error_elsewhere_in_the_file() {
         "completion must survive a parse error elsewhere, got {labels:?}"
     );
 }
+
+/// A single-file project declaring a `T?`-returning function and a `T?`
+/// parameter, so completion can be exercised around optionals.
+fn optional_project() -> (CheckedProgram, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let app = src.join("app.mw");
+    std::fs::write(
+        &app,
+        "\
+module app
+
+;; Finds an optional subtitle.
+fn findSub(id: int): string?
+    return absent
+
+pub fn run(tag: string?): string
+    return tag ?? \"x\"
+",
+    )
+    .unwrap();
+    let config =
+        parse_config(r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#).unwrap();
+    let snapshot = analyze_project(root, &config, &ProjectSources::new(), None, None).unwrap();
+    std::mem::forget(dir);
+    (snapshot.program, app)
+}
+
+#[test]
+fn bare_identifier_completion_offers_optional_locals_and_functions() {
+    let (program, file) = optional_project();
+    let items = complete_items(
+        &program,
+        &file,
+        "module app\n\npub fn run(tag: string?): string\n    return t|\n",
+    );
+    let labels = items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        labels.contains(&"tag".to_string()),
+        "the `T?` parameter should be offered as a local, got {labels:?}"
+    );
+    assert!(
+        labels.contains(&"findSub".to_string()),
+        "the optional-returning function should be offered, got {labels:?}"
+    );
+
+    // The completion detail renders the optional return type with its `?` suffix.
+    let find_sub = item_named(&items, "findSub");
+    assert_eq!(
+        find_sub.detail.as_deref(),
+        Some("fn findSub(id: int): string?")
+    );
+}

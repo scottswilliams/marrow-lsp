@@ -243,4 +243,119 @@ mod tests {
         let result = report_to_diagnostics(&report, std::iter::empty(), |_| None);
         assert!(result.is_empty());
     }
+
+    /// Analyze a one-file project on disk and return the snapshot plus the module
+    /// file's path, so a test can map the analysis through [`snapshot_to_diagnostics`].
+    fn analyze(source: &str) -> (marrow_check::AnalysisSnapshot, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("a.mw");
+        std::fs::write(&file, source).unwrap();
+        let config = marrow_project::parse_config(
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let snapshot = marrow_check::analyze_project(
+            root,
+            &config,
+            &marrow_check::ProjectSources::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        std::mem::forget(dir);
+        (snapshot, file)
+    }
+
+    /// The LSP diagnostics for the sole module file of a freshly analyzed project.
+    fn lsp_diagnostics(source: &str) -> Vec<Diagnostic> {
+        let (snapshot, file) = analyze(source);
+        let url = path_to_url(&file).unwrap();
+        let index = LineIndex::new(source.to_string());
+        let mut by_file = snapshot_to_diagnostics(&snapshot, std::iter::once(&url), |candidate| {
+            (candidate == &url).then_some(&index)
+        });
+        by_file.remove(&url).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_bare_optional_used_where_a_plain_type_is_required_surfaces_the_one_rule() {
+        // `findSub` yields `string?`; printing it uses the bare optional where a
+        // plain value is required, so the checker's one rule fires and the LSP
+        // surfaces it verbatim on the call expression.
+        let source = "\
+module a
+
+fn findSub(id: int): string?
+    return absent
+
+fn printer()
+    print(findSub(1))
+";
+        let diagnostics = lsp_diagnostics(source);
+        let one_rule = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code
+                    == Some(NumberOrString::String(
+                        "check.unresolved_optional".to_string(),
+                    ))
+            })
+            .expect("the one-rule diagnostic should be present");
+
+        assert_eq!(
+            one_rule.message,
+            "a `T?` value is used where a `T` is required; resolve it with `?? default`, `if const`, `exists`, or `?.`"
+        );
+        assert_eq!(one_rule.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(one_rule.source.as_deref(), Some("marrow"));
+
+        // The span covers exactly the `findSub(1)` call expression that produced the
+        // unresolved optional.
+        let call = source.find("findSub(1)").unwrap();
+        let index = LineIndex::new(source.to_string());
+        assert_eq!(one_rule.range, index.range(call, call + "findSub(1)".len()));
+    }
+
+    #[test]
+    fn resolved_optionals_do_not_surface_the_one_rule() {
+        // `??`, `if const`, and `exists` each discharge the optional, so no
+        // unresolved-optional diagnostic reaches the editor.
+        let source = "\
+module a
+
+fn findSub(id: int): string?
+    return absent
+
+fn coalesced(): string
+    return findSub(1) ?? \"missing\"
+
+fn guarded(): string
+    if const found = findSub(1)
+        return found
+    return \"none\"
+
+fn checked(): string
+    if exists(findSub(1))
+        return \"has\"
+    return \"none\"
+";
+        let diagnostics = lsp_diagnostics(source);
+        assert!(
+            !diagnostics.iter().any(|diagnostic| {
+                diagnostic.code
+                    == Some(NumberOrString::String(
+                        "check.unresolved_optional".to_string(),
+                    ))
+            }),
+            "resolved optionals should not raise the one rule: {diagnostics:?}"
+        );
+    }
 }

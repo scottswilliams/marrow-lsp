@@ -2867,6 +2867,58 @@ fn index_for(snapshot: &AnalysisSnapshot) -> BindingIndex {
 }
 
 #[test]
+fn hover_over_an_optional_returning_call_shows_the_optional_return_type() {
+    let source = "\
+module a
+
+fn findSub(id: int): string?
+    return absent
+
+pub fn caller(): string
+    return findSub(1) ?? \"missing\"
+";
+    let (snapshot, file) = analyze(source);
+    let index = index_for(&snapshot);
+    let value = hover_value(&snapshot, &index, &file, source, "findSub(1)");
+
+    assert!(
+        value.starts_with("```marrow\nfn findSub(id: int): string?\n```"),
+        "an optional return type should render with the `?` suffix: {value}"
+    );
+}
+
+#[test]
+fn hover_over_an_optional_binding_shows_the_optional_type_and_narrows_when_resolved() {
+    let source = "\
+module a
+
+fn findSub(id: int): string?
+    return absent
+
+pub fn caller()
+    const maybe = findSub(1)
+    std::assert::isAbsent(maybe)
+    if const found = findSub(1)
+        print(found)
+";
+    let (snapshot, file) = analyze(source);
+    let index = index_for(&snapshot);
+
+    // The inferred binding of a `T?` call carries the optional type; the `?` must
+    // survive into the hover rather than being dropped to the bare element type.
+    let maybe_use = offset_of(source, "isAbsent(maybe)") + "isAbsent(".len();
+    let maybe =
+        hover_value_at(&snapshot, &index, &file, maybe_use).expect("optional binding hover");
+    assert_eq!(maybe, "```marrow\nstring?\n```");
+
+    // `if const` resolves the optional, so the narrowed binding is a plain `string`.
+    let found_use = offset_of(source, "print(found)") + "print(".len();
+    let found =
+        hover_value_at(&snapshot, &index, &file, found_use).expect("narrowed binding hover");
+    assert_eq!(found, "```marrow\nstring\n```");
+}
+
+#[test]
 fn symbol_docs_for_a_documented_function_returns_its_description() {
     let source = "\
 module a
