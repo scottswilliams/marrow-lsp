@@ -6,6 +6,12 @@ and it starts the bundled `marrow-lsp` language server and `marrow-dap` debug ad
 language intelligence — parsing, checking, typing, schema, and store access — lives in the
 Rust binaries. No parsing or position math runs in TypeScript.
 
+Repo-level setup and release notes:
+[install](../../docs/install.md),
+[quickstart](../../docs/quickstart.md),
+[stability](../../docs/stability.md),
+[repo changelog](../../CHANGELOG.md).
+
 ## Features
 
 - **Diagnostics** — parse, type, and schema errors reported as you edit.
