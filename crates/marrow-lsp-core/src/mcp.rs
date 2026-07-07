@@ -53,11 +53,13 @@ use crate::data_explorer::{
     DataChildrenRequest, DataReadRequest, session_data_child_views_page, session_data_read,
 };
 use crate::diagnostics::path_to_url;
-use crate::documents::{DocumentAnalysisSnapshot, Documents};
+use crate::documents::Documents;
 use crate::execution::execution_boundary_json;
 use crate::positions::Position;
 use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
+use marrow_project::{discover_modules, discover_test_modules};
+
 use crate::workspace::{COMMITTED_LOCK_FILE, Project, Workspace};
 
 const SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION: &str = "source.namespace.completion.v1";
@@ -221,28 +223,59 @@ thread_local! {
     static PROJECT_CACHE: RefCell<CachedProject> = RefCell::new(CachedProject::default());
 }
 
-/// The cached project analysis plus the committed-catalog fingerprint it was
-/// checked against, so a catalog commit between calls re-checks even when the
-/// source text is unchanged.
+/// The cached project analysis plus fingerprints of the exact source set and
+/// committed catalog it was checked against, so a change to either between calls
+/// re-checks.
 #[derive(Default)]
 struct CachedProject {
     workspace: Workspace,
+    source_fingerprint: Option<u64>,
     catalog_fingerprint: Option<u64>,
 }
 
 impl CachedProject {
-    /// Whether the cached analysis still answers for `file` under the current
-    /// source snapshot: the file must live under the cached project root, the
-    /// on-disk/overlaid sources must be unchanged, and the committed catalog must
-    /// not have advanced.
-    fn is_fresh_for(&self, file: &Path, sources: &DocumentAnalysisSnapshot) -> bool {
+    /// Whether the cached analysis still answers for `file`: the file must live
+    /// under the cached project root, the analyzed source set (with any overlay)
+    /// must hash identically, and the committed catalog must not have advanced.
+    ///
+    /// The MCP transport has no file watcher and rebuilds its document set on every
+    /// call, so it cannot lean on the LSP's document-generation freshness token; it
+    /// re-derives the source fingerprint from disk each call. That walk is far
+    /// cheaper than the full recompute it guards.
+    fn is_fresh_for(&self, file: &Path, overlay: Option<(&Path, &str)>) -> bool {
         let Some(project) = self.workspace.project() else {
             return false;
         };
         file.starts_with(&project.root)
-            && self.workspace.fresh_latest_from_snapshot(sources).is_some()
+            && source_fingerprint(project, overlay) == self.source_fingerprint
             && catalog_fingerprint(project) == self.catalog_fingerprint
     }
+}
+
+/// A fingerprint of every source and test module the project analyzes — the overlay
+/// text for the edited file, disk content for the rest. It changes when a file's
+/// content changes and when a file is added to or removed from the project, so it
+/// busts the cache on any source change a recompute would observe.
+fn source_fingerprint(project: &Project, overlay: Option<(&Path, &str)>) -> Option<u64> {
+    let mut paths: Vec<PathBuf> = discover_modules(&project.root, &project.config)
+        .ok()?
+        .into_iter()
+        .chain(discover_test_modules(&project.root, &project.config).ok()?)
+        .map(|module| module.path)
+        .collect();
+    paths.sort();
+    paths.dedup();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in &paths {
+        std::hash::Hash::hash(path, &mut hasher);
+        let content = match overlay {
+            Some((overlay_path, source)) if overlay_path == path => source.to_string(),
+            _ => std::fs::read_to_string(path).unwrap_or_default(),
+        };
+        std::hash::Hash::hash(&content, &mut hasher);
+    }
+    Some(std::hash::Hasher::finish(&hasher))
 }
 
 /// A cheap fingerprint of a project's committed catalog lock, or `None` when it
@@ -266,23 +299,33 @@ fn with_loaded_project<R>(
     source: Option<&str>,
     f: impl FnOnce(&Workspace, &Path) -> R,
 ) -> Result<R, String> {
-    let mut documents = Documents::new();
-    if let Some(source) = source {
-        // Overlay the buffer the same way the LSP overlays an open editor buffer,
-        // so a project file with an unsaved edit checks against that edit.
-        let url = path_to_url(file).ok_or_else(|| "the file path is not absolute".to_string())?;
-        documents.open(url, source.to_string());
-    }
-    let sources = documents.analysis_snapshot();
+    let overlay = source.map(|source| (file, source));
     PROJECT_CACHE.with(|cache| {
         let cache = &mut *cache.borrow_mut();
-        if !cache.is_fresh_for(file, &sources) {
+        if !cache.is_fresh_for(file, overlay) {
             record_recompute();
+            let mut documents = Documents::new();
+            if let Some(source) = source {
+                // Overlay the buffer the same way the LSP overlays an open editor
+                // buffer, so a project file with an unsaved edit checks against it.
+                let url =
+                    path_to_url(file).ok_or_else(|| "the file path is not absolute".to_string())?;
+                documents.open(url, source.to_string());
+            }
+            let sources = documents.analysis_snapshot();
             cache
                 .workspace
                 .recompute_from_snapshot(file, &sources)
                 .map_err(|error| error.to_string())?;
-            cache.catalog_fingerprint = cache.workspace.project().and_then(catalog_fingerprint);
+            let (source_fp, catalog_fp) = match cache.workspace.project() {
+                Some(project) => (
+                    source_fingerprint(project, overlay),
+                    catalog_fingerprint(project),
+                ),
+                None => (None, None),
+            };
+            cache.source_fingerprint = source_fp;
+            cache.catalog_fingerprint = catalog_fp;
         }
         Ok(f(&cache.workspace, file))
     })
