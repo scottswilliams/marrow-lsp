@@ -1,0 +1,11 @@
+# The pinned marrow upstream.
+#
+# marrow-lsp builds, tests, and releases against exactly this marrow revision. During
+# local development the marrow crates resolve as path dependencies (`../marrow`); a
+# reproducible release resolves them at this git revision instead. Bumping the pin is a
+# deliberate edit, reviewed together with the regenerated consumed-surface snapshot
+# (`cargo run -p xtask -- gen-surface`) so an upstream API change is a visible diff, never
+# a silent compile break.
+
+rev = "f89f30d9db9f3a5fa6ac087619ea36091bcf17a5"
+tree = "3be0a03ef8553931afac4a14d64c31213b241844"

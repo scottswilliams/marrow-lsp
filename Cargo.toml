@@ -6,6 +6,7 @@ members = [
     "crates/marrow-lsp",
     "crates/marrow-mcp",
     "crates/marrow-dap",
+    "xtask",
 ]
 
 [workspace.package]
