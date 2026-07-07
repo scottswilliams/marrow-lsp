@@ -21,8 +21,21 @@ not a fork in the core.
 
 ## Dependency on the marrow Crates
 Depend on the marrow crates via a path dependency during local development, and a single pinned
-git revision for release. `marrow-lsp-core` is the only crate that links marrow. Track upstream
-changes deliberately: pin and bump on purpose, never implicitly.
+git revision for release (`pins/marrow-rev.toml`). Track upstream changes deliberately: pin and
+bump on purpose, never implicitly; a bump is reviewed together with the regenerated
+`pins/consumed-marrow-surface.snapshot`.
+
+`marrow-lsp-core` is the sole language-intelligence consumer: it links the full set of upstream
+marrow crates (syntax, check, catalog, json, schema, project, store, run) and no other crate
+decides language, catalog, storage, or runtime semantics. In production `[dependencies]` the LSP
+transport (`marrow-lsp`) links no upstream marrow crate at all — it routes everything through the
+core — and `marrow-mcp` links only `marrow-run` for sandboxed execution. The one recorded broad
+exception is `marrow-dap`, which drives runtime/debug/store internals directly
+(`syntax/check/project/store/run`); narrowing it to route through the core is tracked follow-on
+work. That production link set is enforced by the `dependency_shape` architecture test, so a new
+accidental transport→marrow link — or a transport reaching for a language-semantics crate it
+should route through the core — fails the gate. (Test-only `[dev-dependencies]` links are not part
+of the shipped shape and are not tracked.)
 
 ## DAP & Runtime-Hook Discipline
 The debugger drives a minimal, opt-in step hook in the marrow runtime, gated so normal execution
