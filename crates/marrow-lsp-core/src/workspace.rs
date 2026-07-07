@@ -331,6 +331,7 @@ fn resolve_project(file: &Path) -> Result<Project, WorkspaceError> {
                     code: marrow_project::CONFIG_INVALID,
                     kind: marrow_project::ConfigErrorKind::InvalidJson,
                     message: error.to_string(),
+                    position: None,
                 })
             })?;
             let config = parse_config(&text).map_err(WorkspaceError::Config)?;
@@ -406,7 +407,8 @@ pub fn url_to_path(url: &Url) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::diagnostics::{path_to_url, snapshot_to_diagnostics};
-    use marrow_store::tree::{StoreUid, TreeStore};
+    use marrow_store::tree::StoreUid;
+    use marrow_store::{AccessMode, SealedStore};
 
     /// A native-store project carrying a stamped store with a committed catalog
     /// baseline. Returns the project root path inside the kept `TempDir` so a recompute
@@ -433,7 +435,9 @@ mod tests {
 
         let data_dir = root.join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+        let store = SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create)
+            .unwrap()
+            .into_store();
         store
             .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
             .unwrap();

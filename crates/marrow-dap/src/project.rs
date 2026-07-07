@@ -304,7 +304,7 @@ fn check_errors(report: &CheckReport) -> Vec<String> {
 mod tests {
     use super::*;
     use marrow_run::{Host, ProjectSessionNotice, SessionEntry};
-    use marrow_store::tree::TreeStore;
+    use marrow_store::{AccessMode, SealedStore};
 
     fn write_project(source: &str, config: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -334,7 +334,7 @@ mod tests {
     fn corrupt_catalog_utf8_with_empty_native_store(dir: &Path) {
         let data_dir = dir.join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        drop(TreeStore::open(&data_dir.join("marrow.redb")).unwrap());
+        drop(SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create).unwrap());
         let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
         std::fs::write(catalog, [0xff]).expect("write invalid UTF-8 catalog");
     }

@@ -198,8 +198,9 @@ mod tests {
     };
     use marrow_project::parse_config;
     use marrow_store::key::SavedKey;
-    use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
+    use marrow_store::tree::{DataPathSegment, StoreUid};
     use marrow_store::value::{SavedValue, encode_value};
+    use marrow_store::{AccessMode, SealedStore};
 
     use crate::store::open_saved_data_session;
     use crate::workspace::Project;
@@ -668,7 +669,9 @@ store ^counter(id: {}): Counter
         )];
         let data_dir = root.join("data");
         fs::create_dir_all(&data_dir).unwrap();
-        let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+        let store = SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create)
+            .unwrap()
+            .into_store();
         store
             .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
             .unwrap();

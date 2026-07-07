@@ -14,8 +14,9 @@ use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
 use marrow_check::tooling::{DataChild, DataPathSegment as ToolingDataPathSegment, data_children};
 use marrow_store::cell::CatalogId;
 use marrow_store::key::SavedKey;
-use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
+use marrow_store::tree::{DataPathSegment, StoreUid};
 use marrow_store::value::{SavedValue, encode_value};
+use marrow_store::{AccessMode, SealedStore};
 use serde_json::{Value, json};
 
 /// Frame a JSON-RPC message with the LSP `Content-Length` header and write it.
@@ -88,7 +89,9 @@ pub fn f()
     let config = marrow_project::parse_config(&config_text).unwrap();
     let (report, proposed) = marrow_check::check_project(root, &config).unwrap();
     assert!(!report.has_errors(), "{:#?}", report.diagnostics);
-    let store = TreeStore::open(&root.join("data").join("marrow.redb")).unwrap();
+    let store = SealedStore::open(&root.join("data").join("marrow.redb"), AccessMode::Create)
+        .unwrap()
+        .into_store();
     store
         .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
         .unwrap();

@@ -25,7 +25,8 @@ use marrow_check::{
     read_committed_lock,
 };
 use marrow_project::ProjectConfig;
-use marrow_store::tree::{CommitMetadata, StoreUid, TreeStore};
+use marrow_store::tree::{CommitMetadata, StoreUid};
+use marrow_store::{AccessMode, SealedStore};
 
 /// The accepted catalog and the first-run lock to drive a source check: the store's
 /// snapshot when a valid stamped store is present, otherwise the first-run `None`
@@ -128,7 +129,7 @@ fn probe_store(
     if !path.exists() {
         return Ok(StoreProbe::Absent);
     }
-    let Ok(store) = TreeStore::open_read_only(&path) else {
+    let Ok(store) = SealedStore::open(&path, AccessMode::Read) else {
         return Ok(StoreProbe::Unavailable);
     };
     let snapshot = store.read_snapshot()?;
@@ -139,7 +140,7 @@ fn probe_store(
         drop(snapshot);
         return Ok(StoreProbe::Cached);
     }
-    let accepted = read_accepted_catalog_with_store_read_only(root, Some(&store))?;
+    let accepted = read_accepted_catalog_with_store_read_only(root, Some(&*store))?;
     drop(snapshot);
     Ok(StoreProbe::Fresh { identity, accepted })
 }
@@ -234,7 +235,7 @@ impl CatalogBindingCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marrow_store::tree::{StoreUid, TreeStore};
+    use marrow_store::tree::StoreUid;
 
     /// A native-store project with one keyed store, stamped: a real store carrying a
     /// committed catalog. Returns the root, config, and the store file path so a test can
@@ -268,7 +269,9 @@ store ^counter(id: int): Counter
         let data_dir = root.join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         let store_path = data_dir.join("marrow.redb");
-        let store = TreeStore::open(&store_path).unwrap();
+        let store = SealedStore::open(&store_path, AccessMode::Create)
+            .unwrap()
+            .into_store();
         store
             .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
             .unwrap();
@@ -336,7 +339,9 @@ store ^counter(id: int): Counter
     /// after the commit, so a caller can prove the commit left `(mtime, len)` unable to distinguish
     /// the two committed states.
     fn advance_commit(store_path: &Path) -> u64 {
-        let store = TreeStore::open(store_path).unwrap();
+        let store = SealedStore::open(store_path, AccessMode::Create)
+            .unwrap()
+            .into_store();
         let previous = store
             .read_commit_metadata()
             .unwrap()
@@ -496,7 +501,9 @@ store ^counter(id: int): Counter
         // releases. The locked recompute must accept the first-run `None` without poisoning the
         // cache: the writer's commit is the authority, so the cache must neither serve the first
         // bind's snapshot as confirmed nor stick on the `None` once the lock releases.
-        let writer = TreeStore::open(&store_path).unwrap();
+        let writer = SealedStore::open(&store_path, AccessMode::Create)
+            .unwrap()
+            .into_store();
         let previous = writer
             .read_commit_metadata()
             .unwrap()

@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 
 use marrow_project::CATALOG_FILE_NAME;
 use marrow_run::{Host, ProjectOpen, ProjectSession, SessionEntry};
-use marrow_store::tree::TreeStore;
+use marrow_store::{AccessMode, SealedStore};
 use serde_json::{Value as Json, json};
 
 const SHELF_SOURCE: &str = "module shelf\n\
@@ -423,7 +423,7 @@ fn commit_proposed_catalog_lock(dir: &Path) {
 fn corrupt_catalog_utf8_with_empty_native_store(dir: &Path) {
     let data_dir = dir.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    drop(TreeStore::open(&data_dir.join("marrow.redb")).unwrap());
+    drop(SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create).unwrap());
     let catalog = dir.join(marrow_project::CATALOG_FILE_NAME);
     std::fs::write(catalog, [0xff]).expect("write invalid UTF-8 catalog");
 }

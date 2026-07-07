@@ -7,8 +7,9 @@ use marrow_check::{
 use marrow_json::DATA_GENERATION_PROFILE_VERSION;
 use marrow_project::{CATALOG_FILE_NAME, parse_config};
 use marrow_store::key::SavedKey;
-use marrow_store::tree::{DataPathSegment, StoreUid, TreeStore};
+use marrow_store::tree::{DataPathSegment, StoreUid};
 use marrow_store::value::{SavedValue, encode_value};
+use marrow_store::{AccessMode, SealedStore};
 
 fn assert_run_contract(result: &Json) {
     assert_production_contract(result, "sandboxed execution API");
@@ -422,7 +423,9 @@ pub fn show()
     let store_id = store_id_of(&place).unwrap();
     let data_dir = root.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    let store = SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create)
+        .unwrap()
+        .into_store();
     store
         .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
         .unwrap();
@@ -469,7 +472,9 @@ store ^counter(id: int): Counter
     let store_id = store_id_of(&place).unwrap();
     let data_dir = root.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    let store = SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create)
+        .unwrap()
+        .into_store();
     store
         .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
         .unwrap();
@@ -501,7 +506,9 @@ fn native_counter_project_with_value(value: i64) -> (tempfile::TempDir, PathBuf)
     let path = vec![DataPathSegment::Member(
         marrow_store::cell::CatalogId::new(value_id).unwrap(),
     )];
-    let store = TreeStore::open(&root.join("data/marrow.redb")).unwrap();
+    let store = SealedStore::open(&root.join("data/marrow.redb"), AccessMode::Create)
+        .unwrap()
+        .into_store();
     store
         .write_data_value(
             &store_id,
@@ -540,7 +547,9 @@ store ^settings: Settings
     let program = commit_project_lock(root);
     let data_dir = root.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    let store = SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create)
+        .unwrap()
+        .into_store();
     store
         .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
         .unwrap();
@@ -813,7 +822,9 @@ fn stamped_store_no_lock_project() -> (tempfile::TempDir, PathBuf) {
     let program = check_project_against(root, &config, None, None).unwrap();
     let data_dir = root.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let store = TreeStore::open(&data_dir.join("marrow.redb")).unwrap();
+    let store = SealedStore::open(&data_dir.join("marrow.redb"), AccessMode::Create)
+        .unwrap()
+        .into_store();
     store
         .write_store_uid(&StoreUid::new("store_00000000000000000000000000000001").unwrap())
         .unwrap();
@@ -2015,7 +2026,7 @@ fn run_does_not_touch_the_real_store() {
     let (dir, file) = native_counter_project(1..=1);
     let store_file = dir.path().join("data").join("marrow.redb");
     let before = {
-        let store = TreeStore::open_read_only(&store_file).expect("open real store");
+        let store = SealedStore::open(&store_file, AccessMode::Read).expect("open real store");
         store
             .read_commit_metadata()
             .expect("read commit metadata")
@@ -2032,7 +2043,7 @@ fn run_does_not_touch_the_real_store() {
     );
 
     let after = {
-        let store = TreeStore::open_read_only(&store_file).expect("reopen real store");
+        let store = SealedStore::open(&store_file, AccessMode::Read).expect("reopen real store");
         store
             .read_commit_metadata()
             .expect("read commit metadata")
