@@ -621,6 +621,9 @@ impl StepHook for Debugger {
             }
         }
         let reason = if self.is_entry_stop() {
+            // An entry stop already halts the program, so a pause that arrived during
+            // startup is satisfied here and must not leak into a later continue.
+            self.pause.store(false, Ordering::Relaxed);
             Some(StopReason::Entry)
         } else if self.pause.swap(false, Ordering::Relaxed) {
             // An async pause takes the next boundary regardless of the step mode.

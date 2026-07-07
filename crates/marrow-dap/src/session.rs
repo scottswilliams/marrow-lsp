@@ -44,7 +44,8 @@ const THREAD_ID: i64 = 1;
 /// detaches it. The hook observes the terminate flag only between statements, so a
 /// run wedged in one long statement or a blocking builtin cannot stop promptly;
 /// after this budget the adapter detaches rather than blocking indefinitely.
-/// A graceful force-unwind of such a run is upstream work (UPSTREAM-4).
+/// Gracefully force-unwinding such a run needs a cooperative interrupt the runtime
+/// does not yet expose.
 const TEARDOWN_BUDGET: Duration = Duration::from_millis(500);
 /// The exit code reported when the run thread panics. It follows Rust's own
 /// panic-abort convention so a crashed run is a visibly nonzero exit rather than a
@@ -1758,10 +1759,14 @@ impl<W: Write> Session<W> {
     }
 }
 
-/// Guaranteed teardown on every protocol-loop exit — a client terminate, an
-/// error, or an input EOF/broken pipe. Ending the run thread lets its
-/// `ProjectSession` drop, so an isolated-write scratch dir or store lock is never
-/// orphaned by a disconnect. `terminate_session` is idempotent, so a session that
+/// Teardown on every protocol-loop exit — a client terminate, an error, or an input
+/// EOF/broken pipe. Ending the run thread lets its `ProjectSession` drop, so a run
+/// that reaches a statement boundary (or is parked) unwinds and never orphans its
+/// isolated-write scratch dir or store lock on a disconnect. A run genuinely wedged
+/// inside one long statement is detached at the teardown budget instead; its scratch
+/// dir is then reclaimed by the OS temp sweep rather than the adapter, since a
+/// detached thread cannot be made to unwind without the cooperative interrupt the
+/// runtime does not yet expose. `terminate_session` is idempotent, so a session that
 /// already shut down cleanly drops as a no-op.
 impl<W: Write> Drop for Session<W> {
     fn drop(&mut self) {
