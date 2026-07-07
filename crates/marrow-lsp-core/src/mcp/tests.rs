@@ -491,15 +491,15 @@ store ^counter(id: int): Counter
 fn native_counter_project_with_value(value: i64) -> (tempfile::TempDir, PathBuf) {
     let (dir, file) = native_counter_project([1]);
     let root = dir.path();
-    let program = {
-        let (workspace, _) = load_project(&file, None).unwrap();
+    let program = with_loaded_project(&file, None, |workspace, _| {
         open_saved_data_session(workspace.project().unwrap())
             .unwrap()
             .unwrap()
             .surface_read()
             .program()
             .clone()
-    };
+    })
+    .unwrap();
     let place = root_place(&program, "counter").unwrap();
     let store_id = store_id_of(&place).unwrap();
     let value_id = member_catalog_id(&place, "value").unwrap();
@@ -576,21 +576,25 @@ fn saved_data_field_segment(
 }
 
 fn saved_data_store_catalog_id(file: &Path, root: &str) -> String {
-    let (workspace, _) = load_project(file, None).unwrap();
-    let session = open_saved_data_session(workspace.project().unwrap())
-        .unwrap()
-        .unwrap();
-    let place = root_place(session.surface_read().program(), root).unwrap();
-    store_id_of(&place).unwrap().as_str().to_string()
+    with_loaded_project(file, None, |workspace, _| {
+        let session = open_saved_data_session(workspace.project().unwrap())
+            .unwrap()
+            .unwrap();
+        let place = root_place(session.surface_read().program(), root).unwrap();
+        store_id_of(&place).unwrap().as_str().to_string()
+    })
+    .unwrap()
 }
 
 fn saved_data_member_catalog_id(file: &Path, root: &str, member: &str) -> String {
-    let (workspace, _) = load_project(file, None).unwrap();
-    let session = open_saved_data_session(workspace.project().unwrap())
-        .unwrap()
-        .unwrap();
-    let place = root_place(session.surface_read().program(), root).unwrap();
-    member_catalog_id(&place, member).unwrap()
+    with_loaded_project(file, None, |workspace, _| {
+        let session = open_saved_data_session(workspace.project().unwrap())
+            .unwrap()
+            .unwrap();
+        let place = root_place(session.surface_read().program(), root).unwrap();
+        member_catalog_id(&place, member).unwrap()
+    })
+    .unwrap()
 }
 
 fn sample_root_segment() -> crate::data_explorer::DataPathSegmentDto {
@@ -669,9 +673,11 @@ fn catalog_only_surface_project() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn point_read_operation(file: &Path) -> Json {
-    let (workspace, _) = load_project(file, None).expect("surface project checks");
-    let program = workspace.program().expect("checked program");
-    let abi = marrow_json::surface::SurfaceAbiJson::from_program(program);
+    let program = with_loaded_project(file, None, |workspace, _| {
+        workspace.program().expect("checked program").clone()
+    })
+    .expect("surface project checks");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(&program);
     let manifest = marrow_json::surface::SurfaceRouteManifestJson::from_abi(&abi);
     let route = manifest
         .routes
@@ -701,9 +707,11 @@ fn point_read_operation(file: &Path) -> Json {
 }
 
 fn update_author_operation(file: &Path, value: &str) -> Json {
-    let (workspace, _) = load_project(file, None).expect("surface project checks");
-    let program = workspace.program().expect("checked program");
-    let abi = marrow_json::surface::SurfaceAbiJson::from_program(program);
+    let program = with_loaded_project(file, None, |workspace, _| {
+        workspace.program().expect("checked program").clone()
+    })
+    .expect("surface project checks");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(&program);
     let update = abi
         .surfaces
         .iter()
@@ -735,9 +743,11 @@ fn update_author_operation(file: &Path, value: &str) -> Json {
 }
 
 fn retitle_action_operation(file: &Path, title: &str) -> Json {
-    let (workspace, _) = load_project(file, None).expect("surface project checks");
-    let program = workspace.program().expect("checked program");
-    let abi = marrow_json::surface::SurfaceAbiJson::from_program(program);
+    let program = with_loaded_project(file, None, |workspace, _| {
+        workspace.program().expect("checked program").clone()
+    })
+    .expect("surface project checks");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(&program);
     let action = abi
         .surfaces
         .iter()
@@ -1773,10 +1783,11 @@ fn surface_read_executes_canonical_point_read_request() {
 #[test]
 fn surface_read_returns_canonical_error_for_write_bodies() {
     let (_dir, file) = native_surface_project();
-    let (workspace, _) = load_project(&file, None).expect("surface project checks");
-    let abi = marrow_json::surface::SurfaceAbiJson::from_program(
-        workspace.program().expect("checked program"),
-    );
+    let program = with_loaded_project(&file, None, |workspace, _| {
+        workspace.program().expect("checked program").clone()
+    })
+    .expect("surface project checks");
+    let abi = marrow_json::surface::SurfaceAbiJson::from_program(&program);
     let update_tag = abi
         .surfaces
         .iter()
@@ -1915,6 +1926,40 @@ fn run_caps_captured_output_and_flags_truncation() {
         "the retained prefix must hold real output: {result}"
     );
     assert_run_contract(&result);
+}
+
+#[test]
+fn tool_calls_reuse_the_cached_workspace_until_source_changes() {
+    reset_project_cache();
+    let (_dir, file) = namespace_project();
+    let books = file.with_file_name("books.mw");
+
+    // The first tool call on a cold cache checks the project.
+    let _ = check(Some(&file), None);
+    assert_eq!(recompute_count(), 1, "the first call checks the project");
+
+    // A second call on the same unchanged source reuses the cached analysis.
+    let _ = check(Some(&file), None);
+    assert_eq!(recompute_count(), 1, "unchanged source must not re-check");
+
+    // A different file and a different tool in the same project also reuse it:
+    // the warm cache serves the whole multi-module project.
+    let _ = check(Some(&books), None);
+    let _ = type_at_position(&books, 0, 0);
+    assert_eq!(
+        recompute_count(),
+        1,
+        "the warm cache serves every file and tool"
+    );
+
+    // Editing a source file on disk busts the cache.
+    std::fs::write(
+        &books,
+        "module shelf::books\n\npub fn added(): int\n    return 7\n",
+    )
+    .unwrap();
+    let _ = check(Some(&books), None);
+    assert_eq!(recompute_count(), 2, "a source change must re-check");
 }
 
 #[test]

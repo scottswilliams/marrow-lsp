@@ -53,12 +53,12 @@ use crate::data_explorer::{
     DataChildrenRequest, DataReadRequest, session_data_child_views_page, session_data_read,
 };
 use crate::diagnostics::path_to_url;
-use crate::documents::Documents;
+use crate::documents::{DocumentAnalysisSnapshot, Documents};
 use crate::execution::execution_boundary_json;
 use crate::positions::Position;
 use crate::store::{SavedDataSession, open_saved_data_session};
 use crate::types::render_type;
-use crate::workspace::Workspace;
+use crate::workspace::{COMMITTED_LOCK_FILE, Project, Workspace};
 
 const SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION: &str = "source.namespace.completion.v1";
 
@@ -181,25 +181,103 @@ fn with_contract(mut result: Json, contract: Json) -> Json {
     result
 }
 
-/// Load the project `file` belongs to (walking up to its `marrow.json`), check it,
-/// and return the workspace holding the snapshot plus the file's absolute path.
-/// `source`, when given, overlays the file's on-disk text so analysis reflects an
-/// agent's unsaved edit. A file outside any project, or one that cannot be checked,
-/// yields the error string for the tool's diagnostics envelope.
-fn load_project(file: &Path, source: Option<&str>) -> Result<(Workspace, PathBuf), String> {
-    let file = file.to_path_buf();
+thread_local! {
+    /// One [`Workspace`] kept for the life of the transport process, so back-to-back
+    /// tool calls on an unchanged project reuse its checked analysis instead of a
+    /// cold check every time. The MCP transport is single-threaded, so a
+    /// thread-local holds the whole cache without a lock; a `mw_run` on its own
+    /// watchdog thread simply gets its own fresh cache.
+    static PROJECT_CACHE: RefCell<CachedProject> = RefCell::new(CachedProject::default());
+}
+
+/// The cached project analysis plus the committed-catalog fingerprint it was
+/// checked against, so a catalog commit between calls re-checks even when the
+/// source text is unchanged.
+#[derive(Default)]
+struct CachedProject {
+    workspace: Workspace,
+    catalog_fingerprint: Option<u64>,
+}
+
+impl CachedProject {
+    /// Whether the cached analysis still answers for `file` under the current
+    /// source snapshot: the file must live under the cached project root, the
+    /// on-disk/overlaid sources must be unchanged, and the committed catalog must
+    /// not have advanced.
+    fn is_fresh_for(&self, file: &Path, sources: &DocumentAnalysisSnapshot) -> bool {
+        let Some(project) = self.workspace.project() else {
+            return false;
+        };
+        file.starts_with(&project.root)
+            && self.workspace.fresh_latest_from_snapshot(sources).is_some()
+            && catalog_fingerprint(project) == self.catalog_fingerprint
+    }
+}
+
+/// A cheap fingerprint of a project's committed catalog lock, or `None` when it
+/// has none (a memory-backed project keeps no committed catalog). It changes when
+/// the store commits, so a catalog advance busts the source-keyed cache.
+fn catalog_fingerprint(project: &Project) -> Option<u64> {
+    let bytes = std::fs::read(project.root.join(COMMITTED_LOCK_FILE)).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash_slice(&bytes, &mut hasher);
+    Some(std::hash::Hasher::finish(&hasher))
+}
+
+/// Load the project `file` belongs to (walking up to its `marrow.json`), check it
+/// if the cache is cold or stale, and run `f` against the checked workspace and
+/// the file's absolute path. `source`, when given, overlays the file's on-disk
+/// text so analysis reflects an agent's unsaved edit; a distinct overlay counts as
+/// a source change and re-checks. A file outside any project, or one that cannot
+/// be checked, yields the error string for the tool's diagnostics envelope.
+fn with_loaded_project<R>(
+    file: &Path,
+    source: Option<&str>,
+    f: impl FnOnce(&Workspace, &Path) -> R,
+) -> Result<R, String> {
     let mut documents = Documents::new();
     if let Some(source) = source {
         // Overlay the buffer the same way the LSP overlays an open editor buffer,
         // so a project file with an unsaved edit checks against that edit.
-        let url = path_to_url(&file).ok_or_else(|| "the file path is not absolute".to_string())?;
+        let url = path_to_url(file).ok_or_else(|| "the file path is not absolute".to_string())?;
         documents.open(url, source.to_string());
     }
-    let mut workspace = Workspace::new();
-    workspace
-        .recompute(&file, &documents)
-        .map_err(|error| error.to_string())?;
-    Ok((workspace, file))
+    let sources = documents.analysis_snapshot();
+    PROJECT_CACHE.with(|cache| {
+        let cache = &mut *cache.borrow_mut();
+        if !cache.is_fresh_for(file, &sources) {
+            record_recompute();
+            cache
+                .workspace
+                .recompute_from_snapshot(file, &sources)
+                .map_err(|error| error.to_string())?;
+            cache.catalog_fingerprint = cache.workspace.project().and_then(catalog_fingerprint);
+        }
+        Ok(f(&cache.workspace, file))
+    })
+}
+
+/// Count a cold-or-stale re-check, so a cache test can assert that an unchanged
+/// project is not re-checked. A no-op outside tests.
+fn record_recompute() {
+    #[cfg(test)]
+    RECOMPUTE_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECOMPUTE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn recompute_count() -> u64 {
+    RECOMPUTE_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_project_cache() {
+    PROJECT_CACHE.with(|cache| *cache.borrow_mut() = CachedProject::default());
+    RECOMPUTE_COUNT.with(|count| count.set(0));
 }
 
 /// One diagnostic in the agent-facing JSON: a stable dotted `code`, a severity
@@ -237,34 +315,34 @@ fn diagnostic_json(diagnostic: &lsp_types::Diagnostic) -> Json {
 /// project to check against). Returns `{ diagnostics: [...] }`.
 pub fn check(file: Option<&Path>, source: Option<&str>) -> Json {
     match file {
-        Some(file) => match load_project(file, source) {
-            Ok((workspace, file)) => {
-                let snapshot = workspace.latest().expect("recompute stored a snapshot");
-                // Only the requested file's diagnostics: an agent asked about one
-                // file, and the rest of the project's problems are noise to it.
-                let diagnostics: Vec<Json> = snapshot
-                    .report
-                    .diagnostics
-                    .iter()
-                    .filter(|diagnostic| diagnostic.file == file)
-                    .map(|diagnostic| {
-                        let index = crate::positions::LineIndex::new(
-                            source
-                                .map(str::to_string)
-                                .unwrap_or_else(|| read_to_string(&diagnostic.file)),
-                        );
-                        diagnostic_json(&crate::diagnostics::diagnostic_to_lsp(
-                            diagnostic.code,
-                            diagnostic.severity,
-                            diagnostic.span,
-                            &diagnostic.message,
-                            None,
-                            &index,
-                        ))
-                    })
-                    .collect();
-                json!({ "diagnostics": diagnostics })
-            }
+        Some(file) => match with_loaded_project(file, source, |workspace, file| {
+            let snapshot = workspace.latest().expect("recompute stored a snapshot");
+            // Only the requested file's diagnostics: an agent asked about one
+            // file, and the rest of the project's problems are noise to it.
+            let diagnostics: Vec<Json> = snapshot
+                .report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.file.as_path() == file)
+                .map(|diagnostic| {
+                    let index = crate::positions::LineIndex::new(
+                        source
+                            .map(str::to_string)
+                            .unwrap_or_else(|| read_to_string(&diagnostic.file)),
+                    );
+                    diagnostic_json(&crate::diagnostics::diagnostic_to_lsp(
+                        diagnostic.code,
+                        diagnostic.severity,
+                        diagnostic.span,
+                        &diagnostic.message,
+                        None,
+                        &index,
+                    ))
+                })
+                .collect();
+            json!({ "diagnostics": diagnostics })
+        }) {
+            Ok(result) => result,
             Err(error) => json!({ "diagnostics": [], "error": error }),
         },
         None => check_snippet(source.unwrap_or_default()),
@@ -299,21 +377,22 @@ fn check_snippet(source: &str) -> Json {
 /// `{ "type": null }` when no expression covers the position (or the file does not
 /// check). The agent uses this to confirm what a sub-expression evaluates to.
 pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
-    let (workspace, file) = match load_project(file, None) {
-        Ok(loaded) => loaded,
-        Err(error) => return json!({ "type": Json::Null, "error": error }),
-    };
-    let snapshot = workspace.latest().expect("recompute stored a snapshot");
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return json!({ "type": Json::Null });
-    };
-    // The parse was built from the file's on-disk text; index that same text so the
-    // position maps to the offset the parse covers.
-    let source = read_to_string(&file);
-    let index = crate::positions::LineIndex::new(source);
-    let offset = index.offset(Position { line, character });
-    let ty = type_at(&snapshot.program, &file, &analyzed.parsed, offset);
-    json!({ "type": ty.map(|ty| render_type(&ty)) })
+    match with_loaded_project(file, None, |workspace, file| {
+        let snapshot = workspace.latest().expect("recompute stored a snapshot");
+        let Some(analyzed) = snapshot.files.iter().find(|f| f.path.as_path() == file) else {
+            return json!({ "type": Json::Null });
+        };
+        // The parse was built from the file's on-disk text; index that same text so
+        // the position maps to the offset the parse covers.
+        let source = read_to_string(file);
+        let index = crate::positions::LineIndex::new(source);
+        let offset = index.offset(Position { line, character });
+        let ty = type_at(&snapshot.program, file, &analyzed.parsed, offset);
+        json!({ "type": ty.map(|ty| render_type(&ty)) })
+    }) {
+        Ok(result) => result,
+        Err(error) => json!({ "type": Json::Null, "error": error }),
+    }
 }
 
 /// `mw_complete`: the Marrow `source.completion.v1` fact at a position in
@@ -321,44 +400,43 @@ pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
 /// `{ label, kind, detail?, docs }`.
 pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     let contract = completion_contract();
-    let (workspace, file) = match load_project(file, None) {
-        Ok(loaded) => loaded,
-        Err(error) => return with_contract(empty_completion_result(Some(error)), contract),
-    };
-    let snapshot = workspace.latest().expect("recompute stored a snapshot");
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return with_contract(empty_completion_result(None), contract);
-    };
-    // The classifier reads the cached lex's spans against this text, and the parse
-    // came from the same on-disk text, so read and index that text.
-    let source = read_to_string(&file);
-    let index = crate::positions::LineIndex::new(&source);
-    let offset = index.offset(Position { line, character });
-    let lexed = marrow_syntax::lex_source(&source);
-    let fact = source_completion_fact(
-        &snapshot.program,
-        &file,
-        &source,
-        &analyzed.parsed,
-        &lexed,
-        offset,
-    );
-    let items: Vec<Json> = fact
-        .items
-        .into_iter()
-        .map(|item| {
-            json!({
-                "label": item.label,
-                "kind": completion_kind_name(item.kind),
-                "detail": item.detail,
-                "docs": item.docs,
+    let result = with_loaded_project(file, None, |workspace, file| {
+        let snapshot = workspace.latest().expect("recompute stored a snapshot");
+        let Some(analyzed) = snapshot.files.iter().find(|f| f.path.as_path() == file) else {
+            return empty_completion_result(None);
+        };
+        // The classifier reads the cached lex's spans against this text, and the
+        // parse came from the same on-disk text, so read and index that text.
+        let source = read_to_string(file);
+        let index = crate::positions::LineIndex::new(&source);
+        let offset = index.offset(Position { line, character });
+        let lexed = marrow_syntax::lex_source(&source);
+        let fact = source_completion_fact(
+            &snapshot.program,
+            file,
+            &source,
+            &analyzed.parsed,
+            &lexed,
+            offset,
+        );
+        let items: Vec<Json> = fact
+            .items
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "label": item.label,
+                    "kind": completion_kind_name(item.kind),
+                    "detail": item.detail,
+                    "docs": item.docs,
+                })
             })
-        })
-        .collect();
-    with_contract(
-        json!({ "profile_version": fact.profile_version, "items": items }),
-        contract,
-    )
+            .collect();
+        json!({ "profile_version": fact.profile_version, "items": items })
+    });
+    match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => with_contract(empty_completion_result(Some(error)), contract),
+    }
 }
 
 fn empty_completion_result(error: Option<String>) -> Json {
@@ -378,31 +456,30 @@ fn empty_completion_result(error: Option<String>) -> Json {
 /// fallback, or `CompletionItem` presentation is accepted here.
 pub fn namespace_complete(file: &Path, qualifier: &[String]) -> Json {
     let contract = namespace_completion_contract();
-    let (workspace, file) = match load_project(file, None) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            return with_contract(empty_namespace_completion_result(Some(error)), contract);
+    let result = with_loaded_project(file, None, |workspace, file| {
+        let snapshot = workspace.latest().expect("recompute stored a snapshot");
+        let Some(analyzed) = snapshot.files.iter().find(|f| f.path.as_path() == file) else {
+            return empty_namespace_completion_result(None);
+        };
+        match source_namespace_completion_file_fact(
+            &snapshot.program,
+            file,
+            &analyzed.parsed.file,
+            qualifier,
+        ) {
+            Some(SourceNamespaceCompletionFact::Module(fact)) => module_namespace_fact_json(&fact),
+            Some(SourceNamespaceCompletionFact::Enum(fact)) => enum_namespace_fact_json(&fact),
+            Some(
+                SourceNamespaceCompletionFact::StandardLibraryRoot(_)
+                | SourceNamespaceCompletionFact::StandardLibraryModule(_),
+            ) => empty_namespace_completion_result(None),
+            None => empty_namespace_completion_result(None),
         }
-    };
-    let snapshot = workspace.latest().expect("recompute stored a snapshot");
-    let Some(analyzed) = snapshot.files.iter().find(|f| f.path == file) else {
-        return with_contract(empty_namespace_completion_result(None), contract);
-    };
-    let result = match source_namespace_completion_file_fact(
-        &snapshot.program,
-        &file,
-        &analyzed.parsed.file,
-        qualifier,
-    ) {
-        Some(SourceNamespaceCompletionFact::Module(fact)) => module_namespace_fact_json(&fact),
-        Some(SourceNamespaceCompletionFact::Enum(fact)) => enum_namespace_fact_json(&fact),
-        Some(
-            SourceNamespaceCompletionFact::StandardLibraryRoot(_)
-            | SourceNamespaceCompletionFact::StandardLibraryModule(_),
-        ) => empty_namespace_completion_result(None),
-        None => empty_namespace_completion_result(None),
-    };
-    with_contract(result, contract)
+    });
+    match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => with_contract(empty_namespace_completion_result(Some(error)), contract),
+    }
 }
 
 fn empty_namespace_completion_result(error: Option<String>) -> Json {
@@ -484,36 +561,32 @@ fn enum_member_status_json(status: SourceNamespaceEnumMemberStatus) -> &'static 
 /// `mw_resource_schema`: Marrow's canonical JSON DTO for one resource schema.
 pub fn resource_schema(file: &Path, name: &str) -> Json {
     let contract = resource_schema_contract();
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            return with_contract(
-                json!({
-                    "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
-                    "resources": [],
-                    "diagnostics": [],
-                    "error": error,
-                }),
-                contract,
-            );
-        }
-    };
-    let Some(program) = workspace.program() else {
-        return with_contract(
-            json!({
+    let result = with_loaded_project(file, None, |workspace, _| {
+        let Some(program) = workspace.program() else {
+            return json!({
                 "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
                 "resources": [],
                 "diagnostics": [{
                     "code": "resource.schema.missing",
                     "message": "no checked program is available for resource schema lookup"
                 }],
+            });
+        };
+        serde_json::to_value(marrow_resource_schema_for_name(program, name))
+            .expect("Marrow resource schema DTO serializes")
+    });
+    match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => with_contract(
+            json!({
+                "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
+                "resources": [],
+                "diagnostics": [],
+                "error": error,
             }),
             contract,
-        );
-    };
-    let result = serde_json::to_value(marrow_resource_schema_for_name(program, name))
-        .expect("Marrow resource schema DTO serializes");
-    with_contract(result, contract)
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,22 +600,23 @@ pub enum SurfaceRouteScope {
 /// does not open the project's data store and does not need the data-access gate.
 pub fn surface_routes(file: &Path, scope: SurfaceRouteScope) -> Json {
     let contract = surface_routes_contract(scope);
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => return with_contract(empty_surface_route_manifest(error), contract),
-    };
-    let Some(program) = workspace.program() else {
-        return with_contract(empty_surface_route_manifest("no checked program"), contract);
-    };
-    let abi = SurfaceAbiJson::from_program(program);
-    let mut manifest = SurfaceRouteManifestJson::from_abi(&abi);
-    if scope == SurfaceRouteScope::ReadOnly {
-        manifest
-            .routes
-            .retain(|route| SurfaceOperationKind::from(&route.request).is_read());
+    let result = with_loaded_project(file, None, |workspace, _| {
+        let Some(program) = workspace.program() else {
+            return empty_surface_route_manifest("no checked program");
+        };
+        let abi = SurfaceAbiJson::from_program(program);
+        let mut manifest = SurfaceRouteManifestJson::from_abi(&abi);
+        if scope == SurfaceRouteScope::ReadOnly {
+            manifest
+                .routes
+                .retain(|route| SurfaceOperationKind::from(&route.request).is_read());
+        }
+        serde_json::to_value(manifest).expect("surface route manifest DTO serializes")
+    });
+    match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => with_contract(empty_surface_route_manifest(error), contract),
     }
-    let result = serde_json::to_value(manifest).expect("surface route manifest DTO serializes");
-    with_contract(result, contract)
 }
 
 fn empty_surface_route_manifest(error: impl Into<String>) -> Json {
@@ -565,49 +639,29 @@ pub fn surface_read(file: &Path, operation: Json, allow_data: bool) -> Result<Js
     }
     let request: SurfaceOperationRequestJson = serde_json::from_value(operation)
         .map_err(|error| format!("invalid mw_surface_read operation: {error}"))?;
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": error }),
-                contract,
-            ));
+    let result = with_loaded_project(file, None, |workspace, _| {
+        let Some(project) = workspace.project() else {
+            return json!({ "available": false, "error": "no project resolved for the file" });
+        };
+        let session = match ProjectSurfaceReadSession::open(&project.root) {
+            Ok(session) => session,
+            Err(error) => return json!({ "available": false, "error": error.message() }),
+        };
+        let store_stamp = match session.store_stamp() {
+            Ok(stamp) => store_stamp_json(stamp),
+            Err(error) => return json!({ "available": false, "error": error.message() }),
+        };
+        match execute_project_surface_operation_read_only(&session, &request) {
+            Ok(response) => {
+                json!({ "available": true, "store_stamp": store_stamp, "response": response })
+            }
+            Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
         }
-    };
-    let project = match workspace.project() {
-        Some(project) => project,
-        None => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": "no project resolved for the file" }),
-                contract,
-            ));
-        }
-    };
-    let session = match ProjectSurfaceReadSession::open(&project.root) {
-        Ok(session) => session,
-        Err(error) => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": error.message() }),
-                contract,
-            ));
-        }
-    };
-    let store_stamp = match session.store_stamp() {
-        Ok(stamp) => store_stamp_json(stamp),
-        Err(error) => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": error.message() }),
-                contract,
-            ));
-        }
-    };
-    let result = match execute_project_surface_operation_read_only(&session, &request) {
-        Ok(response) => {
-            json!({ "available": true, "store_stamp": store_stamp, "response": response })
-        }
-        Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
-    };
-    Ok(with_contract(result, contract))
+    });
+    Ok(match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => with_contract(json!({ "available": false, "error": error }), contract),
+    })
 }
 
 /// `mw_surface_write`: execute one canonical `surface.operation.v1` request
@@ -621,50 +675,30 @@ pub fn surface_write(file: &Path, operation: Json, allow_data: bool) -> Result<J
     }
     let request: SurfaceOperationRequestJson = serde_json::from_value(operation)
         .map_err(|error| format!("invalid mw_surface_write operation: {error}"))?;
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": error }),
-                contract,
-            ));
+    let result = with_loaded_project(file, None, |workspace, _| {
+        let Some(project) = workspace.project() else {
+            return json!({ "available": false, "error": "no project resolved for the file" });
+        };
+        let session = match ProjectSurfaceSession::open(&project.root) {
+            Ok(session) => session,
+            Err(error) => return json!({ "available": false, "error": error.message() }),
+        };
+        let operation_result = execute_project_surface_operation(&session, &request);
+        let store_stamp = match session.store_stamp() {
+            Ok(stamp) => store_stamp_json(stamp),
+            Err(error) => return json!({ "available": false, "error": error.message() }),
+        };
+        match operation_result {
+            Ok(response) => {
+                json!({ "available": true, "store_stamp": store_stamp, "response": response })
+            }
+            Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
         }
-    };
-    let project = match workspace.project() {
-        Some(project) => project,
-        None => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": "no project resolved for the file" }),
-                contract,
-            ));
-        }
-    };
-    let session = match ProjectSurfaceSession::open(&project.root) {
-        Ok(session) => session,
-        Err(error) => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": error.message() }),
-                contract,
-            ));
-        }
-    };
-    let operation_result = execute_project_surface_operation(&session, &request);
-    let store_stamp = match session.store_stamp() {
-        Ok(stamp) => store_stamp_json(stamp),
-        Err(error) => {
-            return Ok(with_contract(
-                json!({ "available": false, "error": error.message() }),
-                contract,
-            ));
-        }
-    };
-    let result = match operation_result {
-        Ok(response) => {
-            json!({ "available": true, "store_stamp": store_stamp, "response": response })
-        }
-        Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
-    };
-    Ok(with_contract(result, contract))
+    });
+    Ok(match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => with_contract(json!({ "available": false, "error": error }), contract),
+    })
 }
 
 fn store_stamp_json(stamp: StoreStamp) -> Json {
@@ -685,30 +719,24 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
     if !allow_data {
         return data_disabled(contract);
     }
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            return with_contract(
-                json!({ "available": false, "roots": [], "error": error }),
-                contract,
-            );
-        }
-    };
-    let session = match data_session(&workspace) {
-        Ok(session) => session,
-        Err(error) => {
-            return with_contract(
-                json!({ "available": false, "roots": [], "error": error }),
-                contract,
-            );
-        }
-    };
-    let Some(session) = session else {
-        return with_contract(json!({ "available": false, "roots": [] }), contract);
-    };
-    let result = serde_json::to_value(crate::data_explorer::saved_roots(Some(&session)))
-        .unwrap_or_else(|_| json!({ "available": false, "roots": [] }));
-    with_contract(result, contract)
+    let result = with_loaded_project(file, None, |workspace, _| {
+        let session = match data_session(workspace) {
+            Ok(session) => session,
+            Err(error) => return json!({ "available": false, "roots": [], "error": error }),
+        };
+        let Some(session) = session else {
+            return json!({ "available": false, "roots": [] });
+        };
+        serde_json::to_value(crate::data_explorer::saved_roots(Some(&session)))
+            .unwrap_or_else(|_| json!({ "available": false, "roots": [] }))
+    });
+    match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => with_contract(
+            json!({ "available": false, "roots": [], "error": error }),
+            contract,
+        ),
+    }
 }
 
 /// `mw_data_children`: a bounded page of typed child segments under a saved-data
@@ -727,34 +755,26 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
         "cursor": Json::Null,
         "store_snapshot": Json::Null,
     });
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            let mut value = unavailable.clone();
-            value["error"] = json!(error);
-            return with_contract(value, contract);
-        }
-    };
-    let session = match data_session(&workspace) {
-        Ok(session) => session,
-        Err(error) => {
-            let mut value = unavailable.clone();
-            value["error"] = json!(error);
-            return with_contract(value, contract);
-        }
-    };
-    let Some(session) = session else {
-        return with_contract(unavailable, contract);
-    };
-    match session_data_child_views_page(&session, request) {
-        Ok(result) => {
-            let mut result =
-                serde_json::to_value(result).expect("data children DTO must serialize");
-            result["available"] = json!(true);
-            with_contract(result, contract)
-        }
-        Err(error) => with_contract(
-            json!({
+    let result = with_loaded_project(file, None, |workspace, _| {
+        let session = match data_session(workspace) {
+            Ok(session) => session,
+            Err(error) => {
+                let mut value = unavailable.clone();
+                value["error"] = json!(error);
+                return value;
+            }
+        };
+        let Some(session) = session else {
+            return unavailable.clone();
+        };
+        match session_data_child_views_page(&session, request) {
+            Ok(result) => {
+                let mut result =
+                    serde_json::to_value(result).expect("data children DTO must serialize");
+                result["available"] = json!(true);
+                result
+            }
+            Err(error) => json!({
                 "available": true,
                 "children": [],
                 "truncated": false,
@@ -762,8 +782,15 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
                 "store_snapshot": Json::Null,
                 "error": error,
             }),
-            contract,
-        ),
+        }
+    });
+    match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => {
+            let mut value = unavailable;
+            value["error"] = json!(error);
+            with_contract(value, contract)
+        }
     }
 }
 
@@ -783,33 +810,26 @@ pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Jso
         "value_truncated": false,
         "store_snapshot": Json::Null,
     });
-    let workspace = match load_project(file, None) {
-        Ok((workspace, _)) => workspace,
-        Err(error) => {
-            let mut value = unavailable.clone();
-            value["error"] = json!(error);
-            return with_contract(value, contract);
-        }
-    };
-    let session = match data_session(&workspace) {
-        Ok(session) => session,
-        Err(error) => {
-            let mut value = unavailable.clone();
-            value["error"] = json!(error);
-            return with_contract(value, contract);
-        }
-    };
-    let Some(session) = session else {
-        return with_contract(unavailable, contract);
-    };
-    match session_data_read(&session, request) {
-        Ok(result) => {
-            let mut result = serde_json::to_value(result).expect("data read DTO must serialize");
-            result["available"] = json!(true);
-            with_contract(result, contract)
-        }
-        Err(error) => with_contract(
-            json!({
+    let result = with_loaded_project(file, None, |workspace, _| {
+        let session = match data_session(workspace) {
+            Ok(session) => session,
+            Err(error) => {
+                let mut value = unavailable.clone();
+                value["error"] = json!(error);
+                return value;
+            }
+        };
+        let Some(session) = session else {
+            return unavailable.clone();
+        };
+        match session_data_read(&session, request) {
+            Ok(result) => {
+                let mut result =
+                    serde_json::to_value(result).expect("data read DTO must serialize");
+                result["available"] = json!(true);
+                result
+            }
+            Err(error) => json!({
                 "available": true,
                 "presence": "absent",
                 "value": Json::Null,
@@ -817,8 +837,15 @@ pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Jso
                 "store_snapshot": Json::Null,
                 "error": error,
             }),
-            contract,
-        ),
+        }
+    });
+    match result {
+        Ok(result) => with_contract(result, contract),
+        Err(error) => {
+            let mut value = unavailable;
+            value["error"] = json!(error);
+            with_contract(value, contract)
+        }
     }
 }
 
@@ -994,11 +1021,10 @@ fn run_args_error(message: &str) -> Json {
 
 /// Load `file`'s project far enough to find the root Marrow will run.
 fn load_project_for_run(file: &Path) -> Result<PathBuf, String> {
-    let (workspace, _) = load_project(file, None)?;
-    let project = workspace
-        .project()
-        .ok_or_else(|| "no project resolved for the file".to_string())?;
-    Ok(project.root.clone())
+    with_loaded_project(file, None, |workspace, _| {
+        workspace.project().map(|project| project.root.clone())
+    })?
+    .ok_or_else(|| "no project resolved for the file".to_string())
 }
 
 /// Evaluate one `entry` through Marrow's fresh-memory session under the locked
