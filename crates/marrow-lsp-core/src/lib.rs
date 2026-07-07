@@ -20,6 +20,7 @@ pub mod positions;
 pub mod semantic_tokens;
 pub mod signature_help;
 pub mod store;
+mod store_view;
 pub mod symbols;
 mod types;
 pub mod workspace;

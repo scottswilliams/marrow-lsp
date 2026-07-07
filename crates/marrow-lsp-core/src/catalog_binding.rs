@@ -20,13 +20,10 @@
 use std::path::{Path, PathBuf};
 
 use marrow_catalog::{CatalogLock, CatalogMetadata};
-use marrow_check::{
-    ProjectIoError, native_store_path, read_accepted_catalog_with_store_read_only,
-    read_committed_lock,
-};
+use marrow_check::{ProjectIoError, native_store_path, read_committed_lock};
 use marrow_project::ProjectConfig;
-use marrow_store::tree::{CommitMetadata, StoreUid};
-use marrow_store::{AccessMode, SealedStore};
+
+use crate::store_view::{CommitMetadata, ReadOnlyStoreView, StoreUid};
 
 /// The accepted catalog and the first-run lock to drive a source check: the store's
 /// snapshot when a valid stamped store is present, otherwise the first-run `None`
@@ -129,19 +126,17 @@ fn probe_store(
     if !path.exists() {
         return Ok(StoreProbe::Absent);
     }
-    let Ok(store) = SealedStore::open(&path, AccessMode::Read) else {
+    let Some(view) = ReadOnlyStoreView::open(&path) else {
         return Ok(StoreProbe::Unavailable);
     };
-    let snapshot = store.read_snapshot()?;
-    let uid = store.read_store_uid()?;
-    let commit = store.read_commit_metadata()?;
+    let pin = view.pin()?;
+    let uid = pin.store_uid()?;
+    let commit = pin.commit_metadata()?;
     let identity = StoreCommitIdentity::from_commit(path, uid, commit);
     if cached_key == Some(&identity) {
-        drop(snapshot);
         return Ok(StoreProbe::Cached);
     }
-    let accepted = read_accepted_catalog_with_store_read_only(root, Some(&*store))?;
-    drop(snapshot);
+    let accepted = pin.accepted_catalog(root)?;
     Ok(StoreProbe::Fresh { identity, accepted })
 }
 
@@ -236,6 +231,7 @@ impl CatalogBindingCache {
 mod tests {
     use super::*;
     use marrow_store::tree::StoreUid;
+    use marrow_store::{AccessMode, SealedStore};
 
     /// A native-store project with one keyed store, stamped: a real store carrying a
     /// committed catalog. Returns the root, config, and the store file path so a test can
