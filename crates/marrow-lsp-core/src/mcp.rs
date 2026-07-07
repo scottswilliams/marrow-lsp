@@ -62,6 +62,25 @@ use crate::workspace::{COMMITTED_LOCK_FILE, Project, Workspace};
 
 const SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION: &str = "source.namespace.completion.v1";
 
+/// The stable shape version an agent pins to detect a breaking rename of a tool's
+/// top-level result. The fact-bearing tools carry their Marrow fact's version;
+/// these name the shapes this crate owns (`mw_check`, `mw_type_at`, `mw_run`),
+/// which previously carried none.
+pub const CHECK_PROFILE_VERSION: &str = "mcp.check.v1";
+pub const TYPE_AT_PROFILE_VERSION: &str = "mcp.type_at.v1";
+pub const RUN_PROFILE_VERSION: &str = "mcp.run.v1";
+
+/// Stamp a tool result with its shape version, so an agent pinning the shape can
+/// detect a breaking rename. Left in place if the object already carries one.
+fn with_profile_version(mut result: Json, version: &str) -> Json {
+    if let Some(object) = result.as_object_mut() {
+        object
+            .entry("profile_version")
+            .or_insert_with(|| json!(version));
+    }
+    result
+}
+
 fn production_contract(description: &str) -> Json {
     json!({
         "status": "ready",
@@ -326,6 +345,10 @@ fn diagnostic_json(diagnostic: &lsp_types::Diagnostic) -> Json {
 /// via `marrow_syntax::parse_source`, surfacing only syntax errors (there is no
 /// project to check against). Returns `{ diagnostics: [...] }`.
 pub fn check(file: Option<&Path>, source: Option<&str>) -> Json {
+    with_profile_version(check_result(file, source), CHECK_PROFILE_VERSION)
+}
+
+fn check_result(file: Option<&Path>, source: Option<&str>) -> Json {
     match file {
         Some(file) => match with_loaded_project(file, source, |workspace, file| {
             let snapshot = workspace.latest().expect("recompute stored a snapshot");
@@ -389,6 +412,13 @@ fn check_snippet(source: &str) -> Json {
 /// `{ "type": null }` when no expression covers the position (or the file does not
 /// check). The agent uses this to confirm what a sub-expression evaluates to.
 pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
+    with_profile_version(
+        type_at_result(file, line, character),
+        TYPE_AT_PROFILE_VERSION,
+    )
+}
+
+fn type_at_result(file: &Path, line: u32, character: u32) -> Json {
     match with_loaded_project(file, None, |workspace, file| {
         let snapshot = workspace.latest().expect("recompute stored a snapshot");
         let Some(analyzed) = snapshot.files.iter().find(|f| f.path.as_path() == file) else {
@@ -934,9 +964,12 @@ pub fn run(
     mode: RunMode,
     budget: Duration,
 ) -> Json {
-    with_contract(
-        run_within_budget(file, entry, args, mode, budget),
-        run_contract(),
+    with_profile_version(
+        with_contract(
+            run_within_budget(file, entry, args, mode, budget),
+            run_contract(),
+        ),
+        RUN_PROFILE_VERSION,
     )
 }
 

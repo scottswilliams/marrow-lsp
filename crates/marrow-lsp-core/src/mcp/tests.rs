@@ -1963,6 +1963,50 @@ fn tool_calls_reuse_the_cached_workspace_until_source_changes() {
 }
 
 #[test]
+fn tool_result_shapes_carry_their_pinned_profile_version() {
+    // A golden map of each versioned tool result shape to its top-level
+    // profile_version. A breaking rename of any shape's version fails here, so an
+    // agent pinning a shape has a stable contract.
+    reset_project_cache();
+    let (_dir, file) = namespace_project();
+
+    let cases: Vec<(&str, Json)> = vec![
+        ("mcp.check.v1", check(Some(&file), None)),
+        ("mcp.check.v1", check(None, Some("module a"))),
+        ("mcp.type_at.v1", type_at_position(&file, 0, 0)),
+        (
+            "mcp.run.v1",
+            run(
+                &file,
+                Some("shelf::app::run"),
+                &[],
+                RunMode::Run,
+                DEFAULT_RUN_BUDGET,
+            ),
+        ),
+        ("source.completion.v1", complete(&file, 0, 0)),
+        (
+            "source.namespace.completion.v1",
+            namespace_complete(&file, &["books".to_string()]),
+        ),
+        (
+            RESOURCE_SCHEMA_PROFILE_VERSION,
+            resource_schema(&file, "Book"),
+        ),
+        (
+            SURFACE_ROUTE_PROFILE_VERSION,
+            surface_routes(&file, SurfaceRouteScope::ReadOnly),
+        ),
+    ];
+    for (expected, result) in cases {
+        assert_eq!(
+            result["profile_version"], expected,
+            "tool result shape must pin its profile version: {result}"
+        );
+    }
+}
+
+#[test]
 fn run_rejects_malformed_typed_args_before_loading() {
     let result = run(
         Path::new("/nope/project/src/main.mw"),
