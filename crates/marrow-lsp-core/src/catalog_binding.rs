@@ -16,8 +16,18 @@
 //! so two identity-advancing commits in the same coarse-mtime tick can share a file
 //! `(mtime, len)`, and keying on that would serve a superseded snapshot. The commit
 //! id is bumped by every commit, so a same-tick same-length write still invalidates.
+//!
+//! Opening the store to read that commit fact is itself the debounce cost, and it takes an OS
+//! lock that contends with a writer, so the open is gated on a cheaper pre-open change detector:
+//! the store file's `(mtime, len)`. When it is unchanged and the cache already holds a confirmed
+//! identity, the recompute skips the open entirely — a pure source edit never touches the store.
+//! The fingerprint gates only whether to open; the commit fact, not the fingerprint, remains the
+//! identity. This detector is filesystem-timestamp bound and so cannot see a same-tick
+//! same-length in-place commit on a coarse-mtime filesystem; a lock-free store-epoch fact that
+//! removes that caveat is tracked upstream.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use marrow_catalog::{CatalogLock, CatalogMetadata};
 use marrow_check::{ProjectIoError, native_store_path, read_committed_lock};
@@ -77,6 +87,32 @@ impl StoreCommitIdentity {
     }
 }
 
+/// A cheap filesystem fingerprint of the store file, used only to skip re-opening redb when the
+/// store has not changed since the last probe. This is a change *detector*, never an identity
+/// *key*: an in-place commit that leaves the file's `(mtime, len)` unchanged on a coarse-mtime
+/// filesystem is not distinguishable here, which is why the durable lock-free store-epoch fact is
+/// tracked upstream. On the fine-grained-mtime filesystems the editor runs against, every commit
+/// moves the file's mtime, so an unchanged fingerprint is a sound "no store write since the last
+/// probe" and lets a pure source edit skip the integrity-checked open entirely. A missing mtime
+/// yields `None`, which never matches, so the probe falls back to always opening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreFileStat {
+    modified: SystemTime,
+    len: u64,
+}
+
+impl StoreFileStat {
+    /// Read the store file's fingerprint, or `None` when it cannot be stat'd or the platform does
+    /// not report a modification time — in which case the caller must not skip the open.
+    fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok()?,
+            len: metadata.len(),
+        })
+    }
+}
+
 /// The outcome of probing the store against the cache for one recompute.
 enum StoreProbe {
     /// The project has no native store on disk: a memory backend with no store path, or a
@@ -89,16 +125,35 @@ enum StoreProbe {
     /// unbound one serves the first-run `None` without caching it. Either way the next recompute
     /// re-probes once the file is readable again, so a store that genuinely advanced re-binds.
     Unavailable,
-    /// The store's commit identity matches the cache; the cached snapshot stands, and the
-    /// expensive catalog-snapshot read was skipped. The identity is already the cache's key,
-    /// so it carries nothing.
-    Cached,
+    /// The store file is unchanged since the last probe (same `(mtime, len)`), so the redb open
+    /// was skipped entirely: a pure source edit does not touch the store, and the cached snapshot
+    /// stands without paying the integrity-checked open on the edit hot path.
+    Unchanged,
+    /// The store's commit identity matches the cache; the cached snapshot stands. The store was
+    /// opened because its file fingerprint moved, so the recompute records the new fingerprint to
+    /// skip the next unchanged recompute, but the expensive catalog-snapshot read was skipped.
+    Cached { stat: Option<StoreFileStat> },
     /// The identity advanced past the cache (or the store newly appeared): the snapshot it
-    /// now publishes, read under the same pin as the identity it is keyed on.
+    /// now publishes, read under the same pin as the identity it is keyed on, plus the store
+    /// file's fingerprint at probe time to gate the next recompute's open.
     Fresh {
         identity: StoreCommitIdentity,
         accepted: Option<CatalogMetadata>,
+        stat: Option<StoreFileStat>,
     },
+}
+
+impl StoreProbe {
+    /// Whether this probe opened the native store. `Absent` and `Unchanged` short-circuit before
+    /// the store path is opened; the rest reflect an open that was attempted. Used only by the
+    /// test that asserts a source edit with an unchanged store performs zero redb opens.
+    #[cfg(test)]
+    fn opened_store(&self) -> bool {
+        matches!(
+            self,
+            StoreProbe::Unavailable | StoreProbe::Cached { .. } | StoreProbe::Fresh { .. }
+        )
+    }
 }
 
 /// Open the project's native store read-only and read its cheap commit identity from a
@@ -116,6 +171,7 @@ fn probe_store(
     root: &Path,
     config: &ProjectConfig,
     cached_key: Option<&StoreCommitIdentity>,
+    cached_stat: Option<&StoreFileStat>,
 ) -> Result<StoreProbe, ProjectIoError> {
     let Some(path) = native_store_path(root, config)? else {
         return Ok(StoreProbe::Absent);
@@ -127,6 +183,15 @@ fn probe_store(
     if !path.exists() {
         return Ok(StoreProbe::Absent);
     }
+    // Read the file fingerprint before opening, so any writer commit landing after this read
+    // moves the fingerprint on the next probe and forces a re-open rather than serving stale
+    // identity. When the fingerprint is unchanged and the cache already holds a confirmed
+    // identity for this store, skip the open entirely: a pure source edit does not touch the
+    // store, so the debounced recompute pays no integrity-checked open on the edit hot path.
+    let stat = StoreFileStat::read(&path);
+    if cached_key.is_some() && stat.is_some() && stat.as_ref() == cached_stat {
+        return Ok(StoreProbe::Unchanged);
+    }
     let Some(view) = ReadOnlyStoreView::open(&path) else {
         return Ok(StoreProbe::Unavailable);
     };
@@ -135,10 +200,14 @@ fn probe_store(
     let commit = pin.commit_metadata()?;
     let identity = StoreCommitIdentity::from_commit(path, uid, commit);
     if cached_key == Some(&identity) {
-        return Ok(StoreProbe::Cached);
+        return Ok(StoreProbe::Cached { stat });
     }
     let accepted = pin.accepted_catalog(root)?;
-    Ok(StoreProbe::Fresh { identity, accepted })
+    Ok(StoreProbe::Fresh {
+        identity,
+        accepted,
+        stat,
+    })
 }
 
 /// Caches the bound accepted catalog keyed by the store's monotonic commit identity, so
@@ -151,6 +220,10 @@ fn probe_store(
 pub struct CatalogBindingCache {
     key: Option<StoreCommitIdentity>,
     accepted: Option<CatalogMetadata>,
+    /// The store file's fingerprint at the last open, used to skip re-opening redb when the file
+    /// is unchanged. `None` means the last probe found no store or could not fingerprint it, so
+    /// the next recompute must open rather than trust an unrecorded fingerprint.
+    stat: Option<StoreFileStat>,
     /// Whether [`Self::key`] reflects a real bind. A default cache and a cache whose
     /// last bind saw no store both hold `key: None`, but only the latter has bound;
     /// this flag distinguishes them so the first bind always reads the store.
@@ -160,6 +233,10 @@ pub struct CatalogBindingCache {
     /// repeated recomputes and re-bound after the store's commit identity advances.
     #[cfg(test)]
     binds: usize,
+    /// How many times the cache has opened the native store (called `ReadOnlyStoreView::open`),
+    /// for the test that asserts a source edit against an unchanged store performs zero opens.
+    #[cfg(test)]
+    store_opens: usize,
 }
 
 impl CatalogBindingCache {
@@ -177,11 +254,21 @@ impl CatalogBindingCache {
         root: &Path,
         config: &ProjectConfig,
     ) -> Result<CatalogBinding, ProjectIoError> {
-        match probe_store(root, config, self.key.as_ref())? {
-            StoreProbe::Cached => {}
-            StoreProbe::Fresh { identity, accepted } => self.adopt(Some(identity), accepted),
+        let probe = probe_store(root, config, self.key.as_ref(), self.stat.as_ref())?;
+        #[cfg(test)]
+        if probe.opened_store() {
+            self.store_opens += 1;
+        }
+        match probe {
+            StoreProbe::Unchanged => {}
+            StoreProbe::Cached { stat } => self.stat = stat,
+            StoreProbe::Fresh {
+                identity,
+                accepted,
+                stat,
+            } => self.adopt(Some(identity), accepted, stat),
             StoreProbe::Absent if self.bound && self.key.is_none() => {}
-            StoreProbe::Absent => self.adopt(None, None),
+            StoreProbe::Absent => self.adopt(None, None, None),
             // A present-but-unconfirmable store (a writer holds the redb flock) is a transient
             // lock, not evidence the store reset. Retain the last-accepted identity by serving
             // the untouched cache rather than flipping to the first-run `None`, which would blank
@@ -197,10 +284,17 @@ impl CatalogBindingCache {
         self.current_binding(root)
     }
 
-    /// Adopt a freshly bound accepted snapshot under its commit-identity key.
-    fn adopt(&mut self, key: Option<StoreCommitIdentity>, accepted: Option<CatalogMetadata>) {
+    /// Adopt a freshly bound accepted snapshot under its commit-identity key and the store file
+    /// fingerprint the identity was read against.
+    fn adopt(
+        &mut self,
+        key: Option<StoreCommitIdentity>,
+        accepted: Option<CatalogMetadata>,
+        stat: Option<StoreFileStat>,
+    ) {
         self.key = key;
         self.accepted = accepted;
+        self.stat = stat;
         self.bound = true;
         #[cfg(test)]
         {
@@ -230,6 +324,11 @@ impl CatalogBindingCache {
     #[cfg(test)]
     fn binds(&self) -> usize {
         self.binds
+    }
+
+    #[cfg(test)]
+    fn store_opens(&self) -> usize {
+        self.store_opens
     }
 }
 
@@ -389,6 +488,38 @@ store ^counter(id: int): Counter
             2,
             "a commit that advanced the store's commit identity while leaving the file's \
              (mtime, len) unchanged must still re-bind, because the cache keys on the commit fact"
+        );
+    }
+
+    #[test]
+    fn a_pure_source_edit_with_an_unchanged_store_opens_redb_zero_times() {
+        let (dir, config, _store_path) = stamped_native_project();
+        let root = dir.path();
+        let mut cache = CatalogBindingCache::new();
+
+        // The first recompute opens the store once to bind its committed catalog and record the
+        // store file's cheap change fingerprint.
+        cache.bind(root, &config).unwrap();
+        assert_eq!(
+            cache.store_opens(),
+            1,
+            "the first recompute opens the store to bind it"
+        );
+
+        // A pure source edit does not touch the store file, so its (mtime, len) is unchanged. Each
+        // debounced recompute must skip the expensive integrity-checked redb open entirely rather
+        // than contend with a writer on the edit hot path.
+        let src = root.join("src/app/counter.mw");
+        let edited = std::fs::read_to_string(&src).unwrap() + "\n// a pure source edit\n";
+        std::fs::write(&src, edited).unwrap();
+
+        for _ in 0..5 {
+            cache.bind(root, &config).unwrap();
+        }
+        assert_eq!(
+            cache.store_opens(),
+            1,
+            "a source edit with an unchanged store performs zero further redb opens"
         );
     }
 
