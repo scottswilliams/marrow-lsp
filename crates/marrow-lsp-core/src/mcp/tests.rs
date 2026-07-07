@@ -1885,8 +1885,9 @@ fn run_missing_explicit_entry_uses_marrow_run_error_dto() {
         "entry descriptor errors should use Marrow's run diagnostic DTO: {result}"
     );
     assert!(
-        diagnostic["source_span"].is_object(),
-        "entry descriptor errors should carry the Marrow run source-span field: {result}"
+        diagnostic["source_span"].is_null(),
+        "a user-supplied nonexistent entry is locationless, so its run diagnostic \
+         carries a null source span: {result}"
     );
     assert_eq!(result["output"], "", "{result}");
     assert_run_contract(&result);
