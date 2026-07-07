@@ -128,8 +128,12 @@ fn handle(message: &Json, policy: Policy) -> Option<Json> {
     let id = id?;
 
     match method {
-        "initialize" => Some(with_params(id, message, method, |id, _| {
-            ok(id, server::initialize_result())
+        "initialize" => Some(with_params(id, message, method, |id, params| {
+            let requested = params.get("protocolVersion").and_then(Json::as_str);
+            ok(
+                id,
+                server::initialize_result(server::negotiate_protocol_version(requested)),
+            )
         })),
         // A liveness check the client may send; an empty result is the pong.
         "ping" => Some(with_params(id, message, method, |id, _| ok(id, json!({})))),
@@ -613,6 +617,25 @@ mod tests {
         // runaway run was detached.
         assert_eq!(replies[1]["id"], 2);
         assert_eq!(replies[1]["result"]["isError"], false, "{:?}", replies[1]);
+    }
+
+    #[test]
+    fn initialize_negotiates_the_requested_protocol_version() {
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let replies = drive(
+            &[
+                // A supported version is echoed back.
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26" } }),
+                // A mismatched (unsupported) version falls back to the server's latest.
+                json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": { "protocolVersion": "2020-01-01" } }),
+            ],
+            policy,
+        );
+        assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(
+            replies[1]["result"]["protocolVersion"],
+            server::PROTOCOL_VERSION
+        );
     }
 
     #[test]

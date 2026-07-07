@@ -15,8 +15,30 @@ use marrow_lsp_core::data_explorer::{
 use marrow_lsp_core::mcp::{self, RunMode, SurfaceRouteScope};
 use serde_json::{Value as Json, json};
 
-/// The MCP protocol version this server speaks, echoed in the `initialize` reply.
+/// The latest MCP protocol version this server speaks, and its default when a
+/// client requests none or an unsupported one.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The MCP protocol versions this server accepts, newest first. The tool surface
+/// (`initialize` / `tools/list` / `tools/call`) is stable across this range, and a
+/// newer field such as `structuredContent` is additive, so an older client simply
+/// ignores it.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION, "2025-03-26"];
+
+/// Negotiate the protocol version to answer `initialize` with: echo the client's
+/// requested version when this server supports it, otherwise answer with the
+/// latest supported version and let the client decide whether to proceed. A client
+/// that names no version gets the latest.
+pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(requested) => SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .find(|version| **version == requested)
+            .copied()
+            .unwrap_or(PROTOCOL_VERSION),
+        None => PROTOCOL_VERSION,
+    }
+}
 
 /// The server's runtime policy: whether the data tools may read real stored data
 /// and how long a single `mw_run` may execute. Set once at launch from the
@@ -42,12 +64,12 @@ pub fn server_info() -> Json {
     json!({ "name": "marrow-mcp", "version": env!("CARGO_PKG_VERSION") })
 }
 
-/// The result of an `initialize` request: the protocol version, the server's
-/// capabilities (it serves tools), and its identity. Capabilities advertise only
-/// tools — this server exposes no resources or prompts.
-pub fn initialize_result() -> Json {
+/// The result of an `initialize` request: the negotiated protocol version, the
+/// server's capabilities (it serves tools), and its identity. Capabilities
+/// advertise only tools — this server exposes no resources or prompts.
+pub fn initialize_result(protocol_version: &str) -> Json {
     json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": protocol_version,
         "capabilities": { "tools": {} },
         "serverInfo": server_info(),
     })
@@ -1274,9 +1296,27 @@ mod tests {
 
     #[test]
     fn initialize_result_advertises_tools_and_the_protocol_version() {
-        let result = initialize_result();
+        let result = initialize_result(PROTOCOL_VERSION);
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
         assert!(result["capabilities"]["tools"].is_object());
         assert_eq!(result["serverInfo"]["name"], "marrow-mcp");
+    }
+
+    #[test]
+    fn protocol_version_negotiation_echoes_supported_and_falls_back_otherwise() {
+        // A client that requests a version this server supports gets it echoed.
+        assert_eq!(
+            negotiate_protocol_version(Some(PROTOCOL_VERSION)),
+            PROTOCOL_VERSION
+        );
+        assert_eq!(negotiate_protocol_version(Some("2025-03-26")), "2025-03-26");
+        // A client that requests an unsupported version, or none, gets the latest.
+        assert_eq!(
+            negotiate_protocol_version(Some("2020-01-01")),
+            PROTOCOL_VERSION
+        );
+        assert_eq!(negotiate_protocol_version(None), PROTOCOL_VERSION);
+        // The echoed version is always one the server actually supports.
+        assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&PROTOCOL_VERSION));
     }
 }
