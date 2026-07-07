@@ -25,7 +25,7 @@ const SHELF_SOURCE: &str = "module shelf\n\
 /// A minimal DAP client over a child process's stdio.
 struct Client {
     child: Child,
-    stdin: std::process::ChildStdin,
+    stdin: Option<std::process::ChildStdin>,
     stdout: BufReader<std::process::ChildStdout>,
     seq: i64,
 }
@@ -54,10 +54,22 @@ impl Client {
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Client {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
             seq: 0,
         }
+    }
+
+    /// The child adapter process id, used to locate its isolated-store scratch.
+    fn child_id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Close the adapter's input stream, signalling EOF mid-session, then wait for
+    /// the process to exit so teardown has completed before assertions run.
+    fn close_input_and_wait(&mut self) {
+        self.stdin = None;
+        self.child.wait().expect("adapter exits after input EOF");
     }
 
     /// Send a DAP request and return its sequence number.
@@ -81,9 +93,10 @@ impl Client {
             message["arguments"] = arguments;
         }
         let body = serde_json::to_vec(&message).unwrap();
-        write!(self.stdin, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
-        self.stdin.write_all(&body).unwrap();
-        self.stdin.flush().unwrap();
+        let stdin = self.stdin.as_mut().expect("adapter input is open");
+        write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+        stdin.write_all(&body).unwrap();
+        stdin.flush().unwrap();
         seq
     }
 
@@ -2412,6 +2425,62 @@ fn terminate_while_running_suppresses_later_stop_events() {
         }
     }
     panic!("terminate did not end the session within the bounded message loop");
+}
+
+/// Count the isolated-store scratch directories a given adapter process holds.
+/// The run copies the native store into `marrow-dry-run-store-<pid>-…` and the
+/// owning `ProjectSession` removes it on Drop, so a leftover dir marks a teardown
+/// that never ran.
+fn isolated_store_dir_count(pid: u32) -> usize {
+    let prefix = format!("marrow-dry-run-store-{pid}-");
+    std::fs::read_dir(std::env::temp_dir())
+        .expect("read the system temp dir")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .count()
+}
+
+#[test]
+fn dropping_input_stream_mid_run_tears_down_the_project_session() {
+    let dir = tempfile::tempdir().unwrap();
+    write_native_identity_fixture(dir.path());
+    seed_native_store(dir.path());
+    let mut client = Client::spawn();
+
+    let init = client.request("initialize", json!({}));
+    client.response_for(init);
+
+    let launch = client.request(
+        "launch",
+        json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+
+    let pid = client.child_id();
+    assert!(
+        isolated_store_dir_count(pid) > 0,
+        "the stopped run should hold an isolated-store scratch dir"
+    );
+
+    // Closing input mid-run reaches serve()'s disconnect path. Guaranteed teardown
+    // must still run terminate_session so the run thread unwinds and the
+    // ProjectSession reclaims its scratch dir rather than being orphaned.
+    client.close_input_and_wait();
+    assert_eq!(
+        isolated_store_dir_count(pid),
+        0,
+        "an EOF disconnect must not orphan the run thread's ProjectSession"
+    );
 }
 
 #[test]

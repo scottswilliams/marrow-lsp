@@ -1717,6 +1717,17 @@ impl<W: Write> Session<W> {
     }
 }
 
+/// Guaranteed teardown on every protocol-loop exit — a client terminate, an
+/// error, or an input EOF/broken pipe. Ending the run thread lets its
+/// `ProjectSession` drop, so an isolated-write scratch dir or store lock is never
+/// orphaned by a disconnect. `terminate_session` is idempotent, so a session that
+/// already shut down cleanly drops as a no-op.
+impl<W: Write> Drop for Session<W> {
+    fn drop(&mut self) {
+        self.terminate_session();
+    }
+}
+
 /// Which depth-relative step a client requested.
 enum StepKind {
     Over,
@@ -2328,7 +2339,7 @@ mod tests {
             }),
         );
 
-        let output = String::from_utf8(session.out).unwrap();
+        let output = String::from_utf8(session.out.clone()).unwrap();
         let (_, body) = output.split_once("\r\n\r\n").unwrap();
         let response: Json = serde_json::from_str(body).unwrap();
         let breakpoint = &response["body"]["breakpoints"][0];
@@ -2392,7 +2403,7 @@ mod tests {
             "terminate"
         );
         assert!(session.done());
-        let output = String::from_utf8(session.out).unwrap();
+        let output = String::from_utf8(session.out.clone()).unwrap();
         let response = first_dap_message(&output);
         assert_eq!(response["success"], true, "{response}");
     }
@@ -2413,7 +2424,7 @@ mod tests {
             }),
         );
 
-        let output = String::from_utf8(session.out).unwrap();
+        let output = String::from_utf8(session.out.clone()).unwrap();
         let (_, body) = output.split_once("\r\n\r\n").unwrap();
         let response: Json = serde_json::from_str(body).unwrap();
         let breakpoint = &response["body"]["breakpoints"][0];
