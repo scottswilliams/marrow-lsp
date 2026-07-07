@@ -6,6 +6,7 @@
 //! tool's JSON result, which the transport wraps in the MCP content envelope.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use marrow_lsp_core::data_explorer::{
     DataChildrenRequest, DataReadRequest, DataRequestValidationError, data_key_input_schema,
@@ -17,12 +18,23 @@ use serde_json::{Value as Json, json};
 /// The MCP protocol version this server speaks, echoed in the `initialize` reply.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// The server's runtime policy: whether the data tools may read real stored data.
-/// Set once at launch from the environment / a flag and never mutated, so a tool
-/// can never escalate its own access mid-session.
+/// The server's runtime policy: whether the data tools may read real stored data
+/// and how long a single `mw_run` may execute. Set once at launch from the
+/// environment / flags and never mutated, so a tool can never escalate its own
+/// access or budget mid-session.
 #[derive(Clone, Copy)]
 pub struct Policy {
     pub allow_data: bool,
+    pub run_budget: Duration,
+}
+
+impl Policy {
+    pub fn new(allow_data: bool, run_budget: Duration) -> Self {
+        Self {
+            allow_data,
+            run_budget,
+        }
+    }
 }
 
 /// The `serverInfo` block of the `initialize` reply.
@@ -445,7 +457,7 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
                     return Err(format!("unknown run mode `{other}`; use `run` or `test`"));
                 }
             };
-            Ok(mcp::run(&file, entry, &args, mode))
+            Ok(mcp::run(&file, entry, &args, mode, policy.run_budget))
         }
         other => Err(format!("unknown tool `{other}`")),
     }
@@ -923,13 +935,13 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_is_an_error() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         assert!(call("mw_nope", &json!({}), policy).is_err());
     }
 
     #[test]
     fn retired_data_integrity_tool_is_not_callable() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_data_integrity",
             &json!({ "file": "/nope/x.mw" }),
@@ -943,7 +955,7 @@ mod tests {
 
     #[test]
     fn a_data_tool_refuses_when_the_policy_disallows_it() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         // A nonexistent file is fine: the gate is checked before any project load,
         // so the refusal envelope comes back without touching the filesystem.
         let result = call("mw_saved_roots", &json!({ "file": "/nope/x.mw" }), policy).unwrap();
@@ -1015,13 +1027,13 @@ mod tests {
 
     #[test]
     fn a_missing_required_argument_is_an_error() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         assert!(call("mw_type_at", &json!({ "file": "/x.mw", "line": 0 }), policy).is_err());
     }
 
     #[test]
     fn mw_resource_schema_requires_a_named_resource() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         let error = call("mw_resource_schema", &json!({ "file": "/x.mw" }), policy)
             .expect_err("mw_resource_schema must require a resource name");
         assert!(
@@ -1032,7 +1044,7 @@ mod tests {
 
     #[test]
     fn mw_namespace_complete_rejects_malformed_qualifier_before_project_loading() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         for arguments in [
             json!({ "file": "/nope/project/src/main.mw" }),
             json!({ "file": "/nope/project/src/main.mw", "qualifier": null }),
@@ -1056,7 +1068,7 @@ mod tests {
 
     #[test]
     fn mw_data_children_rejects_invalid_typed_arguments() {
-        let policy = Policy { allow_data: true };
+        let policy = Policy::new(true, mcp::DEFAULT_RUN_BUDGET);
         for arguments in [
             json!({
                 "file": "/nope/project/src/main.mw",
@@ -1090,7 +1102,7 @@ mod tests {
 
     #[test]
     fn mw_data_read_rejects_invalid_typed_arguments() {
-        let policy = Policy { allow_data: true };
+        let policy = Policy::new(true, mcp::DEFAULT_RUN_BUDGET);
         for arguments in [
             json!({
                 "file": "/nope/project/src/main.mw",
@@ -1121,7 +1133,7 @@ mod tests {
 
     #[test]
     fn tool_arguments_reject_non_array_run_args() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         let error = call(
             "mw_run",
             &json!({
@@ -1140,7 +1152,7 @@ mod tests {
 
     #[test]
     fn optional_string_arguments_reject_concrete_non_strings() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         let cases = [
             (
                 "mw_check",
@@ -1168,7 +1180,7 @@ mod tests {
 
     #[test]
     fn optional_string_nulls_remain_absent() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
 
         let result = call(
             "mw_run",
@@ -1201,7 +1213,7 @@ mod tests {
 
     #[test]
     fn mw_run_rejects_numeric_typed_int_args() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_run",
             &json!({
@@ -1222,7 +1234,7 @@ mod tests {
 
     #[test]
     fn mw_run_rejects_malformed_typed_args() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_run",
             &json!({
@@ -1241,7 +1253,7 @@ mod tests {
 
     #[test]
     fn mw_run_rejects_test_mode_args() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_run",
             &json!({

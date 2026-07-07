@@ -20,7 +20,9 @@
 mod server;
 
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
+use marrow_lsp_core::mcp::DEFAULT_RUN_BUDGET;
 use marrow_terminal::{Style, paint_stderr};
 use serde_json::{Value as Json, json};
 
@@ -40,9 +42,7 @@ const INVALID_PARAMS: i64 = -32602;
 const METHOD_NOT_FOUND: i64 = -32601;
 
 fn main() {
-    let policy = Policy {
-        allow_data: data_access_enabled(),
-    };
+    let policy = Policy::new(data_access_enabled(), run_budget());
     // Startup is observable in the agent's stderr/output channel; note whether the
     // data tools are armed so an operator can confirm the gate's state at a glance.
     eprintln!(
@@ -59,6 +59,20 @@ fn main() {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     serve(stdin.lock(), &mut out, policy);
+}
+
+/// The wall-clock budget a single `mw_run` may consume, from
+/// `MARROW_MCP_RUN_BUDGET_SECS` when it names a positive whole number of seconds,
+/// otherwise the default. A zero or unparseable value falls back to the default
+/// so a stray env var cannot make every run fault instantly.
+fn run_budget() -> Duration {
+    match std::env::var("MARROW_MCP_RUN_BUDGET_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+    {
+        Some(seconds) if seconds > 0 => Duration::from_secs(seconds),
+        _ => DEFAULT_RUN_BUDGET,
+    }
 }
 
 /// Whether the data tools may read real stored data: enabled by `--allow-data` on
@@ -529,9 +543,74 @@ mod tests {
             .collect()
     }
 
+    /// Write a minimal pure project whose `spin` entry loops forever, so a run of
+    /// it can only end at its wall-clock budget.
+    fn looping_project() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src/shelf");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("loops.mw"),
+            "module shelf::loops\n\npub fn spin()\n    var i = 0\n    while true\n        i = i + 1\n",
+        )
+        .unwrap();
+        (dir, src.join("loops.mw"))
+    }
+
+    #[test]
+    fn a_looping_run_does_not_wedge_the_server() {
+        // A single infinite mw_run once wedged the single-threaded server forever.
+        // With a run budget the looping call must fault at the deadline and the
+        // very next tool call must still be answered on the same server loop.
+        let (_dir, file) = looping_project();
+        let policy = Policy {
+            allow_data: false,
+            run_budget: std::time::Duration::from_millis(300),
+        };
+        let replies = drive(
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "mw_run",
+                        "arguments": { "file": file.to_str().unwrap(), "entry": "shelf::loops::spin" }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "mw_check",
+                        "arguments": { "source": "module a" }
+                    }
+                }),
+            ],
+            policy,
+        );
+        assert_eq!(replies.len(), 2, "both calls must be answered: {replies:?}");
+        let run = &replies[0]["result"]["structuredContent"];
+        assert_eq!(
+            run["budget_exceeded"], true,
+            "the looping run must fault at the budget: {run}"
+        );
+        // The second call proves the server is not wedged: it answered after the
+        // runaway run was detached.
+        assert_eq!(replies[1]["id"], 2);
+        assert_eq!(replies[1]["result"]["isError"], false, "{:?}", replies[1]);
+    }
+
     #[test]
     fn initialize_then_list_tools_returns_the_catalog() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[
                 json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
@@ -550,7 +629,7 @@ mod tests {
 
     #[test]
     fn tools_call_to_surface_write_refuses_when_data_access_is_disabled() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({
                 "jsonrpc": "2.0",
@@ -595,7 +674,7 @@ mod tests {
 
     #[test]
     fn a_tools_call_to_mw_check_returns_a_diagnostic_envelope() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({
                 "jsonrpc": "2.0",
@@ -931,7 +1010,7 @@ mod tests {
 
     #[test]
     fn supported_methods_reject_concrete_non_object_params() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let cases = [
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [] }),
             json!({ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": "bad" }),
@@ -956,7 +1035,7 @@ mod tests {
 
     #[test]
     fn request_params_null_absent_and_precedence_guards() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[
                 json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
@@ -993,7 +1072,7 @@ mod tests {
 
     #[test]
     fn tools_call_rejects_concrete_non_object_params_and_arguments() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let request = |params: Json| json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
         let mw_check = |arguments: Json| json!({ "name": "mw_check", "arguments": arguments });
         let cases = [
@@ -1020,7 +1099,7 @@ mod tests {
 
     #[test]
     fn tools_call_null_params_and_arguments_remain_absent() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
 
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": null })],
@@ -1070,7 +1149,7 @@ mod tests {
 
     #[test]
     fn an_unknown_method_is_a_method_not_found_error() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "id": 7, "method": "frobnicate" })],
             policy,
@@ -1080,7 +1159,7 @@ mod tests {
 
     #[test]
     fn a_notification_draws_no_reply() {
-        let policy = Policy { allow_data: false };
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })],
             policy,

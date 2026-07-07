@@ -1819,11 +1819,100 @@ fn surface_read_returns_canonical_error_for_write_bodies() {
 #[test]
 fn run_executes_a_pure_function_and_returns_its_value() {
     let (_dir, file) = pure_project();
-    let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("shelf::books::shout"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
     assert_eq!(result["diagnostics"].as_array().unwrap().len(), 0);
     assert!(
         result["output"].as_str().unwrap().contains("loud"),
         "zero-argument run should execute: {result}"
+    );
+    assert_run_contract(&result);
+}
+
+/// A pure project whose entries loop: `spin` never returns, and `chatter` prints
+/// far more than the output cap before returning. Both drive the run watchdog.
+fn looping_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" }, "tests": ["tests"] }"#,
+    )
+    .unwrap();
+    let src = root.join("src/shelf");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("loops.mw"),
+        "\
+module shelf::loops
+
+pub fn spin()
+    var i = 0
+    while true
+        i = i + 1
+
+pub fn chatter()
+    var i = 0
+    while i < 5000
+        print(\"marrow captured output padding line for the cap test\")
+        i = i + 1
+",
+    )
+    .unwrap();
+    let file = src.join("loops.mw");
+    (dir, file)
+}
+
+#[test]
+fn run_reports_budget_exceeded_for_a_looping_entry_within_the_budget() {
+    let (_dir, file) = looping_project();
+    let budget = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let result = run(&file, Some("shelf::loops::spin"), &[], RunMode::Run, budget);
+    let elapsed = started.elapsed();
+    assert_eq!(
+        result["budget_exceeded"], true,
+        "a looping run must report the budget fault: {result}"
+    );
+    assert_eq!(
+        result["diagnostics"][0]["code"], "mcp.run.budget_exceeded",
+        "the fault carries a stable code: {result}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the watchdog must return near the budget, not run forever: {elapsed:?}"
+    );
+    assert_run_contract(&result);
+}
+
+#[test]
+fn run_caps_captured_output_and_flags_truncation() {
+    let (_dir, file) = looping_project();
+    let result = run(
+        &file,
+        Some("shelf::loops::chatter"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
+    assert_eq!(
+        result["output_truncated"], true,
+        "a print-heavy run must flag truncated output: {result}"
+    );
+    let output = result["output"].as_str().unwrap();
+    assert!(
+        output.len() <= 64 * 1024,
+        "captured output must stay under the cap, got {} bytes",
+        output.len()
+    );
+    assert!(
+        output.contains("marrow captured output"),
+        "the retained prefix must hold real output: {result}"
     );
     assert_run_contract(&result);
 }
@@ -1835,6 +1924,7 @@ fn run_rejects_malformed_typed_args_before_loading() {
         Some("app::main"),
         &[json!(1)],
         RunMode::Run,
+        DEFAULT_RUN_BUDGET,
     );
     let message = result["diagnostics"][0]["message"].as_str().unwrap();
     assert!(
@@ -1852,6 +1942,7 @@ fn run_rejects_numeric_typed_int_args_before_loading() {
         Some("app::main"),
         &[json!({ "name": "n", "value": { "kind": "int", "value": 1 } })],
         RunMode::Run,
+        DEFAULT_RUN_BUDGET,
     );
     assert_eq!(
         result["diagnostics"][0]["code"], "mcp.run.args",
@@ -1862,7 +1953,7 @@ fn run_rejects_numeric_typed_int_args_before_loading() {
 #[test]
 fn run_without_entry_reports_the_session_entry_error() {
     let (_dir, file) = pure_project();
-    let result = run(&file, None, &[], RunMode::Run);
+    let result = run(&file, None, &[], RunMode::Run, DEFAULT_RUN_BUDGET);
     let message = result["diagnostics"][0]["message"].as_str().unwrap();
     assert!(
         message.contains("no entry"),
@@ -1875,7 +1966,13 @@ fn run_without_entry_reports_the_session_entry_error() {
 #[test]
 fn run_missing_explicit_entry_uses_marrow_run_error_dto() {
     let (_dir, file) = pure_project();
-    let result = run(&file, Some("shelf::books::missing"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("shelf::books::missing"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
 
     let diagnostic = &result["diagnostics"][0];
     assert_eq!(diagnostic["code"], "run.unknown_function", "{result}");
@@ -1896,7 +1993,13 @@ fn run_missing_explicit_entry_uses_marrow_run_error_dto() {
 #[test]
 fn run_entry_uses_canonical_descriptor_invocation() {
     let (_dir, file) = pure_project();
-    let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("shelf::books::shout"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
     assert_eq!(result["diagnostics"], json!([]), "{result}");
     assert!(
         result["output"].as_str().unwrap().contains("loud"),
@@ -1908,7 +2011,13 @@ fn run_entry_uses_canonical_descriptor_invocation() {
 #[test]
 fn run_fault_preserves_output_printed_before_the_fault() {
     let (_dir, file) = pure_project();
-    let result = run(&file, Some("shelf::books::explode"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("shelf::books::explode"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
 
     assert_eq!(
         result["diagnostics"][0]["code"], "run.assertion",
@@ -1932,7 +2041,13 @@ fn run_uses_fresh_memory_for_shelf_fixture_without_establishing_catalog_identity
     std::fs::copy(fixture.join("marrow.json"), dir.path().join("marrow.json")).unwrap();
     std::fs::copy(fixture.join("src/shelf/sample.mw"), src.join("sample.mw")).unwrap();
     let file = src.join("sample.mw");
-    let result = run(&file, Some("shelf::sample::main"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("shelf::sample::main"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
     assert_eq!(result["diagnostics"], json!([]), "{result}");
     assert!(
         result["output"].as_str().unwrap().contains("Small Gods"),
@@ -1955,6 +2070,7 @@ fn run_accepts_typed_string_arguments() {
             "value": { "kind": "string", "value": "Ada" }
         })],
         RunMode::Run,
+        DEFAULT_RUN_BUDGET,
     );
 
     assert_eq!(result["diagnostics"], json!([]), "{result}");
@@ -2004,7 +2120,13 @@ pub fn shout(): int
     )
     .unwrap();
 
-    let result = run(&file, Some("shelf::books::shout"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("shelf::books::shout"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
 
     let diagnostic = &result["diagnostics"][0];
     assert_eq!(result["output"], "", "{result}");
@@ -2036,7 +2158,13 @@ fn run_does_not_touch_the_real_store() {
     let lock_file = dir.path().join(CATALOG_FILE_NAME);
     let lock_before = std::fs::read(&lock_file).expect("seed helper writes committed lock");
 
-    let result = run(&file, Some("app::counter::show"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("app::counter::show"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
     assert_eq!(result["diagnostics"], json!([]), "{result}");
     assert!(
         result["output"].as_str().unwrap().contains("absent"),
@@ -2086,7 +2214,13 @@ fn run_and_test_leave_the_real_store_byte_identical() {
 
     let before = fingerprint(&store_file);
 
-    let run_result = run(&file, Some("app::counter::show"), &[], RunMode::Run);
+    let run_result = run(
+        &file,
+        Some("app::counter::show"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
     assert_eq!(run_result["diagnostics"], json!([]), "{run_result}");
     assert_eq!(
         fingerprint(&store_file),
@@ -2095,7 +2229,7 @@ fn run_and_test_leave_the_real_store_byte_identical() {
     );
 
     // A test-mode invocation must also touch nothing, even when it discovers no tests.
-    let _ = run(&file, None, &[], RunMode::Test);
+    let _ = run(&file, None, &[], RunMode::Test, DEFAULT_RUN_BUDGET);
     assert_eq!(
         fingerprint(&store_file),
         before,
@@ -2107,7 +2241,13 @@ fn run_and_test_leave_the_real_store_byte_identical() {
 fn run_reports_marrow_entry_footprint_and_open_mode_facts() {
     let (_dir, file) = native_counter_project(1..=1);
 
-    let result = run(&file, Some("app::counter::show"), &[], RunMode::Run);
+    let result = run(
+        &file,
+        Some("app::counter::show"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
 
     assert_eq!(result["diagnostics"], json!([]), "{result}");
     let facts = &result["runFacts"];
@@ -2224,7 +2364,7 @@ fn test_mode_does_not_inspect_the_real_store() {
     unreadable.set_mode(0o0);
     std::fs::set_permissions(&store_file, unreadable).expect("make native store unreadable");
 
-    let result = run(&file, None, &[], RunMode::Test);
+    let result = run(&file, None, &[], RunMode::Test, DEFAULT_RUN_BUDGET);
 
     assert_eq!(result["diagnostics"], json!([]), "{result}");
     let tests = result["tests"].as_array().unwrap();
@@ -2276,7 +2416,7 @@ pub fn fails()
 ",
     )
     .unwrap();
-    let result = run(&file, None, &[], RunMode::Test);
+    let result = run(&file, None, &[], RunMode::Test, DEFAULT_RUN_BUDGET);
     let tests = result["tests"].as_array().unwrap();
     assert_eq!(tests.len(), 2, "two test functions discovered: {result}");
     let doubles = tests
@@ -2321,6 +2461,7 @@ fn run_test_mode_rejects_args() {
         None,
         &[json!({ "name": "value", "value": { "kind": "int", "value": "1" } })],
         RunMode::Test,
+        DEFAULT_RUN_BUDGET,
     );
     assert_eq!(
         result["diagnostics"][0]["code"], "mcp.run.args",

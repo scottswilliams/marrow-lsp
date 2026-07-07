@@ -21,6 +21,8 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use marrow_check::{
     tooling::{
@@ -851,25 +853,113 @@ pub enum RunMode {
     Test,
 }
 
-/// `mw_run`: execute Marrow to confirm behavior — always sandboxed.
+/// The wall-clock budget a single `mw_run` is allowed before the watchdog gives
+/// up on it. Marrow imposes no per-loop step cap — terminating a loop is the
+/// program author's contract — so a `while true` entry runs forever; without a
+/// deadline it wedges the single-threaded transport permanently. The operator
+/// overrides this at launch. Cooperatively unwinding a wedged run in place is
+/// upstream work; until it exists, an over-budget run is detached, not stopped.
+pub const DEFAULT_RUN_BUDGET: Duration = Duration::from_secs(30);
+
+/// The ceiling on a run's captured `print` output. A loop that prints can emit
+/// unbounded text, so the sink stops appending past this many bytes and the
+/// envelope carries `output_truncated: true` to tell the agent output was cut.
+const OUTPUT_CAP: usize = 64 * 1024;
+
+/// `mw_run`: execute Marrow to confirm behavior — always sandboxed and always
+/// bounded by `budget`.
 ///
-/// **Run mode** checks the project (`analyze_project` via the workspace), then
-/// evaluates `entry` through Marrow's fresh-memory project session under a
-/// locked-down [`Host`]: a fixed clock and a captured log only — no filesystem,
-/// no environment, no maintenance. Typed `args` are decoded from the wire and
-/// admitted by Marrow's entry descriptor for the current checked program. The
-/// result carries Marrow's typed run envelope, including the returned value when
-/// present, captured `output`, and diagnostics.
+/// **Run mode** checks the project, then evaluates `entry` through Marrow's
+/// fresh-memory project session under a locked-down [`Host`] (a fixed clock and a
+/// captured log only), returning Marrow's typed run envelope. **Test mode** runs
+/// each discovered test over its own fresh store; `entry` is ignored and `args`
+/// are rejected. The real store is never opened in either mode.
 ///
-/// **Test mode** opens Marrow's test project session, then invokes every
-/// discovered test case under the same locked host. Marrow gives each test its
-/// own fresh in-memory store. `entry` is ignored; `args` are only accepted in run
-/// mode.
-///
-/// The project's real store is never opened in either mode, so an agent can run
-/// code with no risk to managed data.
-pub fn run(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
-    with_contract(run_result(file, entry, args, mode), run_contract())
+/// The evaluation runs on a watchdog thread so a run that loops past the budget
+/// is detached and reported as `budget_exceeded`, leaving the transport free to
+/// answer the next call. The detached thread holds only a fresh in-memory store,
+/// so abandoning it leaks no durable lock; it ends at process exit.
+pub fn run(
+    file: &Path,
+    entry: Option<&str>,
+    args: &[Json],
+    mode: RunMode,
+    budget: Duration,
+) -> Json {
+    with_contract(
+        run_within_budget(file, entry, args, mode, budget),
+        run_contract(),
+    )
+}
+
+/// Run the evaluation on a detached watchdog thread and wait up to `budget`. The
+/// whole run — project check, session open, and invoke — happens on the thread,
+/// so a program that wedges anywhere in that path cannot block the transport. A
+/// thread that panics closes its channel without sending, which surfaces as a
+/// typed tool fault rather than a hang.
+fn run_within_budget(
+    file: &Path,
+    entry: Option<&str>,
+    args: &[Json],
+    mode: RunMode,
+    budget: Duration,
+) -> Json {
+    let file = file.to_path_buf();
+    let entry = entry.map(str::to_string);
+    let args = args.to_vec();
+    let (sender, receiver) = mpsc::channel();
+    let handle = std::thread::Builder::new()
+        .name("marrow-mcp-run".to_string())
+        .spawn(move || {
+            let _ = sender.send(run_result(&file, entry.as_deref(), &args, mode));
+        })
+        .expect("spawning the run watchdog thread");
+    match receiver.recv_timeout(budget) {
+        Ok(result) => result,
+        // The run outlived its budget. Abandon the thread (it keeps running on its
+        // own fresh in-memory store until the process exits) so the transport is
+        // freed, and report the deadline as a typed fault.
+        Err(RecvTimeoutError::Timeout) => {
+            drop(handle);
+            run_budget_exceeded(budget)
+        }
+        // The thread dropped its sender without a result: it panicked. That is a
+        // tool-internal fault, not a Marrow diagnostic, so it is surfaced as one.
+        Err(RecvTimeoutError::Disconnected) => run_thread_faulted(),
+    }
+}
+
+/// The typed envelope for a run that exceeded its wall-clock budget: a stable
+/// `budget_exceeded` marker an agent can key on, plus a diagnostic that renders
+/// in the one-line summary. `tool_error` marks it a tool-internal fault so the
+/// transport can set `isError`.
+fn run_budget_exceeded(budget: Duration) -> Json {
+    json!({
+        "diagnostics": [{
+            "code": "mcp.run.budget_exceeded",
+            "message": format!(
+                "run exceeded the {}s wall-clock budget and was detached",
+                budget.as_secs()
+            ),
+        }],
+        "output": "",
+        "budget_exceeded": true,
+        "budget_seconds": budget.as_secs(),
+        "tool_error": true,
+    })
+}
+
+/// The typed envelope for a run whose watchdog thread panicked: a tool-internal
+/// fault, distinct from a program that legitimately failed to check.
+fn run_thread_faulted() -> Json {
+    json!({
+        "diagnostics": [{
+            "code": "mcp.run.thread_faulted",
+            "message": "the run thread ended without a result",
+        }],
+        "output": "",
+        "tool_error": true,
+    })
 }
 
 fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
@@ -946,8 +1036,10 @@ fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json
         arguments: args,
     };
     let host = locked_host();
-    let mut output = String::new();
-    let result = match session.invoke(SessionEntry::protocol(invocation, &host, &mut output)) {
+    let mut output = CappedOutput::new();
+    let invoke = session.invoke(SessionEntry::protocol(invocation, &host, &mut output));
+    let (output, truncated) = output.into_parts();
+    let result = match invoke {
         Ok(result) => {
             let output_for_error = output.clone();
             match marrow_json::run_output_to_json(&result, output) {
@@ -965,7 +1057,58 @@ fn run_entry(root: &Path, entry: Option<&str>, args: Vec<EntryArgument>) -> Json
             output,
         )),
     };
-    with_run_facts(result, run_facts)
+    with_run_facts(flag_output_truncated(result, truncated), run_facts)
+}
+
+/// A [`marrow_run::RunOutputSink`] that retains at most [`OUTPUT_CAP`] bytes. Once
+/// full it drops further writes and records that it truncated, so an unbounded
+/// print loop cannot grow captured output without bound while the run executes.
+struct CappedOutput {
+    text: String,
+    truncated: bool,
+}
+
+impl CappedOutput {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            truncated: false,
+        }
+    }
+
+    fn into_parts(self) -> (String, bool) {
+        (self.text, self.truncated)
+    }
+}
+
+impl marrow_run::RunOutputSink for CappedOutput {
+    fn write(&mut self, text: &str) {
+        if self.truncated {
+            return;
+        }
+        let remaining = OUTPUT_CAP - self.text.len();
+        if text.len() <= remaining {
+            self.text.push_str(text);
+            return;
+        }
+        // Keep the largest whole-character prefix that fits, so the retained text
+        // is always valid UTF-8 rather than a split code point.
+        let mut end = remaining;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&text[..end]);
+        self.truncated = true;
+    }
+}
+
+/// Mark a run envelope whose captured output was cut off at [`OUTPUT_CAP`], so an
+/// agent reading the (bounded) output knows more was produced.
+fn flag_output_truncated(mut result: Json, truncated: bool) -> Json {
+    if let (true, Some(object)) = (truncated, result.as_object_mut()) {
+        object.insert("output_truncated".to_string(), json!(true));
+    }
+    result
 }
 
 fn entry_run_facts_json(session: &ProjectSession) -> Option<Json> {
