@@ -181,6 +181,18 @@ fn with_contract(mut result: Json, contract: Json) -> Json {
     result
 }
 
+/// Mark a result as a tool-internal failure — a transport, IO, project-load, or
+/// resource-limit fault, as opposed to a Marrow diagnostic or a domain operation
+/// error the tool answered with. The transport reads this bit to set the MCP
+/// `isError` flag, so an agent keying on `isError` sees tool faults but not a
+/// program that legitimately failed to check.
+fn tool_error(mut result: Json) -> Json {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("tool_error".to_string(), json!(true));
+    }
+    result
+}
+
 thread_local! {
     /// One [`Workspace`] kept for the life of the transport process, so back-to-back
     /// tool calls on an unchanged project reuse its checked analysis instead of a
@@ -343,7 +355,7 @@ pub fn check(file: Option<&Path>, source: Option<&str>) -> Json {
             json!({ "diagnostics": diagnostics })
         }) {
             Ok(result) => result,
-            Err(error) => json!({ "diagnostics": [], "error": error }),
+            Err(error) => tool_error(json!({ "diagnostics": [], "error": error })),
         },
         None => check_snippet(source.unwrap_or_default()),
     }
@@ -391,7 +403,7 @@ pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
         json!({ "type": ty.map(|ty| render_type(&ty)) })
     }) {
         Ok(result) => result,
-        Err(error) => json!({ "type": Json::Null, "error": error }),
+        Err(error) => tool_error(json!({ "type": Json::Null, "error": error })),
     }
 }
 
@@ -435,7 +447,7 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(empty_completion_result(Some(error)), contract),
+        Err(error) => with_contract(tool_error(empty_completion_result(Some(error))), contract),
     }
 }
 
@@ -478,7 +490,10 @@ pub fn namespace_complete(file: &Path, qualifier: &[String]) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(empty_namespace_completion_result(Some(error)), contract),
+        Err(error) => with_contract(
+            tool_error(empty_namespace_completion_result(Some(error))),
+            contract,
+        ),
     }
 }
 
@@ -578,12 +593,12 @@ pub fn resource_schema(file: &Path, name: &str) -> Json {
     match result {
         Ok(result) => with_contract(result, contract),
         Err(error) => with_contract(
-            json!({
+            tool_error(json!({
                 "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
                 "resources": [],
                 "diagnostics": [],
                 "error": error,
-            }),
+            })),
             contract,
         ),
     }
@@ -615,7 +630,7 @@ pub fn surface_routes(file: &Path, scope: SurfaceRouteScope) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(empty_surface_route_manifest(error), contract),
+        Err(error) => with_contract(tool_error(empty_surface_route_manifest(error)), contract),
     }
 }
 
@@ -660,7 +675,10 @@ pub fn surface_read(file: &Path, operation: Json, allow_data: bool) -> Result<Js
     });
     Ok(match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(json!({ "available": false, "error": error }), contract),
+        Err(error) => with_contract(
+            tool_error(json!({ "available": false, "error": error })),
+            contract,
+        ),
     })
 }
 
@@ -697,7 +715,10 @@ pub fn surface_write(file: &Path, operation: Json, allow_data: bool) -> Result<J
     });
     Ok(match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(json!({ "available": false, "error": error }), contract),
+        Err(error) => with_contract(
+            tool_error(json!({ "available": false, "error": error })),
+            contract,
+        ),
     })
 }
 
@@ -733,7 +754,7 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
     match result {
         Ok(result) => with_contract(result, contract),
         Err(error) => with_contract(
-            json!({ "available": false, "roots": [], "error": error }),
+            tool_error(json!({ "available": false, "roots": [], "error": error })),
             contract,
         ),
     }
@@ -789,7 +810,7 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
         Err(error) => {
             let mut value = unavailable;
             value["error"] = json!(error);
-            with_contract(value, contract)
+            with_contract(tool_error(value), contract)
         }
     }
 }
@@ -844,7 +865,7 @@ pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Jso
         Err(error) => {
             let mut value = unavailable;
             value["error"] = json!(error);
-            with_contract(value, contract)
+            with_contract(tool_error(value), contract)
         }
     }
 }
@@ -961,7 +982,7 @@ fn run_within_budget(
 /// in the one-line summary. `tool_error` marks it a tool-internal fault so the
 /// transport can set `isError`.
 fn run_budget_exceeded(budget: Duration) -> Json {
-    json!({
+    tool_error(json!({
         "diagnostics": [{
             "code": "mcp.run.budget_exceeded",
             "message": format!(
@@ -972,21 +993,19 @@ fn run_budget_exceeded(budget: Duration) -> Json {
         "output": "",
         "budget_exceeded": true,
         "budget_seconds": budget.as_secs(),
-        "tool_error": true,
-    })
+    }))
 }
 
 /// The typed envelope for a run whose watchdog thread panicked: a tool-internal
 /// fault, distinct from a program that legitimately failed to check.
 fn run_thread_faulted() -> Json {
-    json!({
+    tool_error(json!({
         "diagnostics": [{
             "code": "mcp.run.thread_faulted",
             "message": "the run thread ended without a result",
         }],
         "output": "",
-        "tool_error": true,
-    })
+    }))
 }
 
 fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) -> Json {
@@ -1000,7 +1019,9 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
 
     let root = match load_project_for_run(file) {
         Ok(root) => root,
-        Err(error) => return json!({ "diagnostics": [{ "message": error }], "output": "" }),
+        Err(error) => {
+            return tool_error(json!({ "diagnostics": [{ "message": error }], "output": "" }));
+        }
     };
 
     match mode {

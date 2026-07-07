@@ -203,14 +203,21 @@ fn handle_tools_call(id: Json, params: &Json, policy: Policy) -> Json {
 /// one-line human-readable summary as a text content block (for clients that read
 /// text and to keep the agent's context small) plus the full value as
 /// `structuredContent` (for clients that read structured output). `isError` is
-/// false — a tool that ran is a successful call even when its result reports a
-/// Marrow diagnostic; the agent reads the detail from the structured content.
+/// true only when the core marked the result a tool-internal fault (a transport,
+/// IO, project-load, or resource-limit failure); a tool that ran and reports a
+/// Marrow diagnostic or a domain operation error is a successful call, so an agent
+/// keying on `isError` sees real faults but not a program that failed to check.
 fn tool_result(name: &str, result: &Json) -> Json {
     json!({
         "content": [{ "type": "text", "text": summarize(name, result) }],
         "structuredContent": result,
-        "isError": false,
+        "isError": is_tool_error(result),
     })
+}
+
+/// Whether the core flagged this result a tool-internal fault (see [`tool_result`]).
+fn is_tool_error(result: &Json) -> bool {
+    result.get("tool_error").and_then(Json::as_bool) == Some(true)
 }
 
 /// A concise, single-line summary of a tool result for the text content block.
@@ -606,6 +613,59 @@ mod tests {
         // runaway run was detached.
         assert_eq!(replies[1]["id"], 2);
         assert_eq!(replies[1]["result"]["isError"], false, "{:?}", replies[1]);
+    }
+
+    #[test]
+    fn is_error_flags_a_tool_fault_but_not_a_check_failure() {
+        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let replies = drive(
+            &[
+                // An unreadable project (no marrow.json anywhere up the path) is a
+                // tool-internal fault: the tool could not load or check.
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "mw_check",
+                        "arguments": { "file": "/no/such/project/src/main.mw" }
+                    }
+                }),
+                // A program that simply fails to check is a successful call: the
+                // agent reads the diagnostics from the structured content.
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "mw_check",
+                        "arguments": { "source": "module a\n\npub fn broken(:\n" }
+                    }
+                }),
+            ],
+            policy,
+        );
+        let fault = &replies[0]["result"];
+        assert_eq!(
+            fault["isError"], true,
+            "an unreadable project is a tool fault: {fault}"
+        );
+        assert!(
+            fault["structuredContent"]["error"].is_string(),
+            "the fault carries an error string: {fault}"
+        );
+        let check = &replies[1]["result"];
+        assert_eq!(
+            check["isError"], false,
+            "a program that fails to check is not a tool fault: {check}"
+        );
+        assert!(
+            !check["structuredContent"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "the check-failure still reports diagnostics: {check}"
+        );
     }
 
     #[test]
