@@ -84,9 +84,10 @@ enum StoreProbe {
     /// accepted catalog is the first-run `None`, cached so a fresh checkout does not re-probe.
     Absent,
     /// A native store file is present but could not be opened or probed right now (a racing
-    /// writer holds the redb lock, a permissions blip). The cache must not key on or serve
-    /// identity it could not confirm, so this recompute neither updates the cache nor adopts a
-    /// hit; the next recompute re-probes once the file is readable again.
+    /// writer holds the redb lock, a permissions blip). The cache is left untouched: a bound
+    /// cache retains its last-accepted identity (a transient lock is not a store reset), and an
+    /// unbound one serves the first-run `None` without caching it. Either way the next recompute
+    /// re-probes once the file is readable again, so a store that genuinely advanced re-binds.
     Unavailable,
     /// The store's commit identity matches the cache; the cached snapshot stands, and the
     /// expensive catalog-snapshot read was skipped. The identity is already the cache's key,
@@ -181,9 +182,14 @@ impl CatalogBindingCache {
             StoreProbe::Fresh { identity, accepted } => self.adopt(Some(identity), accepted),
             StoreProbe::Absent if self.bound && self.key.is_none() => {}
             StoreProbe::Absent => self.adopt(None, None),
-            // A present-but-unconfirmable store neither updates nor is served as a hit:
-            // bind the first-run `None` for this recompute without caching it, so the next
-            // recompute re-probes rather than serving identity we could not read.
+            // A present-but-unconfirmable store (a writer holds the redb flock) is a transient
+            // lock, not evidence the store reset. Retain the last-accepted identity by serving
+            // the untouched cache rather than flipping to the first-run `None`, which would blank
+            // the editor's Saved Resource Inspector on any concurrent CLI writer. The cache is
+            // left unchanged so the next readable recompute re-probes and re-binds if the store
+            // genuinely advanced. Before the cache has ever bound there is nothing to retain, so
+            // this first recompute seeds the first-run `None` without caching it.
+            StoreProbe::Unavailable if self.bound => {}
             StoreProbe::Unavailable => {
                 return self.bind_uncached(root);
             }
@@ -480,7 +486,7 @@ store ^counter(id: int): Counter
     }
 
     #[test]
-    fn a_store_locked_by_a_writer_binds_the_first_run_without_caching_then_re_binds() {
+    fn a_store_locked_by_a_writer_retains_the_last_accepted_identity_then_re_binds() {
         let (dir, config, store_path) = stamped_native_project();
         let root = dir.path();
         let mut cache = CatalogBindingCache::new();
@@ -491,12 +497,18 @@ store ^counter(id: int): Counter
             "a stamped store binds its committed accepted catalog"
         );
         assert_eq!(cache.binds(), 1, "the first recompute reads the store");
+        let accepted_key = cache.key.clone();
+        assert!(
+            accepted_key.is_some(),
+            "the first bind records the store's commit identity"
+        );
 
-        // A racing writer holding the redb file lock mid-debounce makes the read-only open fail
-        // over a store file that genuinely exists, and advances the committed identity before it
-        // releases. The locked recompute must accept the first-run `None` without poisoning the
-        // cache: the writer's commit is the authority, so the cache must neither serve the first
-        // bind's snapshot as confirmed nor stick on the `None` once the lock releases.
+        // A racing writer holds the redb file lock mid-debounce, so the read-only open fails over
+        // a store file that genuinely exists. A transient lock is not evidence the store reset, so
+        // the recompute must serve the last-accepted identity rather than blanking it to the
+        // first-run `None` — which would empty the editor's Saved Resource Inspector on any
+        // concurrent CLI writer. The cache is left untouched so the next readable recompute
+        // re-probes and re-binds if the store genuinely advanced.
         let writer = SealedStore::open(&store_path, AccessMode::Create)
             .unwrap()
             .into_store();
@@ -512,23 +524,27 @@ store ^counter(id: int): Counter
             .unwrap();
 
         let blocked = cache.bind(root, &config).unwrap();
-        assert!(
-            blocked.accepted.is_none(),
-            "an unconfirmable store binds the first-run None for this recompute"
+        assert_eq!(
+            blocked.accepted, first.accepted,
+            "a transient writer lock retains the last-accepted catalog, never resetting to the \
+             first-run None"
         );
         assert_eq!(
             cache.binds(),
             1,
-            "a present-but-locked store must not update or poison the cache"
+            "retaining the cached snapshot is not a re-bind"
         );
         assert_eq!(
             cache.accepted, first.accepted,
             "the cached accepted snapshot from before the lock is left untouched"
         );
+        assert_eq!(
+            cache.key, accepted_key,
+            "the cached commit identity key is retained, never reset to None while unavailable"
+        );
 
         // The writer releases its lock; the next recompute re-probes, sees the advanced commit
-        // identity, and re-binds the real committed catalog rather than serving the first-run
-        // None it returned while the store was unreadable or the now-superseded first snapshot.
+        // identity, and re-binds the committed catalog.
         drop(writer);
         let after = cache.bind(root, &config).unwrap();
         assert!(
