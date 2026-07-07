@@ -1,4 +1,4 @@
-//! Whole-workspace no-local-semantics gate (roadmap S5.4).
+//! Whole-workspace no-local-semantics gate.
 //!
 //! `marrow-lsp` never re-decides `.mw` semantics: parsing, checking, typing, schema, catalog,
 //! storage, and runtime facts come only from the canonical marrow crates, and each editor surface
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use support::{production_rust_sources, production_source};
 
 /// Where a surface denial applies, relative to a crate's `src` directory.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Scope {
     /// The module entry file `<name>.rs` plus every file under `<name>/`.
     Module(&'static str),
@@ -465,10 +465,12 @@ fn no_surface_reimplements_marrow_semantics_locally() {
 
     // Surface-scoped denials: refused across each surface's whole module.
     for surface in SURFACES {
+        let mut matched = 0usize;
         for file in &files {
             if file.krate != surface.krate || !surface.scope.covers(&file.rel) {
                 continue;
             }
+            matched += 1;
             for &needle in surface.denied {
                 if file.production.contains(needle) {
                     violations.push(format!(
@@ -478,6 +480,16 @@ fn no_surface_reimplements_marrow_semantics_locally() {
                 }
             }
         }
+        // A surface whose scope matches no file would pass vacuously — the compile-time
+        // existence the old `include_str!` scans gave. A rename that orphans the scope must
+        // fail here, not silently drop the surface's denials.
+        assert!(
+            matched > 0,
+            "surface scope {:?} in {} matched no production file — the scope is stale (a rename?), \
+             so its denials pass vacuously",
+            surface.scope,
+            surface.krate
+        );
     }
 
     assert!(
