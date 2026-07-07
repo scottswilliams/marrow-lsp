@@ -83,6 +83,12 @@ pub struct Workspace {
     /// empty program; completion and other schema-driven requests fall back to
     /// this last good program so a stray syntax error does not blank their results.
     last_program: Option<CheckedProgram>,
+    /// The most recent parse-clean, non-empty analysis and its binding index,
+    /// retained so hover and navigation survive a recompute that drops the active
+    /// module to a parse error. Consulted only when the latest analysis cannot answer;
+    /// it is self-consistent — snapshot, spans, and index come from one analysis — so
+    /// a fallback answer is a coherent fact about a prior generation of the program.
+    last_good: Option<LastGoodAnalysis>,
     /// The binding index for [`Self::latest`], built lazily on the first
     /// navigation request and reused by go-to-definition, find-references, and
     /// rename. A recompute keeps this only when the analysis generation and project
@@ -118,6 +124,26 @@ impl BindingIndexKey {
             generation: snapshot.generation(),
         }
     }
+}
+
+/// A retained parse-clean analysis and its binding index, kept coherent as a pair so
+/// a fallback read resolves spans and bindings from the same generation.
+struct LastGoodAnalysis {
+    snapshot: AnalysisSnapshot,
+    index: BindingIndex,
+}
+
+/// Which retained analysis a hover or navigation read should draw from. Both variants
+/// read a self-consistent snapshot-plus-index pair.
+#[derive(Clone, Copy)]
+pub enum ReadSource {
+    /// The latest analysis. When it matches the editor-visible source these are current
+    /// facts; otherwise they are the most recent good facts while a recompute for newer
+    /// source is in flight.
+    Latest,
+    /// The retained last-good analysis, used when the latest one dropped the target
+    /// module to a parse error.
+    LastGood,
 }
 
 /// A parse-clean, non-empty analysis: the checker kept every module (no file has a
@@ -337,7 +363,9 @@ impl Workspace {
         })
     }
 
-    /// Store a freshly analyzed snapshot as the latest analysis.
+    /// Store a freshly analyzed snapshot as the latest, retaining the outgoing analysis
+    /// as last-good when the new one dropped a module to a parse error so hover and
+    /// navigation still resolve through the error.
     pub fn commit_recompute(&mut self, documents_generation: u64, snapshot: AnalysisSnapshot) {
         let project = self
             .project
@@ -352,6 +380,26 @@ impl Workspace {
             self.last_program = Some(snapshot.program.clone());
         }
 
+        if snapshot_is_good(&snapshot) {
+            // The latest analysis is itself a sound read source, so no retained
+            // fallback is needed; keeping a stale one would only risk serving it.
+            self.last_good = None;
+        } else if let Some(previous) = self.latest.take() {
+            // The new analysis dropped a module to a parse error. Keep the outgoing
+            // good analysis and its index so reads fall back to prior-generation facts
+            // instead of blanking, mirroring completion's last-good behavior.
+            if snapshot_is_good(&previous) {
+                let index = self
+                    .binding_index
+                    .take()
+                    .unwrap_or_else(|| build_binding_index(&previous));
+                self.last_good = Some(LastGoodAnalysis {
+                    snapshot: previous,
+                    index,
+                });
+            }
+        }
+
         let keep_binding_index = self.binding_index_key.as_ref() == Some(&binding_index_key);
         self.latest = Some(snapshot);
         if !keep_binding_index {
@@ -361,23 +409,41 @@ impl Workspace {
         self.latest_documents_generation = Some(documents_generation);
     }
 
-    /// Whether the latest analysis can answer a hover or navigation read for `file`:
-    /// it is parse-clean, non-empty, and analyzed that file. Builds and caches its
-    /// binding index so the immutable read that follows can borrow it. The analysis
-    /// may be prior-generation while a recompute for newer source is in flight; the
-    /// caller reads it as best-effort facts, and a finished recompute swaps in the
-    /// new snapshot atomically.
-    pub fn latest_reads_file(&mut self, file: &Path) -> bool {
-        let readable = self.latest.as_ref().is_some_and(|snapshot| {
+    /// Pick the analysis a hover or navigation read should answer from: the latest when
+    /// it is parse-clean, non-empty, and analyzed `file`, otherwise the retained
+    /// last-good analysis. `None` only before any good analysis exists or when neither
+    /// contains `file`. Builds and caches the latest snapshot's binding index when it is
+    /// chosen. The latest may be prior-generation while a recompute is in flight; the
+    /// caller reads it as best-effort facts, and a finished recompute swaps in the new
+    /// snapshot atomically.
+    pub fn choose_read_source(&mut self, file: &Path) -> Option<ReadSource> {
+        if self.latest.as_ref().is_some_and(|snapshot| {
             snapshot_is_good(snapshot) && snapshot_contains_file(snapshot, file)
-        });
-        if readable {
+        }) {
             self.binding_index();
+            return Some(ReadSource::Latest);
         }
-        readable
+        if self
+            .last_good
+            .as_ref()
+            .is_some_and(|good| snapshot_contains_file(&good.snapshot, file))
+        {
+            return Some(ReadSource::LastGood);
+        }
+        None
     }
 
-    /// Drop cached checked facts while keeping the resolved project config.
+    /// The last-good snapshot and its binding index, borrowed together for a read that
+    /// chose [`ReadSource::LastGood`].
+    pub fn last_good_facts(&self) -> Option<(&AnalysisSnapshot, &BindingIndex)> {
+        self.last_good
+            .as_ref()
+            .map(|good| (&good.snapshot, &good.index))
+    }
+
+    /// Drop cached checked facts while keeping the resolved project config. The
+    /// last-good fallback is kept: it is a valid prior-generation analysis, so a watcher
+    /// invalidation refreshes on the next recompute without blanking reads meanwhile.
     pub fn invalidate_analysis(&mut self) {
         self.latest = None;
         self.last_program = None;
@@ -386,9 +452,11 @@ impl Workspace {
         self.latest_documents_generation = None;
     }
 
-    /// Drop cached checked facts and force the next recompute to re-read config.
+    /// Drop cached checked facts and force the next recompute to re-read config. A config
+    /// change can reshape every fact, so the last-good fallback is dropped too.
     pub fn invalidate_project(&mut self) {
         self.project = None;
+        self.last_good = None;
         self.invalidate_analysis();
     }
 }

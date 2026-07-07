@@ -975,10 +975,10 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if !analysis.workspace.latest_reads_file(&path) {
+        let Some(source) = analysis.workspace.choose_read_source(&path) else {
             return Ok(None);
-        }
-        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        };
+        let (snapshot, index) = read_facts(&analysis.workspace, source);
         Ok(hover::hover_with_index(snapshot, index, &path, offset))
     }
 
@@ -1006,10 +1006,10 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if !analysis.workspace.latest_reads_file(&path) {
+        let Some(source) = analysis.workspace.choose_read_source(&path) else {
             return Ok(None);
-        }
-        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        };
+        let (snapshot, index) = read_facts(&analysis.workspace, source);
         let indices = snapshot_indices(snapshot, &documents);
         Ok(
             navigation::definition(snapshot, index, &indices, &path, offset)
@@ -1039,10 +1039,10 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if !analysis.workspace.latest_reads_file(&path) {
+        let Some(source) = analysis.workspace.choose_read_source(&path) else {
             return Ok(None);
-        }
-        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        };
+        let (snapshot, index) = read_facts(&analysis.workspace, source);
         let indices = snapshot_indices(snapshot, &documents);
         Ok(navigation::references(
             snapshot,
@@ -1077,10 +1077,10 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if !analysis.workspace.latest_reads_file(&path) {
+        let Some(source) = analysis.workspace.choose_read_source(&path) else {
             return Ok(None);
-        }
-        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        };
+        let (snapshot, index) = read_facts(&analysis.workspace, source);
         let indices = snapshot_indices(snapshot, &documents);
         Ok(navigation::prepare_rename(index, &indices, &path, offset)
             .map(PrepareRenameResponse::Range))
@@ -1109,10 +1109,10 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if !analysis.workspace.latest_reads_file(&path) {
+        let Some(source) = analysis.workspace.choose_read_source(&path) else {
             return Ok(None);
-        }
-        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        };
+        let (snapshot, index) = read_facts(&analysis.workspace, source);
         let indices = snapshot_indices(snapshot, &documents);
         match navigation::rename(index, &indices, &path, offset, &new_name) {
             Ok(edit) => Ok(Some(edit)),
@@ -1358,18 +1358,24 @@ fn to_core_position(position: Position) -> CorePosition {
     }
 }
 
-/// Borrow the latest snapshot and its binding index for a hover or navigation read,
-/// after [`Workspace::latest_reads_file`] confirmed both are available. They come
-/// from one analysis, so spans and bindings agree.
-fn latest_read_facts(
+/// Borrow the snapshot and binding index for a hover or navigation read from the
+/// analysis [`Workspace::choose_read_source`] selected. Both come from one analysis, so
+/// spans and bindings agree.
+fn read_facts(
     workspace: &Workspace,
+    source: marrow_lsp_core::workspace::ReadSource,
 ) -> (&AnalysisSnapshot, &marrow_lsp_core::workspace::BindingIndex) {
-    (
-        workspace.latest().expect("latest is readable"),
-        workspace
-            .binding_index_cached()
-            .expect("readable latest built its binding index"),
-    )
+    match source {
+        marrow_lsp_core::workspace::ReadSource::Latest => (
+            workspace.latest().expect("chose the latest snapshot"),
+            workspace
+                .binding_index_cached()
+                .expect("choosing latest built its binding index"),
+        ),
+        marrow_lsp_core::workspace::ReadSource::LastGood => workspace
+            .last_good_facts()
+            .expect("chose the last-good analysis"),
+    }
 }
 
 struct WatchedPathChange {
@@ -1829,7 +1835,7 @@ mod tests {
         let mut workspace = Workspace::new();
 
         assert!(
-            !workspace.latest_reads_file(&file),
+            workspace.choose_read_source(&file).is_none(),
             "request paths must not synchronously compute missing analysis"
         );
         assert!(
@@ -2185,6 +2191,129 @@ mod tests {
 
         gate.release().await;
         recompute.await.unwrap();
+    }
+
+    /// A one-line parse error drops its module from the checked program, leaving the
+    /// latest analysis unusable for reads. Hover and definition on a symbol the error
+    /// did not touch must still resolve, from the retained last-good analysis, rather
+    /// than blanking for the whole file until the error is fixed.
+    #[tokio::test]
+    async fn hover_and_definition_survive_a_module_losing_parse_error() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        let clean = "module app\n\npub fn helper(): int\n    return 1\n\n\
+                     pub fn f(): int\n    return helper()\n";
+        std::fs::write(&file, clean).unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(url.clone(), clean.to_string(), Some(1));
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+
+        let run = |backend: &Backend, file: &std::path::Path| {
+            let documents = Arc::clone(&backend.documents);
+            let analysis = Arc::clone(&backend.analysis);
+            let analysis_run = Arc::clone(&backend.analysis_run);
+            let diagnostics = Arc::clone(&backend.diagnostics);
+            let publish = Arc::clone(&backend.diagnostics_publish);
+            let pending = Arc::clone(&backend.pending_workspace_invalidation);
+            let client = backend.client.clone();
+            let file = file.to_path_buf();
+            async move {
+                Backend::recompute_and_publish(
+                    RecomputeContext {
+                        documents: &documents,
+                        analysis: &analysis,
+                        analysis_run: &analysis_run,
+                        diagnostics: &diagnostics,
+                        diagnostics_publish: &publish,
+                        pending_workspace_invalidation: &pending,
+                        client: &client,
+                    },
+                    &file,
+                    None,
+                )
+                .await;
+            }
+        };
+
+        // A first recompute leaves a good analysis.
+        run(backend, &file).await;
+
+        // A one-line error at the end of the file leaves `helper` and its call
+        // untouched but breaks the parse, so the module is dropped.
+        let broken = format!("{clean}\npub fn broken(\n");
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.change_with_version(&url, broken, Some(2));
+        }
+        run(backend, &file).await;
+
+        // The scenario must genuinely be the module-lost case: the latest analysis
+        // cannot serve this file, so reads fall back to the retained last-good one.
+        {
+            let mut analysis = backend.analysis.lock().await;
+            assert!(
+                matches!(
+                    analysis.workspace.choose_read_source(&file),
+                    Some(marrow_lsp_core::workspace::ReadSource::LastGood)
+                ),
+                "the parse error must force reads onto the retained last-good analysis"
+            );
+        }
+
+        let call_position = Position {
+            line: 6,
+            character: 12,
+        };
+        let hover = <Backend as LanguageServer>::hover(
+            backend,
+            HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: url.clone() },
+                    position: call_position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            hover.is_some(),
+            "hover on an unaffected symbol must resolve through a one-line error, not blank"
+        );
+
+        let definition = <Backend as LanguageServer>::goto_definition(
+            backend,
+            GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: url.clone() },
+                    position: call_position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            definition.is_some(),
+            "definition on an unaffected symbol must resolve through a one-line error, not blank"
+        );
     }
 
     #[tokio::test]
