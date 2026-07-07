@@ -6,7 +6,7 @@
 //! declarations into a project-wide list an editor's "go to symbol in workspace"
 //! searches. Nothing here re-parses or re-checks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lsp_types::{DocumentSymbol, Location, SymbolInformation, SymbolKind, Url};
@@ -80,8 +80,13 @@ fn document_symbol_kind(kind: DocumentSymbolKind) -> SymbolKind {
 /// Checked functions, constants, and catalog declarations as a flat,
 /// project-wide list for "go to symbol in workspace".
 pub fn workspace_symbols(snapshot: &AnalysisSnapshot, search_text: &str) -> Vec<SymbolInformation> {
-    let sources = WorkspaceSources::new(snapshot);
-    source_symbols_matching(snapshot, search_text)
+    let matches = source_symbols_matching(snapshot, search_text);
+    // Build a line index only for the files a symbol actually matched in, not every project
+    // file: a broad search over a large project touches a handful of files, so indexing all of
+    // them (including files with zero matches) would be wasted work on the request path.
+    let sources =
+        WorkspaceSources::for_files(snapshot, matches.iter().map(|symbol| symbol.file.as_path()));
+    matches
         .into_iter()
         .filter_map(|symbol| {
             let source = sources.get(&symbol.file)?;
@@ -101,10 +106,15 @@ struct WorkspaceSources {
 }
 
 impl WorkspaceSources {
-    fn new(snapshot: &AnalysisSnapshot) -> Self {
+    fn for_files<'a>(
+        snapshot: &AnalysisSnapshot,
+        files: impl IntoIterator<Item = &'a Path>,
+    ) -> Self {
+        let wanted: HashSet<&Path> = files.into_iter().collect();
         let by_file = snapshot
             .files
             .iter()
+            .filter(|file| wanted.contains(file.path.as_path()))
             .filter_map(|file| {
                 let url = Url::from_file_path(&file.path).ok()?;
                 Some((

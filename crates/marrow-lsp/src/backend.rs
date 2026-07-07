@@ -1657,7 +1657,12 @@ fn snapshot_indices<'a>(
 ) -> SnapshotIndices<'a> {
     let files = workspace
         .latest()
-        .map(|snapshot| snapshot.files.iter().map(|file| file.path.as_path()))
+        .map(|snapshot| {
+            snapshot
+                .files
+                .iter()
+                .map(|file| (file.path.as_path(), file.source.as_str()))
+        })
         .into_iter()
         .flatten();
     SnapshotIndices::new(files, |path| documents.line_index_for_path(path))
