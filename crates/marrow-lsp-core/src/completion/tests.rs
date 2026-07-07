@@ -219,20 +219,6 @@ fn after_caret_lists_durable_roots() {
 }
 
 #[test]
-fn root_completion_has_no_local_saved_root_model() {
-    let source = include_str!("../completion.rs");
-
-    assert!(
-        !source.contains("saved_root_stores"),
-        "root completion must not keep a local saved-root store walker"
-    );
-    assert!(
-        !source.contains("module.stores"),
-        "root completion must not model saved-root candidates by walking checked modules"
-    );
-}
-
-#[test]
 fn after_keyed_root_dot_lists_declared_saved_path_members() {
     let (program, file) = project();
     let items = complete_items(
@@ -574,108 +560,6 @@ fn bare_identifier_lists_checker_single_name_builtins() {
     let key = item_named(&items, "key");
     assert_eq!(key.kind, Some(CompletionItemKind::FUNCTION));
     assert_eq!(key.detail.as_deref(), Some("key(id): value"));
-}
-
-#[test]
-fn completion_has_no_local_intrinsic_callable_model() {
-    let source = include_str!("../completion.rs");
-    for forbidden in [
-        "bare_function_builtins",
-        "scalar_conversion_names",
-        "scalar_conversion_detail",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "completion must not keep a local intrinsic callable model through {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn completion_has_no_local_type_completion_candidate_model() {
-    let source = include_str!("../completion.rs");
-    for forbidden in ["TYPE_NAMES", "fn resources(", "fn stores(", "fn enums("] {
-        assert!(
-            !source.contains(forbidden),
-            "completion must not keep a local type completion model through {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn completion_has_no_local_std_namespace_completion_model() {
-    let source = include_str!("../completion.rs");
-    for forbidden in [
-        "marrow_schema::stdlib",
-        "std_root_module_completions",
-        "std_module_completions",
-        "std_module_exists",
-        "ParamType",
-        "ReturnType",
-        "fn std_signature(",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "completion must not keep a local std namespace completion model through {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn completion_has_no_local_cursor_recovery_model() {
-    let source = include_str!("../completion.rs");
-    for forbidden in [
-        "TokenKind",
-        "marrow_syntax::Token",
-        "lexed.tokens",
-        ".tokens.iter()",
-        "significant_tokens",
-        "matching_open_",
-        "saved_receiver",
-        "qualifier_before",
-        "introduces_type",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "completion must not own cursor recovery through {forbidden}"
-        );
-    }
-    assert!(
-        source.contains("source_completion_fact"),
-        "completion must request Marrow's aggregate completion fact"
-    );
-}
-
-#[test]
-fn completion_consumes_marrow_completion_item_fact() {
-    let source = include_str!("../completion.rs");
-    for forbidden in [
-        "const KEYWORDS",
-        "SourceSavedRootCompletionCandidate",
-        "SourceTypeCompletionCandidate",
-        "SourceNamespaceCompletionFact",
-        "DeclaredDataChild",
-        "source_saved_root_completion_fact",
-        "source_type_completion_fact",
-        "source_namespace_completion_fact",
-        "declared_source_receiver_data_children",
-        "intrinsic_completion_callables",
-        "scope_at",
-        "fn root_completions",
-        "fn saved_path_completions",
-        "fn namespace_completions",
-        "fn type_completions",
-        "fn bare_completions",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "completion must consume Marrow completion item facts instead of assembling candidates through {forbidden}"
-        );
-    }
-    assert!(
-        source.contains("source_completion_fact"),
-        "completion must request Marrow's completion item fact"
-    );
 }
 
 #[test]

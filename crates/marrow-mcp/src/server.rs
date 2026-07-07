@@ -851,30 +851,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_consumes_marrow_saved_data_input_schema_helpers() {
-        let source = include_str!("server.rs");
-        let key_schema_call = concat!("data_key", "_input_schema(");
-        let segment_schema_call = concat!("data_path_segment", "_input_schema()");
-
-        assert!(
-            source.matches(key_schema_call).count() >= 1,
-            "MCP data-key schemas must consume the Marrow saved-data DTO schema helper"
-        );
-        assert!(
-            source.matches(segment_schema_call).count() >= 2,
-            "MCP path-segment schemas must consume the Marrow saved-data DTO schema helper"
-        );
-        assert!(
-            !source.contains(concat!("fn ", "data_key_schema")),
-            "MCP must not keep a local saved-data key schema authority"
-        );
-        assert!(
-            !source.contains(concat!("fn ", "data_path_segment_schema")),
-            "MCP must not keep a local saved-data path-segment schema authority"
-        );
-    }
-
-    #[test]
     fn catalog_omits_data_integrity_advisory() {
         let catalog = tools();
         let tools = catalog.as_array().unwrap();

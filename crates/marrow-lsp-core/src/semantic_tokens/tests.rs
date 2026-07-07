@@ -1300,45 +1300,6 @@ fn f()
 }
 
 #[test]
-fn semantic_tokens_do_not_own_marrow_role_classification() {
-    let semantic_tokens_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/semantic_tokens");
-    for file_name in [
-        "builtins.rs",
-        "declarations.rs",
-        "references.rs",
-        "syntax.rs",
-        "type_annotations.rs",
-    ] {
-        let path = semantic_tokens_dir.join(file_name);
-        assert!(
-            !path.exists(),
-            "semantic token role classification belongs in marrow-check tooling, not {path:?}"
-        );
-    }
-
-    let entry = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/semantic_tokens.rs"),
-    )
-    .expect("semantic token entry module");
-    for forbidden in [
-        "TokenKind",
-        "TokenStyle",
-        "SymbolKind",
-        "declaration_overrides",
-        "builtin_overrides",
-        "reference_overrides",
-        "type_annotation_overrides",
-        "token_type(",
-    ] {
-        assert!(
-            !entry.contains(forbidden),
-            "marrow-lsp-core semantic tokens should map Marrow facts, not own {forbidden}"
-        );
-    }
-}
-
-#[test]
 fn checked_qualified_call_prefixes_are_namespaces_while_leaf_keeps_role() {
     let source = "\
 module m

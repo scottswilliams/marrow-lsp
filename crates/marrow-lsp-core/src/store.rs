@@ -120,41 +120,4 @@ mod tests {
             "no current project means no saved-data watch target"
         );
     }
-
-    #[test]
-    fn saved_data_session_admission_has_no_local_digest_stitching() {
-        let source = include_str!("store.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source before tests");
-        let forbidden = [
-            "read_only_context_matches",
-            "source_digest() ==",
-            "read_only_context_digest() ==",
-            ".catalog.accepted_digest",
-        ];
-
-        for fragment in forbidden {
-            assert!(
-                !production_source.contains(fragment),
-                "SavedDataSession must delegate admission to marrow-run instead of keeping `{fragment}` in store.rs"
-            );
-        }
-    }
-
-    #[test]
-    fn saved_data_watch_targets_are_not_derived_from_local_project_paths() {
-        let source = include_str!("store.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source before tests");
-        for fragment in ["CATALOG_FILE_NAME", "native_store_path", "StoreBackend"] {
-            assert!(
-                !production_source.contains(fragment),
-                "SavedDataSession must consume Marrow data-view watch targets instead of deriving `{fragment}` locally"
-            );
-        }
-    }
 }

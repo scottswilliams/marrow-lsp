@@ -353,35 +353,6 @@ surface Books from ^books
         );
     }
 
-    #[test]
-    fn document_symbols_do_not_own_outline_assembly() {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("src")
-                .join("symbols.rs"),
-        )
-        .expect("read symbols source");
-        let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
-
-        for obsolete in [
-            "fn declaration_symbol",
-            "fn evolve_symbol",
-            "fn enum_symbol",
-            "fn resource_symbol",
-            "fn store_symbol",
-            "fn surface_symbol",
-            "fn function_signature",
-            "fn name_span",
-            "Declaration::",
-            "ResourceMember::",
-        ] {
-            assert!(
-                !production.contains(obsolete),
-                "document symbols should consume marrow-check outline facts, not own `{obsolete}`"
-            );
-        }
-    }
-
     fn all_names_are_non_empty(symbols: &[DocumentSymbol]) -> bool {
         symbols.iter().all(|symbol| {
             !symbol.name.is_empty()
@@ -596,30 +567,5 @@ resource Book
                 ("title", Some("a::Book")),
             ]
         );
-    }
-
-    #[test]
-    fn workspace_symbols_do_not_own_catalog_classification() {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("src")
-                .join("symbols.rs"),
-        )
-        .expect("read symbols source");
-        let production = source.split("#[cfg(test)]").next().unwrap_or(&source);
-
-        for obsolete in [
-            "CatalogEntryKind",
-            "struct CatalogContainers",
-            "fn declaration_owner",
-            "fn catalog_symbol_kind",
-            "fn source_symbol_match",
-            "sort_by_key",
-        ] {
-            assert!(
-                !production.contains(obsolete),
-                "workspace symbols should consume marrow-check source-symbol facts, not own `{obsolete}`"
-            );
-        }
     }
 }

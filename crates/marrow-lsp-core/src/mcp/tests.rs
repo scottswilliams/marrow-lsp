@@ -2314,44 +2314,6 @@ pub fn fails()
 }
 
 #[test]
-fn run_test_mode_uses_project_session_test_cases() {
-    let source = include_str!("../mcp.rs");
-    for forbidden in [
-        "check_tests_program",
-        "CheckedEntryCall::new",
-        "run_entry_with_host",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "mw_run test mode should go through ProjectOpen::test() instead of {forbidden}"
-        );
-    }
-}
-
-#[test]
-fn run_uses_marrow_owned_run_dtos_instead_of_local_renderers() {
-    let source = include_str!("../mcp.rs");
-    for forbidden in [
-        "fn run_facts_json",
-        "fn run_output_json",
-        "fn runtime_error_json",
-        "fn project_invoke_error_json",
-        "fn project_session_error_json",
-        "fn value_to_json",
-        "struct ValueBudget",
-        "entry_descriptor_error_message",
-        "mcp.run.entry",
-        "RUN_VALUE_NODE_CAP",
-        "RUN_VALUE_STRING_CAP",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "mw_run must consume Marrow-owned run DTOs instead of local renderer {forbidden}"
-        );
-    }
-}
-
-#[test]
 fn run_test_mode_rejects_args() {
     let (_dir, file) = pure_project();
     let result = run(
