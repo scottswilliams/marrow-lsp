@@ -1091,8 +1091,12 @@ fn goto_definition_jumps_from_a_use_to_its_binding() {
     let _ = server.0.kill();
 }
 
+/// A fresh edit leaves the latest analysis prior-generation until the debounced
+/// recompute lands. Rather than blank the editor for that window, a cursor read
+/// serves the prior-generation facts, so navigation on a symbol the edit left
+/// untouched resolves immediately after the keystroke.
 #[test]
-fn definition_returns_null_when_open_buffer_is_newer_than_cached_snapshot() {
+fn definition_has_no_post_edit_dead_zone() {
     let mut server = Server(
         Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
             .stdin(Stdio::piped())
@@ -1121,7 +1125,8 @@ fn definition_returns_null_when_open_buffer_is_newer_than_cached_snapshot() {
 
     let file = fixture_root().join("src/shelf/sample.mw");
     let uri = url::Url::from_file_path(&file).unwrap().to_string();
-    let clean = "module shelf::sample\n\npub fn f(): int\n    const n: int = 1\n    return n\n";
+    let clean = "module shelf::sample\n\npub fn helper(): int\n    return 1\n\n\
+                 pub fn f(): int\n    return helper()\n";
     send(
         &mut stdin,
         &json!({
@@ -1139,7 +1144,10 @@ fn definition_returns_null_when_open_buffer_is_newer_than_cached_snapshot() {
     );
     let _ = wait_for_diagnostic_or_empty(&mut stdout, &uri, Duration::from_secs(10));
 
-    let edited = "module shelf::sample\n\npub fn f(): int\n    const m: int = 1\n    return 1\n";
+    // Edit `helper`'s body only. The `helper` declaration and its call site are
+    // untouched, so navigation on the call resolves through the edit window.
+    let edited = "module shelf::sample\n\npub fn helper(): int\n    return 2\n\n\
+                  pub fn f(): int\n    return helper()\n";
     send(
         &mut stdin,
         &json!({
@@ -1160,22 +1168,29 @@ fn definition_returns_null_when_open_buffer_is_newer_than_cached_snapshot() {
             "method": "textDocument/definition",
             "params": {
                 "textDocument": { "uri": uri },
-                "position": { "line": 4, "character": 11 }
+                "position": { "line": 6, "character": 12 }
             }
         }),
     );
     let response = wait_for_response(&mut stdout, 2, Duration::from_secs(10));
     assert_eq!(
-        response["result"],
-        Value::Null,
-        "definition must not return facts from the pre-edit snapshot: {response}"
+        response["result"]["uri"], uri,
+        "definition on an unaffected symbol must resolve right after an edit, not blank: {response}"
+    );
+    assert_eq!(
+        response["result"]["range"]["start"]["line"], 2,
+        "definition lands on the `helper` declaration line: {response}"
     );
 
     let _ = server.0.kill();
 }
 
+/// Closing an overlay that contributed a symbol invalidates the binding facts. The
+/// prior-generation fallback may resolve the vanished symbol during the debounce
+/// window, but once the recompute lands the analysis swaps in atomically and the
+/// now-unresolved reference yields no location.
 #[test]
-fn definition_returns_null_when_open_source_overlay_closes_before_recompute() {
+fn definition_reflects_a_closed_overlay_after_the_recompute_lands() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(
@@ -1294,6 +1309,10 @@ pub fn call(): int
             }
         }),
     );
+    // The close reverts defs.mw to its on-disk `answer`, so the recompute reports an
+    // unresolved `defs::renamed()` in app.mw. Waiting on that publish guarantees the
+    // fresh analysis has swapped in before the query.
+    let _ = wait_for_diagnostic_or_empty(&mut stdout, &app_uri, Duration::from_secs(10));
     send(
         &mut stdin,
         &json!({
@@ -1310,7 +1329,7 @@ pub fn call(): int
     assert_eq!(
         after_close["result"],
         Value::Null,
-        "closed overlay contributors must invalidate binding facts before the debounced recompute: {after_close}"
+        "once the recompute lands, the closed overlay's vanished symbol resolves to no location: {after_close}"
     );
 
     let _ = server.0.kill();

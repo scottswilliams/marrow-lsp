@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
+use marrow_catalog::{CatalogLock, CatalogMetadata};
 use marrow_check::{
     AnalysisGeneration, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
 };
@@ -116,6 +117,51 @@ impl BindingIndexKey {
             root: project.root.clone(),
             generation: snapshot.generation(),
         }
+    }
+}
+
+/// A parse-clean, non-empty analysis: the checker kept every module (no file has a
+/// parse error) and the program has content. Only such an analysis is a sound source
+/// for hover and navigation reads or for last-good retention.
+fn snapshot_is_good(snapshot: &AnalysisSnapshot) -> bool {
+    !snapshot.program.modules.is_empty()
+        && !snapshot.files.iter().any(|file| file.parsed.has_errors())
+}
+
+fn snapshot_contains_file(snapshot: &AnalysisSnapshot, file: &Path) -> bool {
+    snapshot.files.iter().any(|analyzed| analyzed.path == file)
+}
+
+/// Owned inputs for one project analysis, severed from the [`Workspace`] so the
+/// CPU-bound check can run off the async runtime's pump without holding the
+/// workspace lock. Prepared under the lock, analyzed with no lock held, then
+/// committed back under the lock.
+pub struct PreparedRecompute {
+    root: PathBuf,
+    config: ProjectConfig,
+    sources: ProjectSources,
+    accepted: Option<CatalogMetadata>,
+    lock: Option<CatalogLock>,
+    documents_generation: u64,
+}
+
+impl PreparedRecompute {
+    /// Run the project checker. Pure CPU work with no shared state, safe to run on
+    /// a blocking thread while read handlers serve last-good facts.
+    pub fn analyze(self) -> Result<AnalysisSnapshot, marrow_project::DiscoverError> {
+        analyze_project(
+            &self.root,
+            &self.config,
+            &self.sources,
+            self.accepted.as_ref(),
+            self.lock.as_ref(),
+        )
+    }
+
+    /// The document generation these inputs were captured at, carried through to
+    /// the commit so freshness stays keyed to the analyzed source world.
+    pub fn documents_generation(&self) -> u64 {
+        self.documents_generation
     }
 }
 
@@ -252,6 +298,21 @@ impl Workspace {
         file: &Path,
         documents: &DocumentAnalysisSnapshot,
     ) -> Result<&AnalysisSnapshot, WorkspaceError> {
+        let prepared = self.prepare_recompute(file, documents)?;
+        let generation = prepared.documents_generation();
+        let snapshot = prepared.analyze().map_err(WorkspaceError::Discover)?;
+        self.commit_recompute(generation, snapshot);
+        Ok(self.latest.as_ref().expect("commit stored a snapshot"))
+    }
+
+    /// Resolve the project, bind its committed catalog, and overlay the open
+    /// buffers into an owned analysis job the caller runs off the lock. The project
+    /// and catalog-binding cache are updated here, under the caller's lock.
+    pub fn prepare_recompute(
+        &mut self,
+        file: &Path,
+        documents: &DocumentAnalysisSnapshot,
+    ) -> Result<PreparedRecompute, WorkspaceError> {
         if !self
             .project
             .as_ref()
@@ -261,20 +322,27 @@ impl Workspace {
             self.catalog_binding = CatalogBindingCache::new();
         }
         let project = self.project.as_ref().expect("project resolved just above");
-
         let sources = overlay_snapshot(&project.root, documents);
         let binding = self
             .catalog_binding
             .bind(&project.root, &project.config)
             .map_err(WorkspaceError::AnalysisContext)?;
-        let snapshot = analyze_project(
-            &project.root,
-            &project.config,
-            &sources,
-            binding.accepted.as_ref(),
-            binding.lock.as_ref(),
-        )
-        .map_err(WorkspaceError::Discover)?;
+        Ok(PreparedRecompute {
+            root: project.root.clone(),
+            config: project.config.clone(),
+            sources,
+            accepted: binding.accepted,
+            lock: binding.lock,
+            documents_generation: documents.generation(),
+        })
+    }
+
+    /// Store a freshly analyzed snapshot as the latest analysis.
+    pub fn commit_recompute(&mut self, documents_generation: u64, snapshot: AnalysisSnapshot) {
+        let project = self
+            .project
+            .as_ref()
+            .expect("prepared a project to analyze");
         let binding_index_key = BindingIndexKey::new(project, &snapshot);
 
         // Retain the last program that had modules, so a later recompute whose
@@ -283,14 +351,30 @@ impl Workspace {
         if !snapshot.program.modules.is_empty() {
             self.last_program = Some(snapshot.program.clone());
         }
+
         let keep_binding_index = self.binding_index_key.as_ref() == Some(&binding_index_key);
         self.latest = Some(snapshot);
         if !keep_binding_index {
             self.binding_index = None;
             self.binding_index_key = None;
         }
-        self.latest_documents_generation = Some(documents.generation());
-        Ok(self.latest.as_ref().expect("just stored a snapshot"))
+        self.latest_documents_generation = Some(documents_generation);
+    }
+
+    /// Whether the latest analysis can answer a hover or navigation read for `file`:
+    /// it is parse-clean, non-empty, and analyzed that file. Builds and caches its
+    /// binding index so the immutable read that follows can borrow it. The analysis
+    /// may be prior-generation while a recompute for newer source is in flight; the
+    /// caller reads it as best-effort facts, and a finished recompute swaps in the
+    /// new snapshot atomically.
+    pub fn latest_reads_file(&mut self, file: &Path) -> bool {
+        let readable = self.latest.as_ref().is_some_and(|snapshot| {
+            snapshot_is_good(snapshot) && snapshot_contains_file(snapshot, file)
+        });
+        if readable {
+            self.binding_index();
+        }
+        readable
     }
 
     /// Drop cached checked facts while keeping the resolved project config.

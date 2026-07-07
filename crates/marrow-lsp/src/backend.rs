@@ -41,6 +41,10 @@ pub struct Backend {
     client: Client,
     documents: Arc<Mutex<Documents>>,
     analysis: Arc<Mutex<AnalysisState>>,
+    /// Serializes recomputes so the CPU-bound analysis runs off the async pump —
+    /// with the `analysis` data lock free for read handlers — while commits still
+    /// land in order and only one analysis runs at a time.
+    analysis_run: Arc<Mutex<()>>,
     diagnostics: Arc<Mutex<DiagnosticsTracker>>,
     diagnostics_publish: Arc<Mutex<()>>,
     /// Bumped for edits whose project root is not known yet. Once a root is known,
@@ -206,6 +210,7 @@ struct PublishedDiagnostics {
 struct RecomputeContext<'a> {
     documents: &'a Mutex<Documents>,
     analysis: &'a Mutex<AnalysisState>,
+    analysis_run: &'a Mutex<()>,
     diagnostics: &'a Mutex<DiagnosticsTracker>,
     diagnostics_publish: &'a Mutex<()>,
     pending_workspace_invalidation: &'a AtomicU8,
@@ -294,6 +299,7 @@ impl Backend {
                 #[cfg(test)]
                 recompute_gate: None,
             })),
+            analysis_run: Arc::new(Mutex::new(())),
             diagnostics: Arc::new(Mutex::new(DiagnosticsTracker::new())),
             diagnostics_publish: Arc::new(Mutex::new(())),
             edit_seq: Arc::new(AtomicU64::new(0)),
@@ -420,6 +426,7 @@ impl Backend {
             .then(|| self.edit_seq.fetch_add(1, Ordering::SeqCst) + 1);
         let documents = Arc::clone(&self.documents);
         let analysis = Arc::clone(&self.analysis);
+        let analysis_run = Arc::clone(&self.analysis_run);
         let diagnostics = Arc::clone(&self.diagnostics);
         let edit_seq = Arc::clone(&self.edit_seq);
         let diagnostics_publish = Arc::clone(&self.diagnostics_publish);
@@ -446,6 +453,7 @@ impl Backend {
                 RecomputeContext {
                     documents: &documents,
                     analysis: &analysis,
+                    analysis_run: &analysis_run,
                     diagnostics: &diagnostics,
                     diagnostics_publish: &diagnostics_publish,
                     pending_workspace_invalidation: &pending_workspace_invalidation,
@@ -471,112 +479,164 @@ impl Backend {
             let documents = context.documents.lock().await;
             documents.analysis_snapshot()
         };
-        let mut analysis = context.analysis.lock().await;
-        let AnalysisState {
-            workspace,
-            #[cfg(test)]
-            recompute_gate,
-        } = &mut *analysis;
+        // Serialize analyses so the off-pump check commits in order and only one
+        // runs at a time, without holding the workspace data lock across it.
+        let _run_guard = context.analysis_run.lock().await;
+
+        // Prepare under the data lock: resolve the project, bind the catalog, and
+        // overlay the open buffers — cheap next to the check itself.
         #[cfg(test)]
-        if let Some(gate) = recompute_gate.clone() {
+        let gate;
+        let prepared = {
+            let mut analysis = context.analysis.lock().await;
+            let AnalysisState {
+                workspace,
+                #[cfg(test)]
+                recompute_gate,
+            } = &mut *analysis;
+            #[cfg(test)]
+            {
+                gate = recompute_gate.clone();
+            }
+            let pending = context
+                .pending_workspace_invalidation
+                .swap(0, Ordering::SeqCst);
+            apply_pending_workspace_invalidation(pending, workspace);
+            match workspace.prepare_recompute(file, &analysis_snapshot) {
+                Ok(prepared) => prepared,
+                // A buffer outside any project, or a project that cannot be walked,
+                // has no fresh source diagnostics to publish. Explicit filesystem
+                // deletions clear tracked diagnostics at the watcher boundary; a
+                // transient config or discovery failure leaves the last diagnostics
+                // visible rather than hiding them.
+                Err(error) => {
+                    log_recompute_error(file, &error);
+                    return;
+                }
+            }
+        };
+
+        // Park a fault-injected slow analysis with no lock held, so read handlers
+        // serve last-good facts while the check is in flight.
+        #[cfg(test)]
+        if let Some(gate) = gate {
             gate.hold().await;
         }
+
+        // Run the checker off the async pump; the workspace data lock is free for
+        // read handlers throughout.
+        let generation = prepared.documents_generation();
+        let snapshot = match tokio::task::spawn_blocking(move || prepared.analyze()).await {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(error)) => {
+                log_recompute_error(
+                    file,
+                    &marrow_lsp_core::workspace::WorkspaceError::Discover(error),
+                );
+                return;
+            }
+            Err(join_error) => std::panic::resume_unwind(join_error.into_panic()),
+        };
+
+        // Commit and publish under the data lock.
+        let mut analysis = context.analysis.lock().await;
         let pending = context
             .pending_workspace_invalidation
             .swap(0, Ordering::SeqCst);
-        apply_pending_workspace_invalidation(pending, workspace);
-        match workspace.recompute_from_snapshot(file, &analysis_snapshot) {
-            Ok(_) => {
-                let publish_guard = context.diagnostics_publish.lock().await;
-                let pending = context
-                    .pending_workspace_invalidation
-                    .swap(0, Ordering::SeqCst);
-                if pending != 0 {
-                    apply_pending_workspace_invalidation(pending, workspace);
-                    return;
-                }
-                if !documents_match_analysis_snapshot(context.documents, &analysis_snapshot).await {
-                    workspace.invalidate_analysis();
-                    return;
-                }
-                let project = workspace
-                    .project()
-                    .expect("recompute succeeded with a project")
-                    .clone();
-                let snapshot = workspace
-                    .latest()
-                    .expect("recompute just stored a snapshot")
-                    .clone();
-                let root = project.root.clone();
-                let urls = open_analysis_document_urls(&analysis_snapshot, &project);
-                let versions = open_document_versions(&analysis_snapshot);
-                let mut diagnostics_by_url = snapshot_to_diagnostics(&snapshot, &urls, |url| {
-                    analysis_snapshot.get(url).map(|document| &document.index)
-                });
-                drop(analysis);
-                if context
-                    .pending_workspace_invalidation
-                    .load(Ordering::SeqCst)
-                    != 0
-                {
-                    drop(publish_guard);
-                    let mut analysis = context.analysis.lock().await;
-                    let pending = context
-                        .pending_workspace_invalidation
-                        .swap(0, Ordering::SeqCst);
-                    apply_pending_workspace_invalidation(pending, &mut analysis.workspace);
-                    return;
-                }
-                let published = {
-                    let mut diagnostics = context.diagnostics.lock().await;
-                    let epoch = root_epoch
-                        .as_ref()
-                        .filter(|(scheduled_root, _)| scheduled_root == &root)
-                        .map(|(_, epoch)| *epoch)
-                        .unwrap_or_else(|| diagnostics.epoch(&root));
-                    if !diagnostics.reconcile_success(&root, epoch, &mut diagnostics_by_url) {
-                        None
-                    } else {
-                        Some(
-                            diagnostics_by_url
-                                .into_iter()
-                                .map(|(url, diagnostics)| PublishedDiagnostics {
-                                    version: versions.get(&url).copied().flatten(),
-                                    url,
-                                    diagnostics,
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                    }
-                };
-                if let Some(published) = published {
-                    for published in published {
-                        context
-                            .client
-                            .publish_diagnostics(
-                                published.url,
-                                published.diagnostics,
-                                published.version,
-                            )
-                            .await;
-                    }
-                }
+        if pending != 0 {
+            // A watched-file change invalidated the world mid-analysis; this
+            // snapshot is for a superseded source set. Apply the invalidation and
+            // let the next recompute rebuild.
+            apply_pending_workspace_invalidation(pending, &mut analysis.workspace);
+            return;
+        }
+        analysis.workspace.commit_recompute(generation, snapshot);
+
+        let publish_guard = context.diagnostics_publish.lock().await;
+        let pending = context
+            .pending_workspace_invalidation
+            .swap(0, Ordering::SeqCst);
+        if pending != 0 {
+            apply_pending_workspace_invalidation(pending, &mut analysis.workspace);
+            return;
+        }
+        if !documents_match_analysis_snapshot(context.documents, &analysis_snapshot).await {
+            // The buffers changed while analyzing. The committed snapshot stays as a
+            // prior-generation read fallback, but its diagnostics are stale, so the
+            // newer edit's recompute publishes the current set.
+            return;
+        }
+        let workspace = &analysis.workspace;
+        let project = workspace
+            .project()
+            .expect("recompute succeeded with a project")
+            .clone();
+        let snapshot = workspace
+            .latest()
+            .expect("recompute just stored a snapshot")
+            .clone();
+        let root = project.root.clone();
+        let urls = open_analysis_document_urls(&analysis_snapshot, &project);
+        let versions = open_document_versions(&analysis_snapshot);
+        let mut diagnostics_by_url = snapshot_to_diagnostics(&snapshot, &urls, |url| {
+            analysis_snapshot.get(url).map(|document| &document.index)
+        });
+        drop(analysis);
+        if context
+            .pending_workspace_invalidation
+            .load(Ordering::SeqCst)
+            != 0
+        {
+            drop(publish_guard);
+            let mut analysis = context.analysis.lock().await;
+            let pending = context
+                .pending_workspace_invalidation
+                .swap(0, Ordering::SeqCst);
+            apply_pending_workspace_invalidation(pending, &mut analysis.workspace);
+            return;
+        }
+        let published = {
+            let mut diagnostics = context.diagnostics.lock().await;
+            let epoch = root_epoch
+                .as_ref()
+                .filter(|(scheduled_root, _)| scheduled_root == &root)
+                .map(|(_, epoch)| *epoch)
+                .unwrap_or_else(|| diagnostics.epoch(&root));
+            if !diagnostics.reconcile_success(&root, epoch, &mut diagnostics_by_url) {
+                None
+            } else {
+                Some(
+                    diagnostics_by_url
+                        .into_iter()
+                        .map(|(url, diagnostics)| PublishedDiagnostics {
+                            version: versions.get(&url).copied().flatten(),
+                            url,
+                            diagnostics,
+                        })
+                        .collect::<Vec<_>>(),
+                )
             }
-            // A buffer outside any project, or a project that cannot be walked,
-            // has no fresh source diagnostics to publish. Explicit filesystem
-            // deletions clear tracked diagnostics at the watcher boundary; a
-            // transient config or discovery failure leaves the last diagnostics
-            // visible rather than hiding them.
-            Err(error) => {
-                if !matches!(error, marrow_lsp_core::workspace::WorkspaceError::NoProject) {
-                    eprintln!(
-                        "{} recompute failed for {}: {error}",
-                        crate::stderr_error("marrow-lsp:"),
-                        file.display()
-                    );
-                }
+        };
+        if let Some(published) = published {
+            for published in published {
+                context
+                    .client
+                    .publish_diagnostics(published.url, published.diagnostics, published.version)
+                    .await;
             }
         }
+    }
+}
+
+/// Log a recompute failure, staying quiet for a file outside any project (a normal
+/// state, not an error).
+fn log_recompute_error(file: &Path, error: &marrow_lsp_core::workspace::WorkspaceError) {
+    if !matches!(error, marrow_lsp_core::workspace::WorkspaceError::NoProject) {
+        eprintln!(
+            "{} recompute failed for {}: {error}",
+            crate::stderr_error("marrow-lsp:"),
+            file.display()
+        );
     }
 }
 
@@ -905,9 +965,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let Some((document, documents)) =
-            snapshot_document_and_analysis(&self.documents, &url).await
-        else {
+        let Some(document) = self.documents.lock().await.snapshot(&url) else {
             return Ok(None);
         };
         let offset = document.index.offset(to_core_position(position.position));
@@ -917,18 +975,10 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        // Build and cache the binding index (once per recompute) so the docs
-        // lookup reuses it exactly like definition and references do.
-        if fresh_index_if_available(&mut analysis.workspace, &documents, &path, &document.text)
-            .is_none()
-        {
+        if !analysis.workspace.latest_reads_file(&path) {
             return Ok(None);
         }
-        let snapshot = analysis.workspace.latest().expect("ensured just above");
-        let index = analysis
-            .workspace
-            .binding_index_cached()
-            .expect("ensured just above");
+        let (snapshot, index) = latest_read_facts(&analysis.workspace);
         Ok(hover::hover_with_index(snapshot, index, &path, offset))
     }
 
@@ -956,17 +1006,11 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if fresh_index_if_available(&mut analysis.workspace, &documents, &path, &document.text)
-            .is_none()
-        {
+        if !analysis.workspace.latest_reads_file(&path) {
             return Ok(None);
         }
-        let indices = snapshot_indices(&analysis.workspace, &documents);
-        let snapshot = analysis.workspace.latest().expect("ensured just above");
-        let index = analysis
-            .workspace
-            .binding_index_cached()
-            .expect("ensured just above");
+        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        let indices = snapshot_indices(snapshot, &documents);
         Ok(
             navigation::definition(snapshot, index, &indices, &path, offset)
                 .map(GotoDefinitionResponse::Scalar),
@@ -995,17 +1039,11 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if fresh_index_if_available(&mut analysis.workspace, &documents, &path, &document.text)
-            .is_none()
-        {
+        if !analysis.workspace.latest_reads_file(&path) {
             return Ok(None);
         }
-        let indices = snapshot_indices(&analysis.workspace, &documents);
-        let snapshot = analysis.workspace.latest().expect("ensured just above");
-        let index = analysis
-            .workspace
-            .binding_index_cached()
-            .expect("ensured just above");
+        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        let indices = snapshot_indices(snapshot, &documents);
         Ok(navigation::references(
             snapshot,
             index,
@@ -1039,16 +1077,11 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if fresh_index_if_available(&mut analysis.workspace, &documents, &path, &document.text)
-            .is_none()
-        {
+        if !analysis.workspace.latest_reads_file(&path) {
             return Ok(None);
         }
-        let indices = snapshot_indices(&analysis.workspace, &documents);
-        let index = analysis
-            .workspace
-            .binding_index_cached()
-            .expect("ensured just above");
+        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        let indices = snapshot_indices(snapshot, &documents);
         Ok(navigation::prepare_rename(index, &indices, &path, offset)
             .map(PrepareRenameResponse::Range))
     }
@@ -1076,16 +1109,11 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
-        if fresh_index_if_available(&mut analysis.workspace, &documents, &path, &document.text)
-            .is_none()
-        {
+        if !analysis.workspace.latest_reads_file(&path) {
             return Ok(None);
         }
-        let indices = snapshot_indices(&analysis.workspace, &documents);
-        let index = analysis
-            .workspace
-            .binding_index_cached()
-            .expect("ensured just above");
+        let (snapshot, index) = latest_read_facts(&analysis.workspace);
+        let indices = snapshot_indices(snapshot, &documents);
         match navigation::rename(index, &indices, &path, offset, &new_name) {
             Ok(edit) => Ok(Some(edit)),
             // No symbol under the cursor is not an error — the editor simply does
@@ -1128,6 +1156,10 @@ impl LanguageServer for Backend {
         if self.workspace_invalidation_pending() {
             return Ok(None);
         }
+        // Workspace symbols stay fresh-gated: an editor-wide symbol list that names
+        // a symbol the user just renamed is more misleading than a blank result,
+        // and unlike a cursor read it has no position to anchor prior-generation
+        // facts to.
         let Some(snapshot) = analysis.workspace.fresh_latest_from_snapshot(&documents) else {
             return Ok(None);
         };
@@ -1326,31 +1358,18 @@ fn to_core_position(position: Position) -> CorePosition {
     }
 }
 
-/// Accept an existing parse-clean snapshot, then build and cache its binding
-/// index only when the target file and every analyzed source still matches the
-/// editor-visible source world.
-/// Returns `None` for stale text or for a file outside any project.
-fn fresh_index_if_available<'a>(
-    workspace: &'a mut Workspace,
-    documents: &DocumentAnalysisSnapshot,
-    file: &std::path::Path,
-    text: &str,
-) -> Option<&'a marrow_lsp_core::workspace::BindingIndex> {
-    let snapshot = workspace.latest()?;
-    if !snapshot_has_document_text(Some(snapshot), file, text) {
-        return None;
-    }
-    if snapshot_has_parse_errors(snapshot) {
-        return None;
-    }
-    if !workspace.latest_matches_snapshot(documents) {
-        return None;
-    }
-    workspace.binding_index()
-}
-
-fn snapshot_has_parse_errors(snapshot: &AnalysisSnapshot) -> bool {
-    snapshot.files.iter().any(|file| file.parsed.has_errors())
+/// Borrow the latest snapshot and its binding index for a hover or navigation read,
+/// after [`Workspace::latest_reads_file`] confirmed both are available. They come
+/// from one analysis, so spans and bindings agree.
+fn latest_read_facts(
+    workspace: &Workspace,
+) -> (&AnalysisSnapshot, &marrow_lsp_core::workspace::BindingIndex) {
+    (
+        workspace.latest().expect("latest is readable"),
+        workspace
+            .binding_index_cached()
+            .expect("readable latest built its binding index"),
+    )
 }
 
 struct WatchedPathChange {
@@ -1652,19 +1671,13 @@ fn snapshot_has_file(snapshot: Option<&AnalysisSnapshot>, path: &std::path::Path
 /// built from disk. Called once per navigation request over the bounded project
 /// file set.
 fn snapshot_indices<'a>(
-    workspace: &'a Workspace,
+    snapshot: &'a AnalysisSnapshot,
     documents: &'a DocumentAnalysisSnapshot,
 ) -> SnapshotIndices<'a> {
-    let files = workspace
-        .latest()
-        .map(|snapshot| {
-            snapshot
-                .files
-                .iter()
-                .map(|file| (file.path.as_path(), file.source.as_str()))
-        })
-        .into_iter()
-        .flatten();
+    let files = snapshot
+        .files
+        .iter()
+        .map(|file| (file.path.as_path(), file.source.as_str()));
     SnapshotIndices::new(files, |path| documents.line_index_for_path(path))
 }
 
@@ -1812,16 +1825,11 @@ mod tests {
         let url = Url::from_file_path(&file).unwrap();
         let mut documents = Documents::new();
         documents.open_with_version(url, source.to_string(), Some(1));
+        let _ = documents;
         let mut workspace = Workspace::new();
 
         assert!(
-            fresh_index_if_available(
-                &mut workspace,
-                &documents.analysis_snapshot(),
-                &file,
-                source
-            )
-            .is_none(),
+            !workspace.latest_reads_file(&file),
             "request paths must not synchronously compute missing analysis"
         );
         assert!(
@@ -1892,6 +1900,7 @@ mod tests {
 
         let documents = Arc::clone(&backend.documents);
         let analysis = Arc::clone(&backend.analysis);
+        let analysis_run = Arc::clone(&backend.analysis_run);
         let diagnostics = Arc::clone(&backend.diagnostics);
         let diagnostics_publish = Arc::clone(&backend.diagnostics_publish);
         let pending_workspace_invalidation = Arc::clone(&backend.pending_workspace_invalidation);
@@ -1901,6 +1910,7 @@ mod tests {
                 RecomputeContext {
                     documents: &documents,
                     analysis: &analysis,
+                    analysis_run: &analysis_run,
                     diagnostics: &diagnostics,
                     diagnostics_publish: &diagnostics_publish,
                     pending_workspace_invalidation: &pending_workspace_invalidation,
@@ -1979,13 +1989,17 @@ mod tests {
             watched.is_ok(),
             "watched-file changes must not wait for project recompute"
         );
-        assert_ne!(
+        // With analysis running off the pump, the parked recompute holds no data
+        // lock, so the watcher applies invalidation directly on the free lock rather
+        // than deferring it to the pending bit — a direct guard that the lock stays
+        // free while a check is in flight.
+        assert_eq!(
             backend
                 .pending_workspace_invalidation
                 .load(Ordering::SeqCst)
                 & PENDING_ANALYSIS_INVALIDATION,
             0,
-            "busy watched-file changes under a tracked root must invalidate pending analysis before publish"
+            "an off-pump recompute leaves the data lock free, so a tracked watched-file change applies directly"
         );
 
         let hover = tokio::time::timeout(std::time::Duration::from_millis(50), async {
@@ -2027,6 +2041,147 @@ mod tests {
             "didClose must drop live documents without waiting for project recompute"
         );
         assert!(backend.documents.lock().await.snapshot(&url).is_none());
+
+        gate.release().await;
+        recompute.await.unwrap();
+    }
+
+    /// A parked recompute must not blank hover and definition. With a good prior
+    /// analysis in hand, the read handlers serve its prior-generation facts while
+    /// the next check runs off the pump, instead of returning `Ok(None)`.
+    #[tokio::test]
+    async fn hover_and_definition_serve_prior_generation_facts_during_a_parked_recompute() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        let v1 = "module app\n\npub fn answer(): int\n    return 42\n\n\
+                  pub fn caller(): int\n    return answer()\n";
+        std::fs::write(&file, v1).unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(url.clone(), v1.to_string(), Some(1));
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+
+        let context = |backend: &Backend| {
+            (
+                Arc::clone(&backend.documents),
+                Arc::clone(&backend.analysis),
+                Arc::clone(&backend.analysis_run),
+                Arc::clone(&backend.diagnostics),
+                Arc::clone(&backend.diagnostics_publish),
+                Arc::clone(&backend.pending_workspace_invalidation),
+                backend.client.clone(),
+            )
+        };
+
+        // A first recompute completes and leaves a good analysis as the latest.
+        {
+            let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+                context(backend);
+            Backend::recompute_and_publish(
+                RecomputeContext {
+                    documents: &documents,
+                    analysis: &analysis,
+                    analysis_run: &analysis_run,
+                    diagnostics: &diagnostics,
+                    diagnostics_publish: &publish,
+                    pending_workspace_invalidation: &pending,
+                    client: &client,
+                },
+                &file,
+                None,
+            )
+            .await;
+        }
+
+        // A newer edit appends a function, so the latest analysis is now
+        // prior-generation relative to the editor-visible source.
+        let v2 = format!("{v1}\npub fn added(): int\n    return 1\n");
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.change_with_version(&url, v2, Some(2));
+        }
+
+        // Park the next recompute off the pump.
+        let gate = TestRecomputeGate::new();
+        {
+            let mut analysis = backend.analysis.lock().await;
+            analysis.recompute_gate = Some(Arc::clone(&gate));
+        }
+        let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+            context(backend);
+        let file_for_task = file.clone();
+        let recompute = tokio::spawn(async move {
+            Backend::recompute_and_publish(
+                RecomputeContext {
+                    documents: &documents,
+                    analysis: &analysis,
+                    analysis_run: &analysis_run,
+                    diagnostics: &diagnostics,
+                    diagnostics_publish: &publish,
+                    pending_workspace_invalidation: &pending,
+                    client: &client,
+                },
+                &file_for_task,
+                None,
+            )
+            .await;
+        });
+        gate.wait_until_entered().await;
+
+        // The cursor sits on the `answer` call, unchanged between generations.
+        let call_position = Position {
+            line: 6,
+            character: 12,
+        };
+        let hover = <Backend as LanguageServer>::hover(
+            backend,
+            HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: url.clone() },
+                    position: call_position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            hover.is_some(),
+            "hover must serve prior-generation facts while a recompute is parked, not null"
+        );
+
+        let definition = <Backend as LanguageServer>::goto_definition(
+            backend,
+            GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: url.clone() },
+                    position: call_position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            definition.is_some(),
+            "definition must serve prior-generation facts while a recompute is parked, not null"
+        );
 
         gate.release().await;
         recompute.await.unwrap();
