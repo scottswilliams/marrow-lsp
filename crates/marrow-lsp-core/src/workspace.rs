@@ -11,10 +11,7 @@ use lsp_types::Url;
 use marrow_check::{
     AnalysisGeneration, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
 };
-use marrow_project::{
-    DiscoverError, ProjectConfig, discover_modules, discover_test_modules, parse_config,
-    test_module_file,
-};
+use marrow_project::{ProjectConfig, parse_config, test_module_file};
 
 pub use marrow_check::{AnalysisSnapshot, BindingIndex, CheckedProgram};
 
@@ -91,10 +88,14 @@ pub struct Workspace {
     /// root still match, so unchanged diagnostics publishes do not rebuild it.
     binding_index: Option<BindingIndex>,
     binding_index_key: Option<BindingIndexKey>,
-    /// Open analysis files that overlaid the latest snapshot. If the editor's
-    /// open project-file set changes, the cached snapshot no longer names the
-    /// same source world even when the remaining open buffers still match.
-    latest_open_analysis_paths: Vec<PathBuf>,
+    /// The document generation the latest snapshot was analyzed at. Every open,
+    /// edit, and close bumps the generation, so an unchanged generation means the
+    /// editor-visible source world is byte-identical to the snapshot's — an O(1)
+    /// freshness check that never re-reads the project from disk. A change to a
+    /// closed file on disk does not bump the generation; the file watcher's
+    /// invalidation refreshes those, the way rust-analyzer and gopls trust their
+    /// VFS rather than stat the whole project on every request.
+    latest_documents_generation: Option<u64>,
     /// Binds the accepted catalog and first-run lock from the project's committed
     /// store, so analysis checks source against the committed identity rather than
     /// always re-deriving fresh first-run ids. Keyed on the store's monotonic commit
@@ -176,24 +177,14 @@ impl Workspace {
     }
 
     /// Whether the latest snapshot still matches a captured editor-visible source world.
+    ///
+    /// An O(1) generation compare: any open, edit, or close bumps the document
+    /// generation, so an unchanged generation guarantees every open buffer is
+    /// identical to the one the snapshot was analyzed from. External changes to
+    /// closed files on disk are picked up by the file watcher's invalidation, not by
+    /// re-reading the project on every request.
     pub fn latest_matches_snapshot(&self, documents: &DocumentAnalysisSnapshot) -> bool {
-        let (Some(snapshot), Some(project)) = (self.latest.as_ref(), self.project.as_ref()) else {
-            return false;
-        };
-        let current_open_analysis_paths = open_analysis_paths_snapshot(project, documents);
-        if current_open_analysis_paths != self.latest_open_analysis_paths {
-            return false;
-        }
-        current_analysis_paths(project, &current_open_analysis_paths)
-            .is_ok_and(|paths| paths == snapshot_paths(snapshot))
-            && snapshot
-                .files
-                .iter()
-                .all(|file| match documents.text_for_path(&file.path) {
-                    Some(source) => source == file.source.as_str(),
-                    None => std::fs::read_to_string(&file.path)
-                        .is_ok_and(|source| source == file.source.as_str()),
-                })
+        self.latest.is_some() && self.latest_documents_generation == Some(documents.generation())
     }
 
     /// The latest snapshot only when it still matches the editor-visible sources.
@@ -271,7 +262,6 @@ impl Workspace {
         }
         let project = self.project.as_ref().expect("project resolved just above");
 
-        let latest_open_analysis_paths = open_analysis_paths_snapshot(project, documents);
         let sources = overlay_snapshot(&project.root, documents);
         let binding = self
             .catalog_binding
@@ -299,7 +289,7 @@ impl Workspace {
             self.binding_index = None;
             self.binding_index_key = None;
         }
-        self.latest_open_analysis_paths = latest_open_analysis_paths;
+        self.latest_documents_generation = Some(documents.generation());
         Ok(self.latest.as_ref().expect("just stored a snapshot"))
     }
 
@@ -309,7 +299,7 @@ impl Workspace {
         self.last_program = None;
         self.binding_index = None;
         self.binding_index_key = None;
-        self.latest_open_analysis_paths.clear();
+        self.latest_documents_generation = None;
     }
 
     /// Drop cached checked facts and force the next recompute to re-read config.
@@ -355,47 +345,6 @@ fn overlay_snapshot(root: &Path, documents: &DocumentAnalysisSnapshot) -> Projec
         }
     }
     sources
-}
-
-fn open_analysis_paths_snapshot(
-    project: &Project,
-    documents: &DocumentAnalysisSnapshot,
-) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = documents
-        .open_documents()
-        .iter()
-        .map(|document| document.path.clone())
-        .filter(|path| project.analyzes_file(path))
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-fn current_analysis_paths(
-    project: &Project,
-    open_analysis_paths: &[PathBuf],
-) -> Result<Vec<PathBuf>, DiscoverError> {
-    let mut paths: Vec<PathBuf> = discover_modules(&project.root, &project.config)?
-        .into_iter()
-        .chain(discover_test_modules(&project.root, &project.config)?)
-        .map(|file| file.path)
-        .collect();
-    paths.extend(open_analysis_paths.iter().cloned());
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn snapshot_paths(snapshot: &AnalysisSnapshot) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = snapshot
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths
 }
 
 /// The filesystem path of a `file://` URL, or `None` for any other scheme.
@@ -620,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_source_match_rejects_a_closed_file_changed_on_disk() {
+    fn external_closed_file_changes_refresh_via_invalidation_not_per_request() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
@@ -646,87 +595,31 @@ mod tests {
         workspace.recompute(&app, &documents).unwrap();
         assert!(workspace.latest_matches_sources(&documents));
 
+        // A closed file changing on disk does not bump the document generation, so the
+        // freshness check does not re-read the project and the snapshot stays fresh. This is
+        // the deliberate trade for an O(1) hot path: the file watcher, not a per-request disk
+        // walk, refreshes external changes. Adding or deleting a closed file behaves the same.
         std::fs::write(
             &schema,
             "module schema\n\npub fn changed(): int\n    return 1\n",
         )
         .unwrap();
-
-        assert!(
-            !workspace.latest_matches_sources(&documents),
-            "closed files changed on disk make the cached source world stale"
-        );
-    }
-
-    #[test]
-    fn latest_source_match_rejects_a_closed_file_added_on_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
         std::fs::write(
-            root.join("marrow.json"),
-            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+            src.join("added.mw"),
+            "module added\n\npub fn h(): int\n    return 1\n",
         )
         .unwrap();
-        let src = root.join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        let app = src.join("app.mw");
-        std::fs::write(&app, "module app\n\npub fn f(): int\n    return 1\n").unwrap();
-
-        let app_url = path_to_url(&app).unwrap();
-        let mut documents = Documents::new();
-        documents.open(
-            app_url,
-            "module app\n\npub fn f(): int\n    return 1\n".to_string(),
+        assert!(
+            workspace.latest_matches_sources(&documents),
+            "an external change to a closed file is not detected per request"
         );
 
-        let mut workspace = Workspace::new();
-        workspace.recompute(&app, &documents).unwrap();
-        assert!(workspace.latest_matches_sources(&documents));
-
-        std::fs::write(
-            src.join("new_module.mw"),
-            "module new_module\n\npub fn g(): int\n    return 1\n",
-        )
-        .unwrap();
-
+        // The `**/*.mw` watcher fires and invalidates the analysis; the next freshness check
+        // is then stale and forces a recompute that picks the external change up.
+        workspace.invalidate_analysis();
         assert!(
             !workspace.latest_matches_sources(&documents),
-            "new closed analysis files make the cached source world stale"
-        );
-    }
-
-    #[test]
-    fn latest_source_match_rejects_a_closed_file_deleted_on_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(
-            root.join("marrow.json"),
-            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
-        )
-        .unwrap();
-        let src = root.join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        let app = src.join("app.mw");
-        let schema = src.join("schema.mw");
-        std::fs::write(&app, "module app\n\npub fn f(): int\n    return 1\n").unwrap();
-        std::fs::write(&schema, "module schema\n\npub fn g(): int\n    return 1\n").unwrap();
-
-        let app_url = path_to_url(&app).unwrap();
-        let mut documents = Documents::new();
-        documents.open(
-            app_url,
-            "module app\n\npub fn f(): int\n    return 1\n".to_string(),
-        );
-
-        let mut workspace = Workspace::new();
-        workspace.recompute(&app, &documents).unwrap();
-        assert!(workspace.latest_matches_sources(&documents));
-
-        std::fs::remove_file(&schema).unwrap();
-
-        assert!(
-            !workspace.latest_matches_sources(&documents),
-            "deleted closed analysis files make the cached source world stale"
+            "invalidation from the file watcher refreshes external changes"
         );
     }
 
