@@ -1,0 +1,109 @@
+name: CI
+
+# The Required Fresh Evidence bar for every push and PR: the pinned marrow/marrow-lsp pair
+# builds and passes fmt, tests, clippy (deny warnings), the zero-unsafe scan, the
+# consumed-surface drift gate, and the TypeScript check/compile/audit. marrow is checked out
+# at exactly the recorded pin into a sibling ../marrow so the path dependencies resolve as in
+# local development; a mismatch fails closed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep the build output out of the checkout so nothing contends over ./target.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out marrow-lsp
+        uses: actions/checkout@v4
+        with:
+          path: marrow-lsp
+
+      - name: Read the pinned marrow revision
+        id: pin
+        run: |
+          rev=$(grep '^rev' marrow-lsp/pins/marrow-rev.toml | sed -E 's/.*"(.*)".*/\1/')
+          # The pin is a repo file a PR can edit; only a bare 40-hex commit is allowed, so it
+          # cannot smuggle shell into later steps or point checkout at a crafted ref.
+          if ! printf '%s' "$rev" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "pinned marrow rev is not a 40-hex commit: '$rev'"; exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Check out marrow at the pin (sibling ../marrow)
+        uses: actions/checkout@v4
+        with:
+          repository: scottswilliams/marrow
+          ref: ${{ steps.pin.outputs.rev }}
+          path: marrow
+          # If marrow is private, provide a read-only deploy key or token secret:
+          # ssh-key: ${{ secrets.MARROW_DEPLOY_KEY }}
+
+      - name: Assert the checked-out marrow matches the pin (fail closed)
+        env:
+          PIN_REV: ${{ steps.pin.outputs.rev }}
+        run: |
+          got=$(git -C marrow rev-parse HEAD)
+          if [ "$got" != "$PIN_REV" ]; then
+            echo "marrow checkout $got does not match pin $PIN_REV"
+            exit 1
+          fi
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install 1.89 --profile minimal --component rustfmt,clippy
+          rustup default 1.89
+
+      - name: Format
+        working-directory: marrow-lsp
+        run: cargo fmt --check
+
+      - name: Build (locked)
+        working-directory: marrow-lsp
+        run: cargo build --locked --workspace
+
+      - name: Test
+        working-directory: marrow-lsp
+        run: cargo test --workspace
+
+      - name: Clippy (deny warnings)
+        working-directory: marrow-lsp
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: No unsafe
+        working-directory: marrow-lsp
+        # unsafe_code = "forbid" already fails the build; this is a fast belt-and-suspenders
+        # scan that also catches an unsafe block sneaking into a non-workspace-lint context.
+        run: |
+          if rg -n 'unsafe\s*\{|unsafe\s+(fn|impl|trait)' crates xtask; then
+            echo "unsafe found"; exit 1
+          fi
+
+      - name: Consumed-surface drift gate
+        working-directory: marrow-lsp
+        run: cargo run -q -p xtask -- gen-surface --check
+
+  vscode:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+      - name: Check
+        run: npm run check
+      - name: Compile
+        run: npm run compile
+      - name: Audit
+        run: npm audit --audit-level=moderate
