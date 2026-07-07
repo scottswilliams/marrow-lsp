@@ -68,7 +68,10 @@ fn consumed_surface(root: &Path) -> String {
     let metadata: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("parse cargo metadata json");
 
-    let root_str = root.to_string_lossy();
+    // Canonicalize so a symlinked invocation path and cargo's canonicalized manifest paths agree
+    // (otherwise a local `gen-surface` and a CI `--check` could disagree), and compare paths
+    // component-wise so a sibling like `marrow-lsp-extras` is not a string-prefix false match.
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut crates: Vec<(String, String)> = metadata["packages"]
         .as_array()
         .expect("packages array")
@@ -76,8 +79,11 @@ fn consumed_surface(root: &Path) -> String {
         .filter_map(|pkg| {
             let name = pkg["name"].as_str()?;
             let manifest = pkg["manifest_path"].as_str()?;
+            let manifest_path = Path::new(manifest)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(manifest));
             let is_upstream_marrow =
-                name.starts_with("marrow-") && !manifest.starts_with(&*root_str);
+                name.starts_with("marrow-") && !manifest_path.starts_with(&canonical_root);
             is_upstream_marrow.then(|| {
                 (
                     name.to_string(),

@@ -8,6 +8,10 @@
 //! this test from compiling until the keyword is deliberately classified — the loud signal
 //! that indentation may need to handle it. Graduating indentation to `ready` (consuming a
 //! marrow parser block-structure fact, UPSTREAM-6) retires this gate.
+//!
+//! This intentionally re-encodes the classification rather than importing `indentation.rs`'s
+//! (unexposed) logic: it gates against *grammar* drift (a new or renamed keyword), not against
+//! edits to `indentation.rs` itself. That is the right scope for a `presentation-only` aid.
 
 use marrow_syntax::Keyword;
 

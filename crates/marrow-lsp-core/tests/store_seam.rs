@@ -10,9 +10,59 @@
 
 use std::path::{Path, PathBuf};
 
-/// Strip `#[cfg(test)] mod tests { ... }` blocks so only production source remains. Brace
-/// depth is tracked to find each test module's matching close; the codebase's test modules
-/// are conventional, so naive brace counting is exact enough for the invariant.
+/// Net brace depth contributed by a line, ignoring `{`/`}` inside line comments, string
+/// literals, and char literals — the noise that would otherwise desync the test-module
+/// splitter. Char literals are distinguished from lifetimes so a `&'a T {` on one line is not
+/// misread. Block comments and raw strings are not modelled; they do not appear in the core's
+/// test modules, and Lane S5.4 replaces this heuristic with an import-level gate.
+fn brace_delta(line: &str) -> i32 {
+    enum State {
+        Code,
+        Str,
+        Char,
+    }
+    let mut state = State::Code;
+    let mut delta = 0;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match state {
+            State::Code => match c {
+                '/' if chars.peek() == Some(&'/') => break,
+                '"' => state = State::Str,
+                '\'' => {
+                    // A char literal is `'\<esc>` or `'<char>'`; anything else is a lifetime.
+                    let mut look = chars.clone();
+                    let is_char_literal = look.peek() == Some(&'\\')
+                        || (look.next().is_some() && look.peek() == Some(&'\''));
+                    if is_char_literal {
+                        state = State::Char;
+                    }
+                }
+                '{' => delta += 1,
+                '}' => delta -= 1,
+                _ => {}
+            },
+            State::Str => match c {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => state = State::Code,
+                _ => {}
+            },
+            State::Char => match c {
+                '\\' => {
+                    chars.next();
+                }
+                '\'' => state = State::Code,
+                _ => {}
+            },
+        }
+    }
+    delta
+}
+
+/// Strip `#[cfg(test)] mod tests { ... }` blocks so only production source remains. Brace depth
+/// (comment/string/char-aware, see [`brace_delta`]) finds each test module's matching close.
 fn production_source(text: &str) -> String {
     let mut out = String::new();
     let mut depth: i32 = 0;
@@ -28,13 +78,7 @@ fn production_source(text: &str) -> String {
             out.push_str(line);
             out.push('\n');
         }
-        for c in line.chars() {
-            match c {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
-        }
+        depth += brace_delta(line);
         if let Some(open_depth) = test_mod_open_depth
             && depth <= open_depth
         {

@@ -2061,6 +2061,48 @@ fn run_does_not_touch_the_real_store() {
     );
 }
 
+/// The sandbox conformance oracle for the roadmap S0.2/S3 trust gate: a sandboxed `mw_run` and
+/// `mw_test` must leave the real store file byte-for-byte identical, with the same length,
+/// modification time, and inode — a strictly stronger check than commit-metadata equality, which
+/// a corrupting rewrite that preserved the commit counter could pass. Runs in CI via the test bar.
+#[cfg(unix)]
+#[test]
+fn run_and_test_leave_the_real_store_byte_identical() {
+    use std::os::unix::fs::MetadataExt;
+
+    let (dir, file) = native_counter_project(1..=1);
+    let store_file = dir.path().join("data").join("marrow.redb");
+
+    fn fingerprint(path: &Path) -> (Vec<u8>, u64, std::time::SystemTime, u64) {
+        let bytes = std::fs::read(path).expect("read store file");
+        let meta = std::fs::metadata(path).expect("stat store file");
+        (
+            bytes,
+            meta.len(),
+            meta.modified().expect("mtime"),
+            meta.ino(),
+        )
+    }
+
+    let before = fingerprint(&store_file);
+
+    let run_result = run(&file, Some("app::counter::show"), &[], RunMode::Run);
+    assert_eq!(run_result["diagnostics"], json!([]), "{run_result}");
+    assert_eq!(
+        fingerprint(&store_file),
+        before,
+        "sandboxed mw_run perturbed the real store file"
+    );
+
+    // A test-mode invocation must also touch nothing, even when it discovers no tests.
+    let _ = run(&file, None, &[], RunMode::Test);
+    assert_eq!(
+        fingerprint(&store_file),
+        before,
+        "sandboxed mw_test perturbed the real store file"
+    );
+}
+
 #[test]
 fn run_reports_marrow_entry_footprint_and_open_mode_facts() {
     let (_dir, file) = native_counter_project(1..=1);

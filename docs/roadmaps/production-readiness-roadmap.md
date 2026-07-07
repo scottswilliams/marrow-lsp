@@ -94,7 +94,7 @@ and the corrected ledger/AGENTS/README are in-repo.
 - **Files:** root `Cargo.toml`, new `pins/marrow-rev.toml`, new `xtask/gen-surface` (snapshot generator), `Cargo.lock`, `docs/roadmaps/lsp-fact-consumption-ledger.md`.
 - **Change:** record the marrow git rev `f89f30d9db9f3a5fa6ac087619ea36091bcf17a5` and tree hash in a tracked pin file; release builds resolve marrow via that rev (git dep or vendored rev) so a `.vsix` is reproducible; bumps are a deliberate edit. Generate a checked-in `consumed-marrow-surface.snapshot` seeded from the consumed-surface inventory, enumerating the full transitive marrow closure — **9** crates, including the currently-undeclared transitive `marrow-codes`, not the 8 in the dependency table.
 - **Harness/oracle:** `xtask/gen-surface` walks `cargo metadata` for every path/git `marrow-*` crate and the consumed symbol set.
-- **Enforcement artifact:** a CI job regenerates the snapshot against the pinned rev and fails on any un-reviewed delta; a second assertion checks that every marrow symbol the ledger names is actually linked (catches the ledger overstating `source_saved_path_completion_fact_at`, which no prod file references).
+- **Enforcement artifact:** the checked-in crate-level snapshot plus `xtask gen-surface --check`, which a CI job (Lane S0.2) runs to fail on any un-reviewed delta to the marrow crate closure. (A finer ledger-symbol linkage assertion — every marrow symbol the ledger names is actually linked — is a future refinement; the one known overstatement, `source_saved_path_completion_fact_at`, was corrected by hand in Lane S0.4.)
 - **Before/after:** today path deps + an inert `version = "0.1.0"` lock give zero drift protection against a daily-rewritten upstream; after, an upstream API rewrite is a reviewable snapshot delta, not a silent compile break.
 - **Release gate (e8-5):** a package step that refuses to build a `.vsix` while any marrow dependency is a `path =` dependency, so a `0.1.0` "Initial release" cannot ship against a floating, non-reproducible upstream. Until pinning lands, the `0.1.0` CHANGELOG/version is a pre-release marker.
 - **Blocked-on:** nothing (rev selected). **Sizing:** one lane. Shares `Cargo.toml`/`Cargo.lock` with S0.0 — sequence after it.
@@ -128,10 +128,10 @@ and the corrected ledger/AGENTS/README are in-repo.
 
 ### Lane S0.5 — Core-owned read-only store seam (STORE-VIEW)
 - **Provenance:** e2b-6 (`architecture-gap`).
-- **Files:** new `crates/marrow-lsp-core/src/store_view.rs`, `catalog_binding.rs`, `data_explorer.rs`, `crates/marrow-dap/src/debugger.rs`.
-- **Change:** introduce one core-owned read-only store-view module that owns all `marrow_store` type contact (`TreeStore`/`SealedStore`, `StoreUid`, `CommitMetadata`, `DataPathSegment`, `SavedKey`, `SavedValue`, `CatalogId`); DAP and data views consume that module, not raw store internals. Insulates core/DAP from the greenfield store redesign.
-- **Enforcement artifact:** an architecture test restricting `marrow_store` imports to the single `store_view` module.
-- **Before/after:** today store internals are consumed at multiple call sites; after, a store-engine change touches one seam.
+- **Files:** new `crates/marrow-lsp-core/src/store_view.rs`, `catalog_binding.rs`, new `crates/marrow-lsp-core/tests/store_seam.rs`.
+- **Change:** introduce one core-owned read-only store-view module (`ReadOnlyStoreView`/`StorePin`) that owns `marrow-lsp-core`'s production `marrow_store` contact; `catalog_binding` consumes that module instead of naming `marrow_store` directly. Insulates the core from the greenfield store redesign. The seam is `marrow-lsp-core`-internal, so it covers the core's own store reads; `marrow-dap`'s direct `marrow_store` link stays a recorded one-core exception (see S0.4 `dependency_shape`), with narrowing it to route through the core tracked as follow-on.
+- **Enforcement artifact:** `tests/store_seam.rs` fails if production code in `marrow-lsp-core` outside `store_view.rs` names `marrow_store`.
+- **Before/after:** today the core's store internals are consumed at multiple call sites; after, a store-engine change touches one seam in the core.
 - **Blocked-on:** nothing for the seam over `SealedStore`; the lock-free probe consumer rides **UPSTREAM-3** (Lane S1.12). **Sizing:** one lane. Shares `catalog_binding.rs` with S0.0 — sequence after it.
 
 ---

@@ -28,7 +28,7 @@ jobs:
       - name: Read the pinned marrow revision
         id: pin
         run: |
-          rev=$(grep '^rev' marrow-lsp/pins/marrow-rev.toml | sed -E 's/.*"(.*)".*/\1/')
+          rev=$(grep -E '^rev[[:space:]]*=' marrow-lsp/pins/marrow-rev.toml | head -1 | sed -E 's/.*"(.*)".*/\1/')
           # The pin is a repo file a PR can edit; only a bare 40-hex commit is allowed, so it
           # cannot smuggle shell into later steps or point checkout at a crafted ref.
           if ! printf '%s' "$rev" | grep -Eq '^[0-9a-f]{40}$'; then
