@@ -2314,22 +2314,64 @@ fn pipelined_double_continue_rejects_second_resume() {
 }
 
 #[test]
-fn pipelined_pause_after_continue_reports_not_stopped() {
+fn pause_during_continue_stops_at_the_next_statement() {
     let (_dir, _file, mut client) = entry_stopped_client_with_breakpoint(6);
 
     let cont = client.request("continue", json!({ "threadId": 1 }));
     let pause = client.request("pause", json!({ "threadId": 1 }));
 
     assert_eq!(client.response_for(cont)["success"], true);
-    let pause = client.response_for(pause);
-    assert_response_marrow_error(&pause, "dap.notStopped", "invalid-state", None);
+    assert_eq!(client.response_for(pause)["success"], true);
 
+    // The async pause flag is serviced at the next statement boundary, ahead of
+    // the line-6 breakpoint, so the run stops with a `pause` reason.
     let stopped = client.event("stopped");
-    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stopped["body"]["reason"], "pause", "{stopped}");
 }
 
 #[test]
-fn pipelined_breakpoint_edit_after_continue_reports_not_stopped() {
+fn breakpoint_added_during_continue_takes_effect_on_the_next_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_fixture(dir.path());
+    let mut client = initialized_client();
+
+    let launch = client.request(
+        "launch",
+        json!({
+            "project": dir.path().display().to_string(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_launch_success(&client.response_for(launch));
+
+    let done = client.request("configurationDone", json!({}));
+    assert_eq!(client.response_for(done)["success"], true);
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "entry", "{stopped}");
+
+    let cont = client.request("continue", json!({ "threadId": 1 }));
+    let set = client.request(
+        "setBreakpoints",
+        json!({
+            "source": { "path": file.display().to_string() },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    );
+
+    assert_eq!(client.response_for(cont)["success"], true);
+    let set = client.response_for(set);
+    assert_eq!(set["success"], true, "{set}");
+    assert_verified_breakpoint(&set["body"]["breakpoints"][0], 6);
+
+    // The breakpoint pushed mid-continue is picked up outside park and arms the
+    // next stop.
+    let stopped = client.event("stopped");
+    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
+    assert_eq!(stop_line(&mut client), 6);
+}
+
+#[test]
+fn breakpoint_removed_during_continue_takes_effect() {
     let (_dir, file, mut client) = entry_stopped_client_with_breakpoint(6);
 
     let cont = client.request("continue", json!({ "threadId": 1 }));
@@ -2342,12 +2384,11 @@ fn pipelined_breakpoint_edit_after_continue_reports_not_stopped() {
     );
 
     assert_eq!(client.response_for(cont)["success"], true);
-    let set = client.response_for(set);
-    assert_response_marrow_error(&set, "dap.notStopped", "invalid-state", None);
+    assert_eq!(client.response_for(set)["success"], true);
 
-    let stopped = client.event("stopped");
-    assert_eq!(stopped["body"]["reason"], "breakpoint", "{stopped}");
-    assert_eq!(stop_line(&mut client), 6);
+    // Clearing the breakpoint mid-continue disarms line 6, so the run finishes
+    // without a stop.
+    assert_terminates_without_stopping(&mut client);
 }
 
 #[test]

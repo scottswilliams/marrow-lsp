@@ -287,8 +287,6 @@ impl From<RuntimeError> for RuntimeErrorDetail {
 pub enum Control {
     /// Answer a query and keep serving (the run stays parked).
     Query(Query),
-    /// Replace the currently armed source-line breakpoints.
-    SetBreakpoints(ArmedBreakpoints),
     /// Resume the run with the given step mode.
     Resume(Resume),
     /// Abort the run (terminate/disconnect): the hook returns `Err`.
@@ -319,6 +317,12 @@ pub struct Debugger {
     events: Sender<RunEvent>,
     control: Receiver<Control>,
     terminate: Arc<AtomicBool>,
+    /// Set by the protocol thread's `pause`; observed between statements so a
+    /// running (unparked) thread stops at the next statement boundary.
+    pause: Arc<AtomicBool>,
+    /// Breakpoint sets pushed while the run is unparked. Drained between statements
+    /// so a mid-run edit arms the next stop without waiting for a park.
+    breakpoint_swaps: Receiver<ArmedBreakpoints>,
 }
 
 impl Debugger {
@@ -329,6 +333,8 @@ impl Debugger {
         events: Sender<RunEvent>,
         control: Receiver<Control>,
         terminate: Arc<AtomicBool>,
+        pause: Arc<AtomicBool>,
+        breakpoint_swaps: Receiver<ArmedBreakpoints>,
     ) -> Self {
         Debugger {
             // Until the client steps, run freely unless stop-on-entry fires.
@@ -339,6 +345,16 @@ impl Debugger {
             events,
             control,
             terminate,
+            pause,
+            breakpoint_swaps,
+        }
+    }
+
+    /// Apply the newest breakpoint set the protocol thread pushed, if any. Only the
+    /// last one matters, so intermediate edits collapse into the current arming.
+    fn drain_breakpoint_swaps(&mut self) {
+        while let Ok(breakpoints) = self.breakpoint_swaps.try_recv() {
+            self.breakpoints = breakpoints;
         }
     }
 
@@ -475,9 +491,6 @@ impl Debugger {
                         return Err(terminated());
                     }
                 }
-                Ok(Control::SetBreakpoints(breakpoints)) => {
-                    self.breakpoints = breakpoints;
-                }
                 Ok(Control::Resume(mode)) => {
                     self.mode = mode;
                     return Ok(());
@@ -599,6 +612,7 @@ impl StepHook for Debugger {
         if self.terminate.load(Ordering::Relaxed) {
             return Err(terminated());
         }
+        self.drain_breakpoint_swaps();
         let depth = frame.depth();
         let breakpoint = self.breakpoints.evaluate(&frame, span.line);
         for output in breakpoint.outputs {
@@ -608,6 +622,9 @@ impl StepHook for Debugger {
         }
         let reason = if self.is_entry_stop() {
             Some(StopReason::Entry)
+        } else if self.pause.swap(false, Ordering::Relaxed) {
+            // An async pause takes the next boundary regardless of the step mode.
+            Some(StopReason::Pause)
         } else if let Some(reason) = step::decide(self.mode, depth) {
             Some(reason)
         } else if breakpoint.stop {

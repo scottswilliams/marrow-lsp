@@ -38,6 +38,8 @@ pub struct RunHandle {
     pub control: Sender<Control>,
     pub events: Receiver<RunEvent>,
     pub terminate: Arc<AtomicBool>,
+    pub pause: Arc<AtomicBool>,
+    pub breakpoints: Sender<ArmedBreakpoints>,
     pub execution_boundary: Json,
     pub surface_serve_boundary: Json,
 }
@@ -57,6 +59,8 @@ struct RunRequest {
     stop_on_entry: bool,
     breakpoints: ArmedBreakpoints,
     terminate: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
+    breakpoint_swaps: Receiver<ArmedBreakpoints>,
 }
 
 struct RunStart {
@@ -76,8 +80,10 @@ pub fn spawn(
 ) -> Result<RunHandle, SpawnError> {
     let (event_tx, event_rx) = channel::<RunEvent>();
     let (control_tx, control_rx) = channel::<Control>();
+    let (breakpoint_tx, breakpoint_rx) = channel::<ArmedBreakpoints>();
     let (start_tx, start_rx) = channel::<Result<RunStart, crate::project::LaunchError>>();
     let terminate = Arc::new(AtomicBool::new(false));
+    let pause = Arc::new(AtomicBool::new(false));
     let request = RunRequest {
         project_dir,
         entry,
@@ -87,6 +93,8 @@ pub fn spawn(
         stop_on_entry,
         breakpoints,
         terminate: Arc::clone(&terminate),
+        pause: Arc::clone(&pause),
+        breakpoint_swaps: breakpoint_rx,
     };
 
     let handle = thread::Builder::new()
@@ -113,6 +121,8 @@ pub fn spawn(
         control: control_tx,
         events: event_rx,
         terminate,
+        pause,
+        breakpoints: breakpoint_tx,
         execution_boundary: start.execution_boundary,
         surface_serve_boundary: start.surface_serve_boundary,
     })
@@ -137,6 +147,8 @@ fn run_on_thread(
         stop_on_entry,
         breakpoints,
         terminate,
+        pause,
+        breakpoint_swaps,
     } = request;
     let launch = match crate::project::prepare_admitted(
         &project_dir,
@@ -181,7 +193,15 @@ fn run_on_thread(
     {
         return None;
     }
-    let debugger = Debugger::new(stop_on_entry, breakpoints, events, control, terminate);
+    let debugger = Debugger::new(
+        stop_on_entry,
+        breakpoints,
+        events,
+        control,
+        terminate,
+        pause,
+        breakpoint_swaps,
+    );
     run_with_session(&session, invocation, debugger)
 }
 

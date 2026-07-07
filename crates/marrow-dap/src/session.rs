@@ -197,6 +197,10 @@ struct Running {
     control: Sender<Control>,
     events: Receiver<RunEvent>,
     terminate: Arc<AtomicBool>,
+    /// Raised so the run-thread stops at the next statement even while unparked.
+    pause: Arc<AtomicBool>,
+    /// Pushes a fresh armed breakpoint set to the run-thread, read outside park.
+    breakpoints: Sender<ArmedBreakpoints>,
     execution_boundary: Json,
     /// The most recent stop, kept so `stackTrace`/`scopes` answer without
     /// re-querying. `None` while the run is executing (not parked).
@@ -723,15 +727,6 @@ impl<W: Write> Session<W> {
             }
         };
 
-        if self
-            .running
-            .as_ref()
-            .is_some_and(|running| running.stopped_at.is_none())
-        {
-            self.respond_error(request, "not stopped", ERROR_NOT_STOPPED);
-            return;
-        }
-
         if self.stop_points.is_some() {
             if requested.is_empty() {
                 self.breakpoints.remove(&source);
@@ -950,12 +945,13 @@ impl<W: Write> Session<W> {
         armed
     }
 
+    /// Push the freshly armed breakpoint set to a live run-thread. The run reads it
+    /// outside park, so an edit made while running or stopped both take effect at
+    /// the next statement.
     fn update_running_breakpoints(&mut self) {
         let armed = self.armed_breakpoints();
-        if let Some(running) = self.running.as_ref()
-            && running.stopped_at.is_some()
-        {
-            let _ = running.control.send(Control::SetBreakpoints(armed));
+        if let Some(running) = self.running.as_ref() {
+            let _ = running.breakpoints.send(armed);
         }
     }
 
@@ -989,6 +985,8 @@ impl<W: Write> Session<W> {
                     control: running.control,
                     events: running.events,
                     terminate: running.terminate,
+                    pause: running.pause,
+                    breakpoints: running.breakpoints,
                     execution_boundary: execution_boundary.clone(),
                     stopped_at: None,
                     pending_resume: None,
@@ -1372,23 +1370,32 @@ impl<W: Write> Session<W> {
 
     /// `pause`: stop at the next statement.
     ///
-    /// A pause request cannot interrupt a statement mid-flight. It resumes the
-    /// parked run with [`Resume::Pause`], which stops before the next statement and
-    /// reports `pause`.
+    /// A pause request cannot interrupt a statement mid-flight; it takes the next
+    /// statement boundary. A parked run resumes with [`Resume::Pause`]; a run that
+    /// is already executing observes the shared pause flag its hook checks between
+    /// statements. Either way the stop is reported with reason `pause`.
     fn on_pause(&mut self, request: &Json, arguments: &Json) {
         if let Err(error) = parse_thread_id(arguments) {
             self.respond_error(request, error.message, error.contract);
             return;
         }
-        if !self.require_stopped_run(request) {
-            return;
+        match self.running.as_ref() {
+            None => {
+                self.respond_error(request, "not running", ERROR_NOT_RUNNING);
+            }
+            Some(running) if running.stopped_at.is_some() => {
+                self.respond(request, true, json!({}));
+                self.event(
+                    "continued",
+                    json!({ "threadId": THREAD_ID, "allThreadsContinued": true }),
+                );
+                self.resume_run(Resume::Pause);
+            }
+            Some(running) => {
+                running.pause.store(true, Ordering::Relaxed);
+                self.respond(request, true, json!({}));
+            }
         }
-        self.respond(request, true, json!({}));
-        self.event(
-            "continued",
-            json!({ "threadId": THREAD_ID, "allThreadsContinued": true }),
-        );
-        self.resume_run(Resume::Pause);
     }
 
     /// `evaluate`: watch, REPL, and hover requests evaluate checked Marrow
@@ -2186,6 +2193,7 @@ mod tests {
     ) -> (Session<Vec<u8>>, std::sync::mpsc::Receiver<&'static str>) {
         let (control_tx, control_rx) = std::sync::mpsc::channel();
         let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (breakpoints_tx, _breakpoints_rx) = std::sync::mpsc::channel();
         let (seen_tx, seen_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             while let Ok(control) = control_rx.recv() {
@@ -2197,7 +2205,7 @@ mod tests {
                         let _ = seen_tx.send("terminate");
                         break;
                     }
-                    Control::Query(_) | Control::SetBreakpoints(_) => {
+                    Control::Query(_) => {
                         let _ = seen_tx.send("other");
                     }
                 }
@@ -2211,6 +2219,8 @@ mod tests {
             control: control_tx,
             events: events_rx,
             terminate: Arc::new(AtomicBool::new(false)),
+            pause: Arc::new(AtomicBool::new(false)),
+            breakpoints: breakpoints_tx,
             execution_boundary: json!({ "sourceAnalysisGeneration": null }),
             stopped_at,
             pending_resume,
