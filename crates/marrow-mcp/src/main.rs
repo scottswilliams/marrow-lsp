@@ -212,10 +212,17 @@ fn handle_tools_call(id: Json, params: &Json, policy: Policy) -> Json {
 /// Marrow diagnostic or a domain operation error is a successful call, so an agent
 /// keying on `isError` sees real faults but not a program that failed to check.
 fn tool_result(name: &str, result: &Json) -> Json {
+    let is_error = is_tool_error(result);
+    // `tool_error` is an internal signal that only sets `isError`; strip it so it does not
+    // ride along in the structured result the agent reads.
+    let mut structured = result.clone();
+    if let Some(object) = structured.as_object_mut() {
+        object.remove("tool_error");
+    }
     json!({
         "content": [{ "type": "text", "text": summarize(name, result) }],
-        "structuredContent": result,
-        "isError": is_tool_error(result),
+        "structuredContent": structured,
+        "isError": is_error,
     })
 }
 

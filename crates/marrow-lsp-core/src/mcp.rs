@@ -65,7 +65,7 @@ const SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION: &str = "source.namespace.comp
 /// The stable shape version an agent pins to detect a breaking rename of a tool's
 /// top-level result. The fact-bearing tools carry their Marrow fact's version;
 /// these name the shapes this crate owns (`mw_check`, `mw_type_at`, `mw_run`),
-/// which previously carried none.
+/// which have no Marrow fact version of their own, so the crate versions them here.
 pub const CHECK_PROFILE_VERSION: &str = "mcp.check.v1";
 pub const TYPE_AT_PROFILE_VERSION: &str = "mcp.type_at.v1";
 pub const RUN_PROFILE_VERSION: &str = "mcp.run.v1";
@@ -956,7 +956,10 @@ const OUTPUT_CAP: usize = 64 * 1024;
 /// The evaluation runs on a watchdog thread so a run that loops past the budget
 /// is detached and reported as `budget_exceeded`, leaving the transport free to
 /// answer the next call. The detached thread holds only a fresh in-memory store,
-/// so abandoning it leaks no durable lock; it ends at process exit.
+/// so abandoning it leaks no durable lock — but a runaway loop keeps burning one
+/// CPU core until process exit, since there is no cooperative interrupt to unwind
+/// it. Bounding that cleanly needs a run-session step/time budget the runtime does
+/// not yet expose.
 pub fn run(
     file: &Path,
     entry: Option<&str>,
