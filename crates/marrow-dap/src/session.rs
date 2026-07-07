@@ -11,8 +11,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use marrow_check::{AnalysisSnapshot, CheckedDebugExpression, MarrowType, ScalarType, tooling};
 use marrow_lsp_core::execution::{
@@ -39,6 +40,12 @@ const DURABLE_REF: i64 = 2;
 const FIRST_DYNAMIC_REF: i64 = 1000;
 /// The single thread id the debugger exposes — the run is single-threaded.
 const THREAD_ID: i64 = 1;
+/// How long a terminate/disconnect waits for the run thread to unwind before it
+/// detaches it. The hook observes the terminate flag only between statements, so a
+/// run wedged in one long statement or a blocking builtin cannot stop promptly;
+/// after this budget the adapter detaches rather than blocking indefinitely.
+/// A graceful force-unwind of such a run is upstream work (UPSTREAM-4).
+const TEARDOWN_BUDGET: Duration = Duration::from_millis(500);
 /// The single stack frame id exposed while stopped. It is a frame identity, not
 /// the thread identity, even while both singleton ids share the same value.
 const FRAME_ID: i64 = 1;
@@ -368,11 +375,6 @@ struct VariablesInput {
 
 struct EvaluateInput<'a> {
     expression: &'a str,
-}
-
-enum RunPump {
-    Continue,
-    ParkedOrDone,
 }
 
 impl<W: Write> Session<W> {
@@ -1595,30 +1597,11 @@ impl<W: Write> Session<W> {
         }
     }
 
-    /// Read run-thread events until the run parks at a stop or finishes. Output
-    /// events are forwarded as they arrive.
-    fn pump_until_stopped_or_done(&mut self) {
-        loop {
-            let event = match self.running.as_ref() {
-                Some(running) => running.events.recv(),
-                None => return,
-            };
-            match event {
-                Ok(event) => match self.handle_run_event(event) {
-                    RunPump::ParkedOrDone => return,
-                    RunPump::Continue => continue,
-                },
-                // The events channel closed: the run-thread finished. Collect its
-                // outcome and end the session.
-                Err(_) => {
-                    self.finish_run();
-                    return;
-                }
-            }
-        }
-    }
-
-    fn handle_run_event(&mut self, event: RunEvent) -> RunPump {
+    /// Apply one run-thread event on the protocol thread: raise a `stopped` (unless
+    /// the run is terminating, when a late stop is suppressed) or forward logpoint
+    /// output. An `Answer` here would be a protocol-thread bug; answers are only
+    /// received inside `query`.
+    fn handle_run_event(&mut self, event: RunEvent) {
         match event {
             RunEvent::Stopped(info) => {
                 if self
@@ -1626,7 +1609,7 @@ impl<W: Write> Session<W> {
                     .as_ref()
                     .is_some_and(|running| running.terminating)
                 {
-                    return RunPump::Continue;
+                    return;
                 }
                 let reason = info.reason;
                 if let Some(running) = self.running.as_mut() {
@@ -1640,18 +1623,14 @@ impl<W: Write> Session<W> {
                         "allThreadsStopped": true,
                     }),
                 );
-                RunPump::ParkedOrDone
             }
             RunEvent::Output(output) => {
                 self.event(
                     "output",
                     json!({ "category": "console", "output": logpoint_output(output) }),
                 );
-                RunPump::Continue
             }
-            // An Answer here would be a protocol-thread bug; answers are only
-            // received inside `query`.
-            RunEvent::Answer(_) => RunPump::Continue,
+            RunEvent::Answer(_) => {}
         }
     }
 
@@ -1692,7 +1671,8 @@ impl<W: Write> Session<W> {
     }
 
     /// Terminate the run-thread (if any) and mark the session done. Sends a
-    /// terminate control so the hook unwinds, then drains to completion.
+    /// terminate control so the hook unwinds, then drains and joins within a bounded
+    /// budget so a wedged run cannot block the adapter.
     fn terminate_session(&mut self) {
         if let Some(running) = self.running.as_mut() {
             running.terminate.store(true, Ordering::Relaxed);
@@ -1701,10 +1681,43 @@ impl<W: Write> Session<W> {
             running.terminating = true;
             let _ = running.control.send(Control::Terminate);
         }
-        // Drain any final events and join.
-        self.pump_until_stopped_or_done();
-        if self.running.is_some() {
-            self.finish_run();
+        self.finish_run_within(TEARDOWN_BUDGET);
+        self.done = true;
+    }
+
+    /// Drain final run-thread events and join, but only until `budget` elapses. A
+    /// run that unwinds promptly closes its event channel and is joined; a run
+    /// wedged inside one long statement is detached at the deadline so terminate
+    /// still returns.
+    fn finish_run_within(&mut self, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = match self.running.as_ref() {
+                Some(running) => running.events.recv_timeout(remaining),
+                None => return,
+            };
+            match event {
+                Ok(event) => self.handle_run_event(event),
+                // The channel closed: the run unwound. Join is now immediate.
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.finish_run();
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.detach_run();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Abandon a run that did not unwind within the budget: drop its handle without
+    /// joining so it cannot block the adapter. The detached thread ends at process
+    /// exit.
+    fn detach_run(&mut self) {
+        if self.running.take().is_some() {
+            self.event("terminated", json!({}));
         }
         self.done = true;
     }
@@ -2240,6 +2253,38 @@ mod tests {
         (session, seen_rx)
     }
 
+    /// A session whose run thread never finishes and never drops its event sender,
+    /// modelling a run wedged inside one long statement that cannot reach the
+    /// terminate check between statements. The returned sender releases the thread
+    /// once the test is done with it.
+    fn session_with_stuck_running() -> (Session<Vec<u8>>, std::sync::mpsc::Sender<()>) {
+        let (control_tx, _control_rx) = std::sync::mpsc::channel::<Control>();
+        let (events_tx, events_rx) = std::sync::mpsc::channel::<RunEvent>();
+        let (breakpoints_tx, _breakpoints_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            // Hold the event sender open so the channel never disconnects, and
+            // block without observing control, so a plain join would never return.
+            let _events_tx = events_tx;
+            let _ = release_rx.recv();
+            None
+        });
+        let mut session = Session::new(Vec::new());
+        session.running = Some(Running {
+            handle,
+            control: control_tx,
+            events: events_rx,
+            terminate: Arc::new(AtomicBool::new(false)),
+            pause: Arc::new(AtomicBool::new(false)),
+            breakpoints: breakpoints_tx,
+            execution_boundary: json!({ "sourceAnalysisGeneration": null }),
+            stopped_at: None,
+            pending_resume: None,
+            terminating: false,
+        });
+        (session, release_tx)
+    }
+
     fn first_dap_message(output: &str) -> Json {
         let mut reader = std::io::Cursor::new(output.as_bytes());
         crate::protocol::read_message(&mut reader).unwrap()
@@ -2385,6 +2430,22 @@ mod tests {
         );
         assert!(seen.try_recv().is_err());
         assert!(session.done());
+    }
+
+    #[test]
+    fn terminate_detaches_a_wedged_run_within_the_budget() {
+        let (mut session, release) = session_with_stuck_running();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            session.terminate_session();
+            let _ = done_tx.send(session.done());
+        });
+
+        let done = done_rx
+            .recv_timeout(TEARDOWN_BUDGET + Duration::from_secs(5))
+            .expect("terminate_session returns within the teardown budget");
+        assert!(done, "the session is marked done once the run is detached");
+        let _ = release.send(());
     }
 
     #[test]
