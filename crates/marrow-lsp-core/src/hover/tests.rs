@@ -1,5 +1,12 @@
+use super::facts::{self, HoverFact};
 use super::*;
 use lsp_types::HoverContents;
+use marrow_check::tooling::{
+    CallableSignature, CallableSignatureKind, SavedPlaceHoverFact, SourceCallableHoverFact,
+    SourceEnumMemberStatus, SourceModulePathHoverFact, SourceOperatorHoverFact,
+    SourceResourceHoverFact, SourceResourceHoverMemberKind, SourceSchemaHoverFact,
+    SourceTypeHoverFact, StoreRootHoverFact,
+};
 use marrow_check::{ProjectSources, analyze_project};
 use marrow_project::parse_config;
 
@@ -81,18 +88,216 @@ fn hover_value_at(
     Some(markup.value)
 }
 
-fn assert_status_enum_hover(value: &str) {
-    assert!(
-        value.starts_with("```marrow\nenum Status\n```"),
-        "enum annotation hover should lead with the enum signature: {value}"
+/// The typed hover fact selected at the first byte of `needle` in a single-file project — the
+/// oracle the LSP renders. Asserting the fact's variant and typed payload keeps a test anchored to
+/// the semantic decision (which callable/kind/module was resolved) rather than a fragment of the
+/// rendered Markdown, which rewords freely upstream.
+fn analyzed_with_index(source: &str) -> (AnalysisSnapshot, BindingIndex, std::path::PathBuf) {
+    let (snapshot, file) = analyze(source);
+    let index = build_binding_index(&snapshot);
+    (snapshot, index, file)
+}
+
+fn callable_fact_from(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> SourceCallableHoverFact {
+    match facts::collect(snapshot, index, file, offset) {
+        Some(HoverFact::SourceCallable { fact, .. }) => fact,
+        _ => panic!("expected a source-callable hover fact at offset {offset}"),
+    }
+}
+
+fn callable_fact(source: &str, needle: &str) -> SourceCallableHoverFact {
+    let (snapshot, index, file) = analyzed_with_index(source);
+    callable_fact_from(&snapshot, &index, &file, offset_of(source, needle))
+}
+
+/// The module-path hover fact at `offset`, or `None` when the resolved hover is not a module path.
+/// The rendered "default library namespace/module." context is a pure render of the variant, and
+/// the operation summary a render of the typed `operations` list.
+fn module_path_fact_at(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> Option<SourceModulePathHoverFact> {
+    match facts::collect(snapshot, index, file, offset) {
+        Some(HoverFact::SourceModulePath(fact)) => Some(fact),
+        _ => None,
+    }
+}
+
+fn schema_fact_from(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> SourceSchemaHoverFact {
+    match facts::collect(snapshot, index, file, offset) {
+        Some(HoverFact::SourceSchema(fact)) => fact,
+        _ => panic!("expected a schema hover fact at offset {offset}"),
+    }
+}
+
+fn saved_place_fact_from(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> SavedPlaceHoverFact {
+    match facts::collect(snapshot, index, file, offset) {
+        Some(HoverFact::SavedPlace(fact)) => fact,
+        _ => panic!("expected a saved-place hover fact at offset {offset}"),
+    }
+}
+
+fn saved_place_docs(fact: &SavedPlaceHoverFact) -> &[String] {
+    match fact {
+        SavedPlaceHoverFact::Field { docs, .. }
+        | SavedPlaceHoverFact::Layer { docs, .. }
+        | SavedPlaceHoverFact::Index { docs, .. } => docs,
+    }
+}
+
+fn type_fact_from(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> SourceTypeHoverFact {
+    match facts::collect(snapshot, index, file, offset) {
+        Some(HoverFact::Type(fact)) => fact,
+        _ => panic!("expected a type hover fact at offset {offset}"),
+    }
+}
+
+fn store_root_fact_from(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> StoreRootHoverFact {
+    match facts::collect(snapshot, index, file, offset) {
+        Some(HoverFact::StoreRoot(fact)) => fact,
+        _ => panic!("expected a store-root hover fact at offset {offset}"),
+    }
+}
+
+/// Whether the resource hover fact carries a field member named `name` of rendered type `ty` — the
+/// typed backing of a "required <name>: <ty>" member-summary line. The leaf path segment names the
+/// member; deeper paths are nested groups the summary flattens.
+fn resource_has_field(res: &SourceResourceHoverFact, name: &str, ty: &str) -> bool {
+    res.members.iter().any(|member| {
+        member.path.last().map(|seg| seg.name.as_str()) == Some(name)
+            && matches!(&member.kind, SourceResourceHoverMemberKind::Field { ty: field_ty, .. } if field_ty == ty)
+    })
+}
+
+fn operator_fact_from(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> SourceOperatorHoverFact {
+    match facts::collect(snapshot, index, file, offset) {
+        Some(HoverFact::SourceOperator(fact)) => fact,
+        _ => panic!("expected an operator hover fact at offset {offset}"),
+    }
+}
+
+/// Whether the hover at `offset` resolves to the language-operator fact — the source of the rendered
+/// "language operator" context. A segment merely spelled like an operator keyword must not.
+fn is_operator_fact(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) -> bool {
+    matches!(
+        facts::collect(snapshot, index, file, offset),
+        Some(HoverFact::SourceOperator(_))
+    )
+}
+
+fn is_std_library_fact(fact: &Option<SourceModulePathHoverFact>) -> bool {
+    matches!(
+        fact,
+        Some(
+            SourceModulePathHoverFact::StandardLibraryNamespace(_)
+                | SourceModulePathHoverFact::StandardLibraryModule(_)
+        )
+    )
+}
+
+fn callable_fact_at(source: &str, offset: usize) -> SourceCallableHoverFact {
+    let (snapshot, index, file) = analyzed_with_index(source);
+    callable_fact_from(&snapshot, &index, &file, offset)
+}
+
+/// The intrinsic-callable signature at `needle`, panicking if the resolved callable is not an
+/// intrinsic. The rendered "default library <x>" context line is a pure render of `sig.kind`, and
+/// the signature code fence a pure render of `sig.path`/`params`/`return_shape`.
+fn intrinsic_sig(source: &str, needle: &str) -> CallableSignature {
+    match callable_fact(source, needle) {
+        SourceCallableHoverFact::Intrinsic(sig) => sig,
+        other => panic!("expected an intrinsic callable, got {other:?}"),
+    }
+}
+
+/// The doc lines a callable hover fact carries, whichever callable variant it is. Asserting these
+/// keeps a doc test on the typed `docs` payload instead of the Markdown layout that frames it.
+fn callable_docs(fact: &SourceCallableHoverFact) -> &[String] {
+    match fact {
+        SourceCallableHoverFact::Intrinsic(sig) => &sig.docs,
+        SourceCallableHoverFact::Function(f) => &f.docs,
+        SourceCallableHoverFact::Parameter(p) => &p.docs,
+        SourceCallableHoverFact::ModuleConst { docs, .. } => docs,
+    }
+}
+
+/// Compare a rendered hover value to a reviewed golden under `tests/goldens/hover/<name>.md`.
+/// Used only for the irreducible rendered-Markdown layout (effect blocks, member summaries, exact
+/// multi-line signatures) that has no cleaner typed oracle. Set `MARROW_BLESS_GOLDENS=1` to rewrite
+/// the golden after reviewing an intended semantic-contract change.
+fn assert_hover_golden(name: &str, value: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/goldens/hover")
+        .join(format!("{name}.md"));
+    if std::env::var_os("MARROW_BLESS_GOLDENS").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, value).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        panic!("missing hover golden `{name}`; set MARROW_BLESS_GOLDENS=1 to create it")
+    });
+    assert_eq!(
+        value, expected,
+        "hover golden `{name}` drifted; if this is an intended rendering/semantic change, review it \
+         and rerun with MARROW_BLESS_GOLDENS=1 to update the golden"
     );
+}
+
+/// Assert the hover at `offset` resolves to the shared `Status` enum fact — the typed backing of
+/// the "enum Status" signature, its "Lifecycle state." docs, and its member summary.
+fn assert_status_enum_fact(
+    snapshot: &AnalysisSnapshot,
+    index: &BindingIndex,
+    file: &std::path::Path,
+    offset: usize,
+) {
+    let SourceSchemaHoverFact::Enum(en) = schema_fact_from(snapshot, index, file, offset) else {
+        panic!("enum annotation must resolve to the enum schema fact");
+    };
+    assert_eq!(en.name, "Status");
+    assert!(en.docs.iter().any(|line| line == "Lifecycle state."));
     assert!(
-        value.contains("Lifecycle state."),
-        "enum annotation hover should include docs: {value}"
-    );
-    assert!(
-        value.contains("open"),
-        "enum annotation hover should include member summary: {value}"
+        en.members
+            .iter()
+            .any(|member| member.path.join("::") == "open")
     );
 }
 
@@ -176,16 +381,21 @@ pub fn get(
     return book.title
 ";
     let (snapshot, file) = analyze(source);
+    let index = build_binding_index(&snapshot);
     let offset = offset_of(source, "book.title") + "book.".len();
 
-    let hover = hover_value_at(&snapshot, &index_for(&snapshot), &file, offset);
-    if let Some(value) = hover {
-        assert_ne!(value, "```marrow\ntitle: string\n```");
-        assert!(
-            !value.contains("The parameter, not the field."),
-            "field hover should not inherit parameter docs: {value}"
-        );
-    }
+    // A field use that merely shares a parameter's name must not resolve to the parameter hover,
+    // which is what would leak the parameter's docs.
+    assert!(
+        !matches!(
+            facts::collect(&snapshot, &index, &file, offset),
+            Some(HoverFact::SourceCallable {
+                fact: SourceCallableHoverFact::Parameter(_),
+                ..
+            })
+        ),
+        "field hover must not resolve to the same-named parameter"
+    );
 }
 
 #[test]
@@ -203,16 +413,21 @@ pub fn make(
     return Book(title: title)
 ";
     let (snapshot, file) = analyze(source);
+    let index = build_binding_index(&snapshot);
     let offset = offset_of(source, "Book(title: title)") + "Book(".len();
 
-    let hover = hover_value_at(&snapshot, &index_for(&snapshot), &file, offset);
-    if let Some(value) = hover {
-        assert_ne!(value, "```marrow\ntitle: string\n```");
-        assert!(
-            !value.contains("The parameter, not the named argument label."),
-            "named argument label should not inherit parameter docs: {value}"
-        );
-    }
+    // The named-argument label is not a use of the parameter, so it must not resolve to the
+    // parameter hover (which would inherit the parameter's docs).
+    assert!(
+        !matches!(
+            facts::collect(&snapshot, &index, &file, offset),
+            Some(HoverFact::SourceCallable {
+                fact: SourceCallableHoverFact::Parameter(_),
+                ..
+            })
+        ),
+        "named argument label must not resolve to the same-named parameter"
+    );
 }
 
 #[test]
@@ -228,28 +443,14 @@ pub fn f(
 ): string
     return n
 ";
-    let (snapshot, file) = analyze(source);
     let offset = offset_of(source, "return n") + "return ".len();
 
-    let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `n`");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup contents");
+    let SourceCallableHoverFact::Parameter(param) = callable_fact_at(source, offset) else {
+        panic!("expected a parameter hover");
     };
-    assert!(
-        markup.value.starts_with("```marrow\nn: string\n```"),
-        "duplicate parameter hover should match the binding in scope: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("Second parameter docs."),
-        "duplicate parameter hover should use the later parameter docs: {}",
-        markup.value
-    );
-    assert!(
-        !markup.value.contains("First parameter docs."),
-        "duplicate parameter hover should not use the shadowed parameter docs: {}",
-        markup.value
-    );
+    assert_eq!(param.name, "n");
+    // The docs of the binding in scope — the later `n` — and not the shadowed first parameter.
+    assert_eq!(param.docs, ["Second parameter docs."]);
 }
 
 #[test]
@@ -263,28 +464,13 @@ pub fn f(
 ): int
     return n
 ";
-    let (snapshot, file) = analyze(source);
     let offset = offset_of(source, "return n") + "return ".len();
 
-    let hover = hover(&snapshot, &file, offset).expect("a hover at the use of `n`");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup contents");
+    let SourceCallableHoverFact::Parameter(param) = callable_fact_at(source, offset) else {
+        panic!("expected a parameter hover");
     };
-    assert!(
-        markup.value.starts_with("```marrow\nn: int\n```"),
-        "parameter signature should lead the hover: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("**Parameter**"),
-        "parameter docs should be in a short section: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("The number to return."),
-        "parameter docs should be shown: {}",
-        markup.value
-    );
+    assert_eq!(param.name, "n");
+    assert_eq!(param.docs, ["The number to return."]);
 }
 
 #[test]
@@ -308,12 +494,9 @@ pub fn f(
     let HoverContents::Markup(markup) = hover.contents else {
         panic!("expected markup contents");
     };
+    // The exact value is a bare type with no docs section, which already proves the shadowing
+    // local does not inherit the outer parameter's docs.
     assert_eq!(markup.value, "```marrow\nint\n```");
-    assert!(
-        !markup.value.contains("The outer parameter."),
-        "shadowing local should not inherit parameter docs: {}",
-        markup.value
-    );
 }
 
 #[test]
@@ -328,30 +511,15 @@ pub fn add(x: int, y: int): int
 pub fn caller(): int
     return add(1, 2)
 ";
-    let (snapshot, file) = analyze(source);
     let offset = source.rfind("add(1, 2)").unwrap();
 
-    let hover = hover(&snapshot, &file, offset).expect("a hover at the function call");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup contents");
+    let SourceCallableHoverFact::Function(func) = callable_fact_at(source, offset) else {
+        panic!("expected a function hover");
     };
-    assert!(
-        markup
-            .value
-            .starts_with("```marrow\nfn add(x: int, y: int): int\n```"),
-        "function signature should lead the hover: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("Adds two numbers."),
-        "function docs should follow the signature: {}",
-        markup.value
-    );
-    assert!(
-        !markup.value.contains("Parameters"),
-        "parameter docs section should be omitted when no parameter has docs: {}",
-        markup.value
-    );
+    assert_eq!(func.name, "add");
+    assert_eq!(func.docs, ["Adds two numbers."]);
+    // No parameter carries docs, which is why the rendered hover omits the parameter section.
+    assert!(func.params.iter().all(|param| param.docs.is_empty()));
 }
 
 #[test]
@@ -376,34 +544,24 @@ pub fn touch(id: int): string
 pub fn caller(): string
     return touch(1)
 ";
+    // The direct-effect names (Book.title, Book.visits) exist only in the rendered form: the typed
+    // `DirectEffectFacts` carries opaque resource/member ids, so the resolved-name rendering is the
+    // readable oracle. A typed presence check backs it; the reviewed golden pins the resolved names.
+    let SourceCallableHoverFact::Function(func) = callable_fact(source, "touch(1)") else {
+        panic!("expected a function hover");
+    };
+    let effects = func
+        .direct_effects
+        .expect("the function fact carries direct effects");
+    assert!(effects.transactions);
+    assert!(!effects.saved_reads.is_empty());
+    assert!(!effects.saved_writes.is_empty());
+    assert!(!effects.host_calls.is_empty());
+
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
     let value = hover_value(&snapshot, &index, &file, source, "touch(1)");
-
-    assert!(
-        value.starts_with("```marrow\nfn touch(id: int): string\n```"),
-        "function signature should lead the hover: {value}"
-    );
-    assert!(
-        value.contains("**Direct effects**"),
-        "function hover should include a direct-effects section: {value}"
-    );
-    assert!(
-        value.contains("- saved reads: Book.title, Book.visits"),
-        "direct saved reads should use canonical resource/member facts: {value}"
-    );
-    assert!(
-        value.contains("- saved writes: Book.visits"),
-        "direct saved writes should use canonical resource/member facts: {value}"
-    );
-    assert!(
-        value.contains("- transaction"),
-        "direct transaction effect should be shown: {value}"
-    );
-    assert!(
-        value.contains("- host: output"),
-        "direct host output effect should be shown: {value}"
-    );
+    assert_hover_golden("function_call_direct_effects", &value);
 }
 
 #[test]
@@ -444,51 +602,42 @@ pub fn h()
     print(\"b\")
     return count(^books)
 ";
-    let (snapshot, file) = analyze(source);
-    let index = index_for(&snapshot);
-    let value = hover_value(&snapshot, &index, &file, source, "exists(^books");
-
+    // "default library builtin." is a pure render of `sig.kind == Builtin`; the signature code
+    // fence a render of `sig.path`; the docs are the typed `sig.docs` payload.
+    let exists = intrinsic_sig(source, "exists(^books");
+    assert_eq!(exists.kind, CallableSignatureKind::Builtin);
+    assert_eq!(exists.path, ["exists"]);
     assert!(
-        value.starts_with("```marrow\nexists(path): bool\n```"),
-        "builtin signature should lead the hover: {value}"
-    );
-    assert!(
-        value.contains("default library"),
-        "builtin hover should identify default-library context: {value}"
-    );
-    assert!(
-        value.contains("builtin"),
-        "builtin hover should identify the source kind: {value}"
-    );
-    assert!(
-        value.contains("Returns true when the saved path exists."),
-        "builtin hover should include exists docs: {value}"
+        exists
+            .docs
+            .iter()
+            .any(|line| line == "Returns true when the saved path exists.")
     );
 
-    let next_id_value = hover_value(&snapshot, &index, &file, source, "nextId(^books");
+    let next_id = callable_fact(source, "nextId(^books");
+    let next_id_docs = callable_docs(&next_id);
     assert!(
-        next_id_value.starts_with("```marrow\nnextId(^root): Id\n```"),
-        "builtin signature should lead the hover: {next_id_value}"
+        next_id_docs
+            .iter()
+            .any(|line| line == "Returns the next id for a saved root.")
     );
+    // Docs are specific to the hovered builtin, not inherited from a sibling.
     assert!(
-        next_id_value.contains("Returns the next id for a saved root."),
-        "builtin hover should include nextId docs: {next_id_value}"
-    );
-    assert!(
-        !next_id_value.contains("Returns true when the saved path exists."),
-        "builtin docs should be specific to the hovered builtin: {next_id_value}"
+        !next_id_docs
+            .iter()
+            .any(|line| line == "Returns true when the saved path exists.")
     );
 
-    let print_value = hover_value(&snapshot, &index, &file, source, "print(\"b");
+    let print = callable_fact(source, "print(\"b");
     assert!(
-        print_value.contains("Writes rendered text to output with a newline."),
-        "print hover should describe output behavior: {print_value}"
+        callable_docs(&print)
+            .iter()
+            .any(|line| line == "Writes rendered text to output with a newline.")
     );
-    let count_value = hover_value(&snapshot, &index, &file, source, "count(^books");
+    let count = callable_fact(source, "count(^books");
     assert!(
-        count_value
-            .contains("Returns child count for a saved path, 1 for a scalar, or 0 when absent."),
-        "count hover should describe path/scalar/absent behavior: {count_value}"
+        callable_docs(&count).iter().any(|line| line
+            == "Returns child count for a saved path, 1 for a scalar, or 0 when absent.")
     );
 }
 
@@ -500,18 +649,9 @@ module a
 pub fn f(): int
     return std::text::length(\"abc\")
 ";
-    let (snapshot, file) = analyze(source);
-    let index = index_for(&snapshot);
-    let value = hover_value(&snapshot, &index, &file, source, "length(\"abc");
-
-    assert!(
-        value.starts_with("```marrow\nstd::text::length(string): int\n```"),
-        "std signature should lead the hover: {value}"
-    );
-    assert!(
-        value.contains("default library"),
-        "std hover should identify default-library context: {value}"
-    );
+    let sig = intrinsic_sig(source, "length(\"abc");
+    assert_eq!(sig.kind, CallableSignatureKind::StandardLibrary);
+    assert_eq!(sig.path, ["std", "text", "length"]);
 }
 
 #[test]
@@ -524,15 +664,11 @@ use std::text
 pub fn f(): int
     return text::length(\"abc\")
 ";
-    let (snapshot, file) = analyze(source);
-    let index = index_for(&snapshot);
-    let value = hover_value(&snapshot, &index, &file, source, "length(\"abc");
-
-    assert!(
-        value.starts_with("```marrow\nstd::text::length(string): int\n```"),
-        "std signature should be expanded from the file import context: {value}"
-    );
-    assert!(value.contains("default library std operation"));
+    // The imported `text::length` leaf expands to the canonical `std::text::length` path (a
+    // StandardLibrary intrinsic) from the file's import context.
+    let sig = intrinsic_sig(source, "length(\"abc");
+    assert_eq!(sig.kind, CallableSignatureKind::StandardLibrary);
+    assert_eq!(sig.path, ["std", "text", "length"]);
 }
 
 #[test]
@@ -543,22 +679,9 @@ module a
 pub fn f(): int
     return int(\"1\")
 ";
-    let (snapshot, file) = analyze(source);
-    let index = index_for(&snapshot);
-    let value = hover_value(&snapshot, &index, &file, source, "int(\"1");
-
-    assert!(
-        value.starts_with("```marrow\nint(value): int\n```"),
-        "scalar conversion signature should lead the hover: {value}"
-    );
-    assert!(
-        value.contains("conversion"),
-        "scalar hover should identify conversion context: {value}"
-    );
-    assert!(
-        value.contains("default library"),
-        "scalar hover should identify default-library context: {value}"
-    );
+    let sig = intrinsic_sig(source, "int(\"1");
+    assert_eq!(sig.kind, CallableSignatureKind::ScalarConversion);
+    assert_eq!(sig.path, ["int"]);
 }
 
 #[test]
@@ -569,22 +692,11 @@ module a
 pub fn f(): ErrorCode
     return ErrorCode(\"not_found\")
 ";
-    let (snapshot, file) = analyze(source);
-    let index = index_for(&snapshot);
-    let value = hover_value(&snapshot, &index, &file, source, "ErrorCode(\"not");
-
-    assert!(
-        value.starts_with("```marrow\nErrorCode(value): ErrorCode\n```"),
-        "ErrorCode conversion signature should use the language type: {value}"
-    );
-    assert!(
-        value.contains("conversion"),
-        "ErrorCode hover should identify conversion context: {value}"
-    );
-    assert!(
-        value.contains("default library"),
-        "ErrorCode hover should identify default-library context: {value}"
-    );
+    // "default library scalar conversion." renders the ScalarConversion intrinsic kind; ErrorCode is
+    // a scalar-conversion constructor over the language `ErrorCode` type.
+    let sig = intrinsic_sig(source, "ErrorCode(\"not");
+    assert_eq!(sig.kind, CallableSignatureKind::ScalarConversion);
+    assert_eq!(sig.path, ["ErrorCode"]);
 }
 
 #[test]
@@ -598,37 +710,24 @@ pub fn f(): int
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
 
-    let std_value = hover_value(&snapshot, &index, &file, source, "std::text");
-    assert!(
-        std_value.starts_with("```marrow\nstd\n```"),
-        "std namespace hover should lead with the namespace: {std_value}"
-    );
-    assert!(
-        std_value.contains("default library namespace"),
-        "std namespace hover should identify default-library context: {std_value}"
-    );
+    // "default library namespace." renders the StandardLibraryNamespace variant; the module
+    // segment renders StandardLibraryModule and summarizes its typed `operations` list.
+    let std_fact = module_path_fact_at(&snapshot, &index, &file, offset_of(source, "std::text"));
+    assert!(matches!(
+        std_fact,
+        Some(SourceModulePathHoverFact::StandardLibraryNamespace(_))
+    ));
 
     let text_offset = offset_of(source, "std::text") + "std::".len();
-    let text_value = hover_value_at(&snapshot, &index, &file, text_offset)
-        .expect("a hover over the std::text module segment");
-    assert!(
-        text_value.starts_with("```marrow\nstd::text\n```"),
-        "std::text default-library docs should lead with the module path: {text_value}"
-    );
-    assert!(
-        text_value.contains("default library module"),
-        "std::text hover should identify default-library context: {text_value}"
-    );
-    assert!(
-        text_value.contains("length"),
-        "std::text hover should summarize available operations: {text_value}"
-    );
+    let text_fact = module_path_fact_at(&snapshot, &index, &file, text_offset);
+    let Some(SourceModulePathHoverFact::StandardLibraryModule(module)) = text_fact else {
+        panic!("expected a std::text module fact");
+    };
+    assert_eq!(module.module, "text");
+    assert!(module.operations.iter().any(|op| op.name == "length"));
 
-    let length_value = hover_value(&snapshot, &index, &file, source, "length(\"abc");
-    assert!(
-        length_value.starts_with("```marrow\nstd::text::length(string): int\n```"),
-        "std operation leaf hover should remain the operation signature: {length_value}"
-    );
+    let length_sig = intrinsic_sig(source, "length(\"abc");
+    assert_eq!(length_sig.path, ["std", "text", "length"]);
 }
 
 #[test]
@@ -664,21 +763,17 @@ pub fn run(): int
     let index = index_for(&snapshot);
 
     for needle in ["std::text::custom", "std::custom::ping"] {
-        let std_value = hover_value_at(&snapshot, &index, &file, offset_of(app_source, needle));
+        let std_seg = module_path_fact_at(&snapshot, &index, &file, offset_of(app_source, needle));
         assert!(
-            !std_value
-                .as_deref()
-                .is_some_and(|value| value.contains("default library")),
-            "project-owned {needle} std segment should not get default-library docs: {std_value:?}"
+            !is_std_library_fact(&std_seg),
+            "project-owned {needle} std segment must not resolve to a default-library fact"
         );
 
         let module_offset = offset_of(app_source, needle) + "std::".len();
-        let module_value = hover_value_at(&snapshot, &index, &file, module_offset);
+        let module_seg = module_path_fact_at(&snapshot, &index, &file, module_offset);
         assert!(
-            !module_value
-                .as_deref()
-                .is_some_and(|value| value.contains("default library")),
-            "project-owned {needle} module segment should not get default-library docs: {module_value:?}"
+            !is_std_library_fact(&module_seg),
+            "project-owned {needle} module segment must not resolve to a default-library fact"
         );
     }
 }
@@ -703,32 +798,38 @@ pub fn run(): int
     );
     let index = index_for(&snapshot);
 
-    let std_value = hover_value_at(&snapshot, &index, &file, offset_of(app_source, "std::text"));
+    let std_seg = module_path_fact_at(&snapshot, &index, &file, offset_of(app_source, "std::text"));
     assert!(
-        std_value
-            .as_deref()
-            .is_some_and(|value| value.contains("default library namespace")),
-        "std segment should keep default-library docs when a builtin std op wins dispatch: {std_value:?}"
+        matches!(
+            std_seg,
+            Some(SourceModulePathHoverFact::StandardLibraryNamespace(_))
+        ),
+        "std segment keeps the default-library namespace fact when a builtin std op wins dispatch"
     );
 
     let text_offset = offset_of(app_source, "std::text") + "std::".len();
-    let text_value = hover_value_at(&snapshot, &index, &file, text_offset);
+    let text_seg = module_path_fact_at(&snapshot, &index, &file, text_offset);
     assert!(
-        text_value
-            .as_deref()
-            .is_some_and(|value| value.contains("default library module")),
-        "std::text segment should keep default-library docs when a builtin std op wins dispatch: {text_value:?}"
+        matches!(
+            text_seg,
+            Some(SourceModulePathHoverFact::StandardLibraryModule(_))
+        ),
+        "std::text segment keeps the default-library module fact when a builtin std op wins dispatch"
     );
 
-    let length_value = hover_value(&snapshot, &index, &file, app_source, "length(\"abc");
-    assert!(
-        length_value.starts_with("```marrow\nstd::text::length(string): int\n```"),
-        "std::text::length leaf hover should keep builtin precedence over a project function: {length_value}"
-    );
-    assert!(
-        length_value.contains("default library"),
-        "std::text::length leaf hover should identify the builtin dispatch: {length_value}"
-    );
+    // The leaf keeps builtin precedence over the project function: it resolves to the StandardLibrary
+    // intrinsic `std::text::length`, not the project's `length`.
+    let length_sig = match callable_fact_from(
+        &snapshot,
+        &index,
+        &file,
+        offset_of(app_source, "length(\"abc"),
+    ) {
+        SourceCallableHoverFact::Intrinsic(sig) => sig,
+        other => panic!("expected an intrinsic callable, got {other:?}"),
+    };
+    assert_eq!(length_sig.kind, CallableSignatureKind::StandardLibrary);
+    assert_eq!(length_sig.path, ["std", "text", "length"]);
 }
 
 #[test]
@@ -756,14 +857,13 @@ pub fn run(): string
     );
     let index = index_for(&snapshot);
     let leaf = offset_of(app_source, "use shelf::books") + "use shelf::".len();
-    assert!(
-        hover_value_at(&snapshot, &index, &file, leaf + 1).is_some_and(|value| {
-            value.starts_with("```marrow\nmodule shelf::books\n```")
-                && value.contains("project source module")
-                && !value.contains("titleOf")
-        }),
-        "module/use path hover should render the canonical Marrow module fact"
-    );
+    // "project source module" renders the ProjectModule variant, which carries the canonical module
+    // name but no function list — so a member like `titleOf` cannot leak into the module hover.
+    let fact = module_path_fact_at(&snapshot, &index, &file, leaf + 1);
+    let Some(SourceModulePathHoverFact::ProjectModule(module)) = fact else {
+        panic!("expected a project-module hover fact");
+    };
+    assert_eq!(module.module, "shelf::books");
 }
 
 #[test]
@@ -798,10 +898,11 @@ pub fn run(): string
         module.starts_with("```marrow\nmodule shelf::books\n```"),
         "module-prefix hover should render the canonical module fact: {module}"
     );
-    assert!(
-        !module.contains("Formats a book title."),
-        "module-prefix hover should not inherit function docs: {module}"
-    );
+    // The module prefix resolves to the ProjectModule variant, which carries no function docs.
+    assert!(matches!(
+        module_path_fact_at(&snapshot, &index, &file, call + 1),
+        Some(SourceModulePathHoverFact::ProjectModule(_))
+    ));
 
     let leaf = call + "books::".len();
     let function =
@@ -811,8 +912,9 @@ pub fn run(): string
         "function leaf should keep the rich function hover: {function}"
     );
     assert!(
-        function.contains("Formats a book title."),
-        "function leaf should keep function docs: {function}"
+        callable_docs(&callable_fact_from(&snapshot, &index, &file, leaf + 1))
+            .iter()
+            .any(|line| line == "Formats a book title.")
     );
 }
 
@@ -856,8 +958,9 @@ pub fn run(): string
         "fully qualified function leaf should keep the function hover: {function}"
     );
     assert!(
-        function.contains("Formats a book title."),
-        "fully qualified function leaf should keep function docs: {function}"
+        callable_docs(&callable_fact_from(&snapshot, &index, &file, leaf + 1))
+            .iter()
+            .any(|line| line == "Formats a book title.")
     );
 }
 
@@ -931,13 +1034,18 @@ pub fn current(): status
         value.starts_with("```marrow\nenum status\n```"),
         "enum path head should keep the enum hover: {value}"
     );
+    // The head resolves to the enum schema fact (not the same-named module), carrying the enum docs.
+    let SourceSchemaHoverFact::Enum(enum_fact) =
+        schema_fact_from(&snapshot, &index, &file, head + 1)
+    else {
+        panic!("expected an enum schema hover fact");
+    };
+    assert_eq!(enum_fact.name, "status");
     assert!(
-        value.contains("Local status enum."),
-        "enum path head should keep enum docs: {value}"
-    );
-    assert!(
-        !value.starts_with("```marrow\nmodule status\n```"),
-        "enum path head should not be stolen by the same-named module: {value}"
+        enum_fact
+            .docs
+            .iter()
+            .any(|line| line == "Local status enum.")
     );
 }
 
@@ -967,14 +1075,19 @@ pub fn load(): book::Id
     );
     let index = index_for(&snapshot);
     let head = offset_of(app_source, "book::Id(1)");
+    // A removed resource identity head must not resolve to the resource schema hover, which is the
+    // only source of the resource's docs.
+    assert!(
+        !matches!(
+            facts::collect(&snapshot, &index, &file, head + 1),
+            Some(HoverFact::SourceSchema(_))
+        ),
+        "removed identity path must not inherit resource schema docs"
+    );
     if let Some(value) = hover_value_at(&snapshot, &index, &file, head + 1) {
         assert!(
             !value.starts_with("```marrow\nbook::Id\n```"),
             "removed identity path must not get a generated identity hover: {value}"
-        );
-        assert!(
-            !value.contains("Saved books."),
-            "removed identity path must not inherit resource docs: {value}"
         );
     }
 }
@@ -1006,29 +1119,30 @@ pub fn run(): int
         module.starts_with("```marrow\nmodule std::text\n```"),
         "project std::text module-prefix hover should render the project module fact: {module}"
     );
-    assert!(
-        !module.contains("default library"),
-        "project std::text module-prefix hover should not get default-library docs: {module}"
-    );
+    // A project-owned std::text resolves to the ProjectModule variant, never a default-library fact.
+    assert!(matches!(
+        module_path_fact_at(&snapshot, &index, &file, text + 1),
+        Some(SourceModulePathHoverFact::ProjectModule(_))
+    ));
 
-    let custom = hover_value_at(
-        &snapshot,
-        &index,
-        &file,
-        offset_of(app_source, "custom()") + 1,
-    )
-    .expect("a hover over the project function leaf");
+    let custom_offset = offset_of(app_source, "custom()") + 1;
+    let custom = hover_value_at(&snapshot, &index, &file, custom_offset)
+        .expect("a hover over the project function leaf");
     assert!(
         custom.starts_with("```marrow\nfn custom(): int\n```"),
         "project function leaf should keep its function hover: {custom}"
     );
+    // The leaf is a project Function (not a default-library Intrinsic) carrying its own docs.
+    let SourceCallableHoverFact::Function(custom_fact) =
+        callable_fact_from(&snapshot, &index, &file, custom_offset)
+    else {
+        panic!("expected a project function hover, not a default-library intrinsic");
+    };
     assert!(
-        custom.contains("Project-only text helper."),
-        "project function leaf should keep function docs: {custom}"
-    );
-    assert!(
-        !custom.contains("default library"),
-        "project function leaf should not get default-library docs: {custom}"
+        custom_fact
+            .docs
+            .iter()
+            .any(|line| line == "Project-only text helper.")
     );
 }
 
@@ -1050,10 +1164,10 @@ pub fn custom(): int
         module.starts_with("```marrow\nmodule std::text\n```"),
         "module declaration hover should render the project module fact: {module}"
     );
-    assert!(
-        !module.contains("default library"),
-        "module declaration hover should not get default-library docs: {module}"
-    );
+    assert!(matches!(
+        module_path_fact_at(&snapshot, &index, &file, text + 1),
+        Some(SourceModulePathHoverFact::ProjectModule(_))
+    ));
 }
 
 #[test]
@@ -1070,33 +1184,15 @@ pub fn both(left: bool, right: bool): bool
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
 
-    let plus = hover_value(&snapshot, &index, &file, source, "+");
-    assert!(
-        plus.starts_with("```marrow\noperator +\n```"),
-        "symbolic operator hover should lead with the operator: {plus}"
-    );
-    assert!(
-        plus.contains("language operator"),
-        "symbolic operator hover should identify language-operator context: {plus}"
-    );
-    assert!(
-        plus.contains("addition"),
-        "plus hover should describe addition behavior: {plus}"
-    );
+    // "language operator" renders the SourceOperator fact; the behavior wording is its typed
+    // `description` field, and the operator symbol its `spelling`.
+    let plus = operator_fact_from(&snapshot, &index, &file, offset_of(source, "+"));
+    assert_eq!(plus.spelling, "+");
+    assert!(plus.description.contains("addition"));
 
-    let and_value = hover_value(&snapshot, &index, &file, source, "and");
-    assert!(
-        and_value.starts_with("```marrow\noperator and\n```"),
-        "keyword operator hover should lead with the operator: {and_value}"
-    );
-    assert!(
-        and_value.contains("language operator"),
-        "keyword operator hover should identify language-operator context: {and_value}"
-    );
-    assert!(
-        and_value.contains("logical"),
-        "and hover should describe logical behavior: {and_value}"
-    );
+    let and_op = operator_fact_from(&snapshot, &index, &file, offset_of(source, "and"));
+    assert_eq!(and_op.spelling, "and");
+    assert!(and_op.description.contains("logical"));
 }
 
 #[test]
@@ -1120,13 +1216,9 @@ pub fn run(): int
     let index = index_for(&snapshot);
 
     let module_offset = offset_of(app_source, "and::tools");
-    let value = hover_value_at(&snapshot, &index, &file, module_offset);
-
     assert!(
-        !value
-            .as_deref()
-            .is_some_and(|value| value.contains("language operator")),
-        "module path segment named like an operator should not get operator docs: {value:?}"
+        !is_operator_fact(&snapshot, &index, &file, module_offset),
+        "a module path segment merely spelled like an operator must not resolve to the operator fact"
     );
 }
 
@@ -1148,33 +1240,27 @@ pub fn run(): int
 ";
     let (module_snapshot, module_file) = analyze_files(&[("and.mw", and_source)], "and.mw");
     let module_index = index_for(&module_snapshot);
-    let module_value = hover_value_at(
-        &module_snapshot,
-        &module_index,
-        &module_file,
-        offset_of(and_source, "module and") + "module ".len(),
-    );
     assert!(
-        !module_value
-            .as_deref()
-            .is_some_and(|value| value.contains("language operator")),
-        "module declaration segment named like an operator should not get operator docs: {module_value:?}"
+        !is_operator_fact(
+            &module_snapshot,
+            &module_index,
+            &module_file,
+            offset_of(and_source, "module and") + "module ".len(),
+        ),
+        "a module declaration segment spelled like an operator must not resolve to the operator fact"
     );
 
     let (app_snapshot, app_file) =
         analyze_files(&[("and.mw", and_source), ("app.mw", app_source)], "app.mw");
     let app_index = index_for(&app_snapshot);
-    let use_value = hover_value_at(
-        &app_snapshot,
-        &app_index,
-        &app_file,
-        offset_of(app_source, "use and") + "use ".len(),
-    );
     assert!(
-        !use_value
-            .as_deref()
-            .is_some_and(|value| value.contains("language operator")),
-        "use segment named like an operator should not get operator docs: {use_value:?}"
+        !is_operator_fact(
+            &app_snapshot,
+            &app_index,
+            &app_file,
+            offset_of(app_source, "use and") + "use ".len(),
+        ),
+        "a use segment spelled like an operator must not resolve to the operator fact"
     );
 }
 
@@ -1196,12 +1282,9 @@ store ^things(id: int): Thing
 
     for name in ["and", "or", "is", "not"] {
         let offset = offset_of(source, &format!("required {name}:")) + "required ".len();
-        let value = hover_value_at(&snapshot, &index, &file, offset);
         assert!(
-            !value
-                .as_deref()
-                .is_some_and(|value| value.contains("language operator")),
-            "resource field named `{name}` should not get operator docs: {value:?}"
+            !is_operator_fact(&snapshot, &index, &file, offset),
+            "resource field named `{name}` must not resolve to the language-operator fact"
         );
     }
 }
@@ -1228,24 +1311,17 @@ fn f(): bool
     let declaration_offset = offset_of(source, "fn exists") + "fn ".len();
     let declaration = hover_value_at(&snapshot, &index, &file, declaration_offset)
         .expect("a hover at the user function declaration");
+    // The exact user-function value already proves the declaration keeps the user function and gets
+    // no builtin context.
     assert_eq!(
         declaration, "```marrow\nfn exists(value: unknown): bool\n```",
         "declaration hover should remain the user function"
     );
-    assert!(
-        !declaration.contains("default library"),
-        "declaration hover should not include builtin docs: {declaration}"
-    );
 
-    let call = hover_value(&snapshot, &index, &file, source, "exists(^books");
-    assert!(
-        call.starts_with("```marrow\nexists(path): bool\n```"),
-        "call hover should use the builtin signature: {call}"
-    );
-    assert!(
-        call.contains("default library"),
-        "call hover should identify default-library context: {call}"
-    );
+    // The call resolves to the default-library builtin, not the same-named user function.
+    let call = intrinsic_sig(source, "exists(^books");
+    assert_eq!(call.kind, CallableSignatureKind::Builtin);
+    assert_eq!(call.path, ["exists"]);
 }
 
 #[test]
@@ -1283,42 +1359,37 @@ pub fn f(): bool
     );
     let index = index_for(&snapshot);
 
-    let exists_value = hover_value(&snapshot, &index, &file, app_source, "exists()");
+    // The qualified `foo::exists` and `foo::std::text::length` resolve to the project functions, not
+    // the default-library intrinsics they are spelled like.
     assert!(
-        !exists_value.contains("exists(path): bool"),
-        "qualified foo::exists call should not get builtin hover: {exists_value}"
+        matches!(
+            callable_fact_from(&snapshot, &index, &file, offset_of(app_source, "exists()")),
+            SourceCallableHoverFact::Function(_)
+        ),
+        "qualified foo::exists must resolve to the project function, not the builtin"
     );
     assert!(
-        !exists_value.contains("default library"),
-        "qualified foo::exists call should not get default-library docs: {exists_value}"
-    );
-
-    let length_value = hover_value(&snapshot, &index, &file, app_source, "length(\"abc");
-    assert!(
-        !length_value.contains("std::text::length(string): int"),
-        "qualified foo::std::text::length call should not get std hover: {length_value}"
-    );
-    assert!(
-        !length_value.contains("default library"),
-        "qualified foo::std::text::length call should not get default-library docs: {length_value}"
+        matches!(
+            callable_fact_from(
+                &snapshot,
+                &index,
+                &file,
+                offset_of(app_source, "length(\"abc")
+            ),
+            SourceCallableHoverFact::Function(_)
+        ),
+        "qualified foo::std::text::length must resolve to the project function, not the std op"
     );
 
     let std_offset = offset_of(app_source, "std::text::length");
-    let std_value = hover_value_at(&snapshot, &index, &file, std_offset);
     assert!(
-        !std_value
-            .as_deref()
-            .is_some_and(|value| value.contains("default library")),
-        "qualified foo::std::text std segment should not get default-library docs: {std_value:?}"
+        !is_std_library_fact(&module_path_fact_at(&snapshot, &index, &file, std_offset)),
+        "the qualified foo::std segment must not resolve to a default-library fact"
     );
-
     let text_offset = offset_of(app_source, "std::text::length") + "std::".len();
-    let text_value = hover_value_at(&snapshot, &index, &file, text_offset);
     assert!(
-        !text_value
-            .as_deref()
-            .is_some_and(|value| value.contains("default library")),
-        "qualified foo::std::text text segment should not get default-library docs: {text_value:?}"
+        !is_std_library_fact(&module_path_fact_at(&snapshot, &index, &file, text_offset)),
+        "the qualified foo::std::text segment must not resolve to a default-library fact"
     );
 }
 
@@ -1377,35 +1448,17 @@ pub fn add(
 pub fn caller(): int
     return add(1, 2)
 ";
-    let (snapshot, file) = analyze(source);
     let offset = source.rfind("add(1, 2)").unwrap();
 
-    let hover = hover(&snapshot, &file, offset).expect("a hover at the function call");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup contents");
+    // Each parameter's docs are the typed `SourceCallableParamFact::docs`; the rendered
+    // "**Parameters**" section and "- `x`: ..." bullets are a pure layout of those payloads.
+    let SourceCallableHoverFact::Function(func) = callable_fact_at(source, offset) else {
+        panic!("expected a function hover");
     };
-    assert!(
-        markup
-            .value
-            .starts_with("```marrow\nfn add(x: int, y: int): int\n```"),
-        "function signature should lead the hover: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("**Parameters**"),
-        "parameter docs section should be present: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("- `x`: The left value."),
-        "first parameter docs should be shown: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("- `y`: The right value."),
-        "second parameter docs should be shown: {}",
-        markup.value
-    );
+    let x = func.params.iter().find(|param| param.name == "x").unwrap();
+    assert_eq!(x.docs, ["The left value."]);
+    let y = func.params.iter().find(|param| param.name == "y").unwrap();
+    assert_eq!(y.docs, ["The right value."]);
 }
 
 #[test]
@@ -1427,43 +1480,23 @@ store ^books(id: int): Book
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
-    let value = hover_value(&snapshot, &index, &file, source, "Book\n    ;; Display");
+    let offset = offset_of(source, "Book\n    ;; Display");
+    // The docs and field types are typed payloads; a resource fact carries no store docs, identity
+    // type, or index, so those cannot appear. The exact member-summary layout (field-type spelling,
+    // keyed-leaf rendering, syntax order) is a pure render, pinned by the reviewed golden.
+    let SourceSchemaHoverFact::Resource(res) = schema_fact_from(&snapshot, &index, &file, offset)
+    else {
+        panic!("expected the resource schema fact");
+    };
+    assert_eq!(res.name, "Book");
+    assert!(res.docs.iter().any(|line| line == "Book records."));
+    assert!(resource_has_field(&res, "title", "string"));
+    assert!(resource_has_field(&res, "code", "ErrorCode"));
 
-    assert!(
-        value.starts_with("```marrow\nresource Book\n```"),
-        "resource signature should lead the hover: {value}"
-    );
-    assert!(
-        value.contains("Book records."),
-        "resource docs should be shown: {value}"
-    );
-    assert!(
-        !value.contains("Books saved by id."),
-        "resource hover should not inherit store docs: {value}"
-    );
-    assert!(
-        !value.contains("Id(^books)"),
-        "resource hover should not name the store-owned identity type: {value}"
-    );
-    assert!(
-        value.contains("required title: string"),
-        "field summary should include member type: {value}"
-    );
-    assert!(
-        value.contains("code: ErrorCode"),
-        "field summary should preserve ErrorCode spelling: {value}"
-    );
-    assert!(
-        !value.contains("title: string required"),
-        "field summary should preserve resource syntax order: {value}"
-    );
-    assert!(
-        value.contains("tags(pos: int): string"),
-        "keyed leaf summary should include key and value type: {value}"
-    );
-    assert!(
-        !value.contains("index byTitle(title) unique"),
-        "resource hover should not include store-owned indexes: {value}"
+    let value = hover_value(&snapshot, &index, &file, source, "Book\n    ;; Display");
+    assert_hover_golden(
+        "resource_declaration_members_without_store_identity",
+        &value,
     );
 }
 
@@ -1531,20 +1564,14 @@ pub fn make(): Book
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
-    let value = hover_value(&snapshot, &index, &file, source, "Book(title");
-
-    assert!(
-        value.starts_with("```marrow\nresource Book\n```"),
-        "constructor should show the resource declaration, not only the type: {value}"
-    );
-    assert!(
-        value.contains("Books saved by id."),
-        "constructor hover should include resource docs: {value}"
-    );
-    assert!(
-        value.contains("title: string"),
-        "constructor hover should include member summary: {value}"
-    );
+    let offset = offset_of(source, "Book(title");
+    let SourceSchemaHoverFact::Resource(res) = schema_fact_from(&snapshot, &index, &file, offset)
+    else {
+        panic!("constructor should resolve to the resource schema, not only the type");
+    };
+    assert_eq!(res.name, "Book");
+    assert!(res.docs.iter().any(|line| line == "Books saved by id."));
+    assert!(resource_has_field(&res, "title", "string"));
 }
 
 #[test]
@@ -1597,14 +1624,13 @@ pub fn make()
         value.starts_with("```marrow\nresource Book\n```"),
         "qualified resource constructor leaf should show resource hover: {value}"
     );
-    assert!(
-        value.contains("Books from state."),
-        "qualified resource constructor should include docs: {value}"
-    );
-    assert!(
-        value.contains("required title: string"),
-        "qualified resource constructor should include members: {value}"
-    );
+    let SourceSchemaHoverFact::Resource(res) =
+        schema_fact_from(&snapshot, &index, &file, leaf_offset)
+    else {
+        panic!("expected a resource schema fact at the constructor leaf");
+    };
+    assert!(res.docs.iter().any(|line| line == "Books from state."));
+    assert!(resource_has_field(&res, "title", "string"));
 }
 
 #[test]
@@ -1666,14 +1692,12 @@ resource Book
         value.starts_with("```marrow\nresource Book\n```"),
         "qualified resource constructor leaf should show resource hover: {value}"
     );
-    assert!(
-        value.contains(&docs),
-        "qualified resource constructor should include docs: {value}"
-    );
-    assert!(
-        value.contains("required title: string"),
-        "qualified resource constructor should include members: {value}"
-    );
+    let SourceSchemaHoverFact::Resource(res) = schema_fact_from(&snapshot, &index, &file, leaf)
+    else {
+        panic!("expected a resource schema fact at the aligned leaf");
+    };
+    assert!(res.docs.iter().any(|line| line == &docs));
+    assert!(resource_has_field(&res, "title", "string"));
 }
 
 #[test]
@@ -1698,24 +1722,20 @@ pub fn echo(book: Book): Book
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
-        let value = markup.value;
-
         assert!(
-            value.starts_with("```marrow\nresource Book\n```"),
-            "resource annotation hover should lead with resource signature: {value}"
+            markup.value.starts_with("```marrow\nresource Book\n```"),
+            "resource annotation hover should lead with resource signature: {}",
+            markup.value
         );
-        assert!(
-            value.contains("Books saved by id."),
-            "resource annotation hover should include resource docs: {value}"
-        );
-        assert!(
-            !value.contains("Id(^books)"),
-            "resource annotation hover should not name the store-owned identity type: {value}"
-        );
-        assert!(
-            value.contains("required title: string"),
-            "resource annotation hover should include member summary: {value}"
-        );
+        // A resource hover fact has docs and members but no store-owned identity type, so it cannot
+        // name `Id(^books)`.
+        let SourceSchemaHoverFact::Resource(res) =
+            schema_fact_from(&snapshot, &index, &file, offset)
+        else {
+            panic!("resource annotation must resolve to the resource schema");
+        };
+        assert!(res.docs.iter().any(|line| line == "Books saved by id."));
+        assert!(resource_has_field(&res, "title", "string"));
     }
 }
 
@@ -1750,14 +1770,12 @@ evolve
         value.starts_with("```marrow\nresource Book\n```"),
         "resource annotation hover should lead with resource signature: {value}"
     );
-    assert!(
-        value.contains("Books saved by id."),
-        "resource annotation hover should include resource docs: {value}"
-    );
-    assert!(
-        value.contains("required title: string"),
-        "resource annotation hover should include member summary: {value}"
-    );
+    let SourceSchemaHoverFact::Resource(res) = schema_fact_from(&snapshot, &index, &file, offset)
+    else {
+        panic!("evolve transform annotation must resolve to the resource schema");
+    };
+    assert!(res.docs.iter().any(|line| line == "Books saved by id."));
+    assert!(resource_has_field(&res, "title", "string"));
 }
 
 #[test]
@@ -1798,22 +1816,16 @@ pub fn echo(book: Book): Book
         value.starts_with("```marrow\nresource Book\n```"),
         "resource annotation hover should use the current module schema: {value}"
     );
-    assert!(
-        value.contains("Second module books."),
-        "resource annotation hover should include the current module docs: {value}"
-    );
-    assert!(
-        value.contains("subtitle: string"),
-        "resource annotation hover should include the current module members: {value}"
-    );
-    assert!(
-        !value.contains("First module books."),
-        "resource annotation hover should not use the other module docs: {value}"
-    );
-    assert!(
-        !value.contains("id: int"),
-        "resource annotation hover should not use the other module store keys: {value}"
-    );
+    // The annotation resolves to the current module's resource schema — its docs and members, not
+    // the same-named resource in the sibling module (and a resource fact carries no store keys).
+    let SourceSchemaHoverFact::Resource(res) = schema_fact_from(&snapshot, &index, &file, offset)
+    else {
+        panic!("expected the current module's resource schema");
+    };
+    assert!(res.docs.iter().any(|line| line == "Second module books."));
+    assert!(resource_has_field(&res, "subtitle", "string"));
+    assert!(!res.docs.iter().any(|line| line == "First module books."));
+    assert!(!resource_has_field(&res, "id", "int"));
 }
 
 #[test]
@@ -1870,22 +1882,16 @@ pub fn books(items: sequence[state::Book])
         value.starts_with("```marrow\nresource Book\n```"),
         "wrapped resource annotation hover should use the qualified module schema: {value}"
     );
-    assert!(
-        value.contains("Books from state."),
-        "wrapped resource annotation hover should include foreign docs: {value}"
-    );
-    assert!(
-        value.contains("required title: string"),
-        "wrapped resource annotation hover should include foreign members: {value}"
-    );
-    assert!(
-        !value.contains("code: string"),
-        "wrapped resource annotation hover should not use app-local same-named resource: {value}"
-    );
-    assert!(
-        !value.contains("App-local books."),
-        "wrapped resource annotation hover should not include app-local docs: {value}"
-    );
+    // The wrapped `state::Book` resolves to the foreign module's resource schema, not the app-local
+    // same-named resource.
+    let SourceSchemaHoverFact::Resource(res) = schema_fact_from(&snapshot, &index, &file, leaf)
+    else {
+        panic!("expected the foreign module's resource schema");
+    };
+    assert!(res.docs.iter().any(|line| line == "Books from state."));
+    assert!(resource_has_field(&res, "title", "string"));
+    assert!(!res.docs.iter().any(|line| line == "App-local books."));
+    assert!(!resource_has_field(&res, "subtitle", "string"));
 }
 
 #[test]
@@ -1912,28 +1918,20 @@ resource Book
         "shelf/second.mw",
     );
     let index = index_for(&snapshot);
+    let offset = offset_of(second_source, "Book");
     let value = hover_value(&snapshot, &index, &file, second_source, "Book");
-
     assert!(
         value.starts_with("```marrow\nresource Book\n```"),
         "resource hover should use the declaring module schema: {value}"
     );
-    assert!(
-        value.contains("Second module books."),
-        "resource hover should include the second module docs: {value}"
-    );
-    assert!(
-        value.contains("subtitle: string"),
-        "resource hover should include the second module members: {value}"
-    );
-    assert!(
-        !value.contains("First module books."),
-        "resource hover should not use the first module docs: {value}"
-    );
-    assert!(
-        !value.contains("id: int"),
-        "resource hover should not use the first module store keys: {value}"
-    );
+    let SourceSchemaHoverFact::Resource(res) = schema_fact_from(&snapshot, &index, &file, offset)
+    else {
+        panic!("expected the declaring module's resource schema");
+    };
+    assert!(res.docs.iter().any(|line| line == "Second module books."));
+    assert!(resource_has_field(&res, "subtitle", "string"));
+    assert!(!res.docs.iter().any(|line| line == "First module books."));
+    assert!(!resource_has_field(&res, "id", "int"));
 }
 
 #[test]
@@ -1961,20 +1959,23 @@ pub fn f(): string
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("expected markup");
         };
-        let value = markup.value;
-
         assert!(
-            value.starts_with("```marrow\nstore ^books(id: int): Book\n```"),
-            "saved root hover should show the store signature: {value}"
+            markup
+                .value
+                .starts_with("```marrow\nstore ^books(id: int): Book\n```"),
+            "saved root hover should show the store signature: {}",
+            markup.value
         );
+        // The store docs are a typed payload; the "Id(^books)" identity type is rendered from the
+        // store root's identity keys, which a keyed store carries.
+        let store = store_root_fact_from(&snapshot, &index, &file, offset);
         assert!(
-            value.contains("Books saved by id."),
-            "saved root hover should include store docs: {value}"
+            store
+                .store_docs
+                .iter()
+                .any(|line| line == "Books saved by id.")
         );
-        assert!(
-            value.contains("Id(^books)"),
-            "saved root hover should include the store-owned identity type: {value}"
-        );
+        assert!(!store.identity_keys.is_empty());
     }
 
     let use_caret = source.rfind("^books").unwrap();
@@ -2006,8 +2007,9 @@ pub fn f(): string
         "saved field hover should stay on the member: {value}"
     );
     assert!(
-        value.contains("Display title."),
-        "saved field hover should keep member docs: {value}"
+        saved_place_docs(&saved_place_fact_from(&snapshot, &index, &file, title))
+            .iter()
+            .any(|line| line == "Display title.")
     );
 }
 
@@ -2036,8 +2038,10 @@ store ^books(id: int): books
         "saved root hover should use the store signature: {value}"
     );
     assert!(
-        value.contains("Books saved by id."),
-        "saved root hover should include store docs: {value}"
+        store_root_fact_from(&snapshot, &index, &file, offset)
+            .store_docs
+            .iter()
+            .any(|line| line == "Books saved by id.")
     );
 }
 
@@ -2056,20 +2060,10 @@ resource Book
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
+    // The member-summary bound (which members render and the "... N more" tail) is a pure rendering
+    // decision over the full typed member list, so the reviewed golden is the oracle.
     let value = hover_value(&snapshot, &index, &file, source, "Book");
-
-    assert!(
-        value.contains("- `five: string`"),
-        "fifth member should be shown: {value}"
-    );
-    assert!(
-        !value.contains("- `six: string`"),
-        "sixth member should be hidden behind the bound: {value}"
-    );
-    assert!(
-        value.contains("- ... 1 more"),
-        "bounded summary should report the hidden member count: {value}"
-    );
+    assert_hover_golden("resource_member_summary_bounded", &value);
 }
 
 #[test]
@@ -2087,36 +2081,10 @@ resource Book
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
+    // The nested/keyed member paths and the bound are a pure rendering of the typed member tree, so
+    // the reviewed golden pins the flattened summary.
     let value = hover_value(&snapshot, &index, &file, source, "Book");
-
-    assert!(
-        value.contains("- `details`"),
-        "group itself should be shown: {value}"
-    );
-    assert!(
-        value.contains("- `required details.subtitle: string`"),
-        "nested required field should be summarized with its path: {value}"
-    );
-    assert!(
-        value.contains("- `details.pages: int`"),
-        "nested plain field should be summarized with its path: {value}"
-    );
-    assert!(
-        value.contains("- `editions(number: int)`"),
-        "keyed layer itself should be shown: {value}"
-    );
-    assert!(
-        value.contains("- `editions(number: int).isbn: string`"),
-        "nested keyed-layer member should be shown before the bound: {value}"
-    );
-    assert!(
-        !value.contains("- `editions(number: int).format: string`"),
-        "sixth flattened member should be hidden behind the bound: {value}"
-    );
-    assert!(
-        value.contains("- ... 1 more"),
-        "bounded nested summary should report the hidden member count: {value}"
-    );
+    assert_hover_golden("resource_member_summary_nested_bounded", &value);
 }
 
 #[test]
@@ -2178,8 +2146,9 @@ pub fn f(): string
         "field member signature should lead the hover: {value}"
     );
     assert!(
-        value.contains("The displayed title."),
-        "field docs should follow the member signature: {value}"
+        saved_place_docs(&saved_place_fact_from(&snapshot, &index, &file, offset))
+            .iter()
+            .any(|line| line == "The displayed title.")
     );
 }
 
@@ -2208,8 +2177,9 @@ store ^books(id: int): Book
         "field declaration hover should lead with the member signature: {value}"
     );
     assert!(
-        value.contains("The displayed title."),
-        "field docs should follow the member signature: {value}"
+        saved_place_docs(&saved_place_fact_from(&snapshot, &index, &file, offset))
+            .iter()
+            .any(|line| line == "The displayed title.")
     );
 }
 
@@ -2238,9 +2208,13 @@ store ^books(id: int): Book
         "declared saved root should show its store even without live data: {value}"
     );
     assert!(
-        value.contains("Books saved by id."),
-        "declared saved root should include store docs: {value}"
+        store_root_fact_from(&snapshot, &index, &file, offset)
+            .store_docs
+            .iter()
+            .any(|line| line == "Books saved by id.")
     );
+    // Hover stays analysis-only: no live-data advisory section is rendered. There is no typed fact
+    // for the absence of an advisory, so this remains a render-level guard.
     assert!(
         !value.contains("**debug/admin live data (advisory)**"),
         "hover should stay analysis-only: {value}"
@@ -2260,14 +2234,17 @@ store ^settings: Settings
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
+    let offset = offset_of(source, "^settings");
     let value = hover_value(&snapshot, &index, &file, source, "^settings");
     assert!(
         value.starts_with("```marrow\nstore ^settings: Settings\n```"),
         "keyless store hover should lead with the store signature: {value}"
     );
+    // "no generated identity type" renders precisely when the store root has no identity keys.
     assert!(
-        value.contains("no generated identity type"),
-        "keyless store hover should say it has no generated identity type: {value}"
+        store_root_fact_from(&snapshot, &index, &file, offset)
+            .identity_keys
+            .is_empty()
     );
 }
 
@@ -2283,28 +2260,21 @@ pub enum Status
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
+    let offset = offset_of(source, "Status");
     let value = hover_value(&snapshot, &index, &file, source, "Status");
-
     assert!(
         value.starts_with("```marrow\nenum Status\n```"),
         "enum signature should lead the hover: {value}"
     );
-    assert!(
-        value.contains("Lifecycle state."),
-        "enum docs should be shown: {value}"
-    );
-    assert!(
-        value.contains("open"),
-        "enum member summary should include open: {value}"
-    );
-    assert!(
-        value.contains("closed"),
-        "enum member summary should include closed: {value}"
-    );
-    assert!(
-        !value.contains("ordinal"),
-        "enum hover should not include source-order ordinals: {value}"
-    );
+    // The enum fact carries docs and a typed member list (no source-order ordinal), which the
+    // summary renders.
+    let SourceSchemaHoverFact::Enum(en) = schema_fact_from(&snapshot, &index, &file, offset) else {
+        panic!("expected an enum schema hover fact");
+    };
+    assert!(en.docs.iter().any(|line| line == "Lifecycle state."));
+    let members: Vec<String> = en.members.iter().map(|m| m.path.join("::")).collect();
+    assert!(members.iter().any(|name| name == "open"));
+    assert!(members.iter().any(|name| name == "closed"));
 }
 
 #[test]
@@ -2350,11 +2320,7 @@ pub fn set(status: Status)
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
     let offset = offset_of(source, "status: Status") + "status: ".len();
-    let hover = hover_with_index(&snapshot, &index, &file, offset).expect("a hover");
-    let HoverContents::Markup(markup) = hover.contents else {
-        panic!("expected markup");
-    };
-    assert_status_enum_hover(&markup.value);
+    assert_status_enum_fact(&snapshot, &index, &file, offset);
 }
 
 #[test]
@@ -2414,8 +2380,7 @@ pub fn set(status: state::Status)
     );
     let index = index_for(&snapshot);
     let offset = offset_of(app_source, "state::Status") + "state::".len();
-    let value = hover_value_at(&snapshot, &index, &file, offset).expect("a hover");
-    assert_status_enum_hover(&value);
+    assert_status_enum_fact(&snapshot, &index, &file, offset);
 }
 
 #[test]
@@ -2450,8 +2415,7 @@ pub fn set(status: Status)
     );
     let index = index_for(&snapshot);
     let offset = offset_of(app_source, "status: Status") + "status: ".len();
-    let value = hover_value_at(&snapshot, &index, &file, offset).expect("a hover");
-    assert_status_enum_hover(&value);
+    assert_status_enum_fact(&snapshot, &index, &file, offset);
 }
 
 #[test]
@@ -2486,13 +2450,14 @@ pub fn set(status: Status)
     );
     let index = index_for(&snapshot);
     let offset = offset_of(app_source, "status: Status") + "status: ".len();
-    let value = hover_value_at(&snapshot, &index, &file, offset);
-
+    // Two equally-named foreign enums are ambiguous, so the annotation must not resolve to either
+    // enum schema fact.
     assert!(
-        !value.as_deref().is_some_and(|value| {
-            value.contains("First lifecycle state.") || value.contains("Second lifecycle state.")
-        }),
-        "ambiguous bare enum annotation should not pick a foreign enum: {value:?}"
+        !matches!(
+            facts::collect(&snapshot, &index, &file, offset),
+            Some(HoverFact::SourceSchema(SourceSchemaHoverFact::Enum(_)))
+        ),
+        "ambiguous bare enum annotation must not pick a foreign enum"
     );
 }
 
@@ -2523,13 +2488,13 @@ pub fn set(status: state::Status)
     );
     let index = index_for(&snapshot);
     let offset = offset_of(app_source, "state::Status") + "state::".len();
-    let value = hover_value_at(&snapshot, &index, &file, offset);
-
+    // A private foreign enum is not visible, so the annotation must not resolve to its enum schema.
     assert!(
-        !value
-            .as_deref()
-            .is_some_and(|value| value.contains("Private lifecycle state.")),
-        "private foreign enum annotation should not show enum docs: {value:?}"
+        !matches!(
+            facts::collect(&snapshot, &index, &file, offset),
+            Some(HoverFact::SourceSchema(SourceSchemaHoverFact::Enum(_)))
+        ),
+        "private foreign enum annotation must not show the enum hover"
     );
 }
 
@@ -2560,22 +2525,17 @@ pub fn current(): Status
         value.starts_with("```marrow\nStatus::active::open\n```"),
         "enum member hover should lead with the full member path: {value}"
     );
-    assert!(
-        value.contains("enum Status"),
-        "enum member hover should name the enum: {value}"
-    );
-    assert!(
-        !value.contains("ordinal"),
-        "enum member hover should not include source-order ordinals: {value}"
-    );
-    assert!(
-        value.contains("selectable"),
-        "leaf enum member should be marked selectable: {value}"
-    );
-    assert!(
-        value.contains("Open for edits."),
-        "enum member docs should be shown: {value}"
-    );
+    // The enum name, member path, selectable status, and docs are typed payloads (no source-order
+    // ordinal exists on the fact).
+    let SourceSchemaHoverFact::EnumMember(member) =
+        schema_fact_from(&snapshot, &index, &file, offset)
+    else {
+        panic!("expected an enum-member schema hover fact");
+    };
+    assert_eq!(member.enum_name, "Status");
+    assert_eq!(member.path, ["active", "open"]);
+    assert_eq!(member.status, SourceEnumMemberStatus::Selectable);
+    assert!(member.docs.iter().any(|line| line == "Open for edits."));
 }
 
 #[test]
@@ -2592,15 +2552,16 @@ pub fn caller(): int
 ";
     let (snapshot, file) = analyze(source);
     let index = index_for(&snapshot);
+    let offset = offset_of(source, "add(1, 2)");
     let value = hover_value(&snapshot, &index, &file, source, "add(1, 2)");
-
     assert!(
         value.starts_with("```marrow\nfn add(x: int, y: int): int\n```"),
         "function hovers should keep leading with the signature: {value}"
     );
     assert!(
-        value.contains("Adds two numbers."),
-        "function docs should still be present: {value}"
+        callable_docs(&callable_fact_from(&snapshot, &index, &file, offset))
+            .iter()
+            .any(|line| line == "Adds two numbers.")
     );
 }
 
@@ -2625,23 +2586,19 @@ pub fn caller(): int
         &[("shelf/math.mw", math_source), ("shelf/app.mw", app_source)],
         "shelf/app.mw",
     );
+    let index = index_for(&snapshot);
     let call = app_source.rfind("math::add(1, 2)").unwrap();
-    let qualifier_hover = hover(&snapshot, &file, call + 1);
-    if let Some(hover) = qualifier_hover {
-        let HoverContents::Markup(markup) = hover.contents else {
-            panic!("expected markup contents");
-        };
-        assert!(
-            !markup.value.contains("fn add("),
-            "module qualifier hover should not pretend to be the function: {}",
-            markup.value
-        );
-        assert!(
-            !markup.value.contains("Adds two numbers."),
-            "module qualifier hover should not inherit function docs: {}",
-            markup.value
-        );
-    }
+    // The module qualifier must not resolve to the callee function (which would inherit its docs).
+    assert!(
+        !matches!(
+            facts::collect(&snapshot, &index, &file, call + 1),
+            Some(HoverFact::SourceCallable {
+                fact: SourceCallableHoverFact::Function(_),
+                ..
+            })
+        ),
+        "module qualifier hover must not pretend to be the function"
+    );
 
     let leaf_offset = call + "math::".len() + 1;
     let leaf_hover = hover(&snapshot, &file, leaf_offset).expect("a hover at the callee leaf");
@@ -2783,9 +2740,12 @@ pub fn caller(): int
         value.starts_with("```marrow\nint\n```"),
         "the type should lead the hover: {value}"
     );
+    // A const use resolves to the type hover fact, which carries the const's docs.
     assert!(
-        value.contains("Maximum count."),
-        "the description should be shown: {value}"
+        type_fact_from(&snapshot, &index, &file, offset)
+            .docs
+            .iter()
+            .any(|line| line == "Maximum count.")
     );
 }
 
@@ -2811,8 +2771,9 @@ pub fn caller(): int
         "the module const signature should lead the hover: {value}"
     );
     assert!(
-        value.contains("Maximum count."),
-        "the description should be shown: {value}"
+        callable_docs(&callable_fact_from(&snapshot, &index, &file, offset))
+            .iter()
+            .any(|line| line == "Maximum count.")
     );
 }
 
