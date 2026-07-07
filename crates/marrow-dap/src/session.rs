@@ -46,6 +46,10 @@ const THREAD_ID: i64 = 1;
 /// after this budget the adapter detaches rather than blocking indefinitely.
 /// A graceful force-unwind of such a run is upstream work (UPSTREAM-4).
 const TEARDOWN_BUDGET: Duration = Duration::from_millis(500);
+/// The exit code reported when the run thread panics. It follows Rust's own
+/// panic-abort convention so a crashed run is a visibly nonzero exit rather than a
+/// clean end.
+const RUN_PANIC_EXIT_CODE: i64 = 101;
 /// The single stack frame id exposed while stopped. It is a frame identity, not
 /// the thread identity, even while both singleton ids share the same value.
 const FRAME_ID: i64 = 1;
@@ -1635,39 +1639,63 @@ impl<W: Write> Session<W> {
     }
 
     /// Join the finished run-thread, emit its captured output and outcome, and
-    /// mark the session done.
+    /// mark the session done. A join `Err` is a run-thread panic, surfaced as a
+    /// visible failure rather than a clean end.
     fn finish_run(&mut self) {
         if let Some(running) = self.running.take() {
-            let outcome = running.handle.join().ok().flatten();
-            if let Some(outcome) = outcome {
-                if !outcome.output.is_empty() {
-                    self.event(
-                        "output",
-                        json!({ "category": "stdout", "output": outcome.output }),
-                    );
-                }
-                match outcome.result {
-                    Ok(message) => {
-                        if !message.is_empty() {
-                            self.event(
-                                "output",
-                                json!({ "category": "stdout", "output": format!("{message}\n") }),
-                            );
-                        }
-                        self.event("exited", json!({ "exitCode": 0 }));
-                    }
-                    Err(message) => {
-                        self.event(
-                            "output",
-                            json!({ "category": "stderr", "output": format!("{message}\n") }),
-                        );
-                        self.event("exited", json!({ "exitCode": 1 }));
-                    }
-                }
+            match running.handle.join() {
+                Ok(outcome) => self.emit_run_outcome(outcome),
+                Err(_) => self.emit_run_panic(),
             }
             self.event("terminated", json!({}));
         }
         self.done = true;
+    }
+
+    /// Emit a finished run's captured output and its exit status: a clean run (or a
+    /// debugger terminate) exits zero, a runtime fault exits one with its message on
+    /// stderr. A collected-but-empty outcome emits nothing.
+    fn emit_run_outcome(&mut self, outcome: Option<crate::run::Outcome>) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        if !outcome.output.is_empty() {
+            self.event(
+                "output",
+                json!({ "category": "stdout", "output": outcome.output }),
+            );
+        }
+        match outcome.result {
+            Ok(message) => {
+                if !message.is_empty() {
+                    self.event(
+                        "output",
+                        json!({ "category": "stdout", "output": format!("{message}\n") }),
+                    );
+                }
+                self.event("exited", json!({ "exitCode": 0 }));
+            }
+            Err(message) => {
+                self.event(
+                    "output",
+                    json!({ "category": "stderr", "output": format!("{message}\n") }),
+                );
+                self.event("exited", json!({ "exitCode": 1 }));
+            }
+        }
+    }
+
+    /// Surface a run-thread panic: without this, a join `Err` reads the same as a
+    /// clean, output-free end, hiding a crashed run behind a bare `terminated`.
+    fn emit_run_panic(&mut self) {
+        self.event(
+            "output",
+            json!({
+                "category": "stderr",
+                "output": "the debug run thread panicked\n",
+            }),
+        );
+        self.event("exited", json!({ "exitCode": RUN_PANIC_EXIT_CODE }));
     }
 
     /// Terminate the run-thread (if any) and mark the session done. Sends a
@@ -2285,9 +2313,45 @@ mod tests {
         (session, release_tx)
     }
 
+    /// A session whose run thread panics, so its join yields an `Err`. The event
+    /// channel closes as the panicking thread unwinds.
+    fn session_with_panicking_run() -> Session<Vec<u8>> {
+        let (control_tx, control_rx) = std::sync::mpsc::channel::<Control>();
+        let (events_tx, events_rx) = std::sync::mpsc::channel::<RunEvent>();
+        let (breakpoints_tx, _breakpoints_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || -> Option<crate::run::Outcome> {
+            let _events_tx = events_tx;
+            let _control_rx = control_rx;
+            panic!("run thread boom");
+        });
+        let mut session = Session::new(Vec::new());
+        session.running = Some(Running {
+            handle,
+            control: control_tx,
+            events: events_rx,
+            terminate: Arc::new(AtomicBool::new(false)),
+            pause: Arc::new(AtomicBool::new(false)),
+            breakpoints: breakpoints_tx,
+            execution_boundary: json!({ "sourceAnalysisGeneration": null }),
+            stopped_at: None,
+            pending_resume: None,
+            terminating: false,
+        });
+        session
+    }
+
     fn first_dap_message(output: &str) -> Json {
         let mut reader = std::io::Cursor::new(output.as_bytes());
         crate::protocol::read_message(&mut reader).unwrap()
+    }
+
+    fn dap_messages(output: &[u8]) -> Vec<Json> {
+        let mut reader = std::io::Cursor::new(output);
+        let mut messages = Vec::new();
+        while let Some(message) = crate::protocol::read_message(&mut reader) {
+            messages.push(message);
+        }
+        messages
     }
 
     #[test]
@@ -2430,6 +2494,34 @@ mod tests {
         );
         assert!(seen.try_recv().is_err());
         assert!(session.done());
+    }
+
+    #[test]
+    fn a_run_thread_panic_surfaces_as_stderr_and_nonzero_exit() {
+        let mut session = session_with_panicking_run();
+        session.terminate_session();
+        assert!(session.done());
+
+        let messages = dap_messages(&session.out);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["event"] == "output" && m["body"]["category"] == "stderr"),
+            "a run-thread panic emits a stderr output event: {messages:?}"
+        );
+        let exited = messages
+            .iter()
+            .find(|m| m["event"] == "exited")
+            .expect("a run-thread panic emits an exited event");
+        assert_ne!(
+            exited["body"]["exitCode"],
+            json!(0),
+            "a run-thread panic exits nonzero: {exited}"
+        );
+        assert!(
+            messages.iter().any(|m| m["event"] == "terminated"),
+            "the session still terminates after a panic: {messages:?}"
+        );
     }
 
     #[test]
