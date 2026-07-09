@@ -65,6 +65,11 @@ pub struct Backend {
     /// the client echoes on a `semanticTokens/full/delta` request. Lets a delta reply
     /// with only the edits against that stream instead of a full re-encode.
     semantic_tokens_cache: Arc<Mutex<SemanticTokensCache>>,
+    /// Parks a compute request between capturing its document world and touching the
+    /// analysis, so a test can land a superseding edit in that window and assert the
+    /// request drops. Never set in production.
+    #[cfg(test)]
+    request_gate: Arc<Mutex<Option<Arc<TestRecomputeGate>>>>,
 }
 
 /// Per-document semantic-token streams retained so a delta request can diff against
@@ -356,6 +361,25 @@ impl Backend {
             pending_workspace_invalidation: Arc::new(AtomicU8::new(0)),
             dynamic_watch_registration: Arc::new(AtomicBool::new(false)),
             semantic_tokens_cache: Arc::new(Mutex::new(SemanticTokensCache::default())),
+            #[cfg(test)]
+            request_gate: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Whether a newer edit has superseded the document world `entry` was captured
+    /// against, so a compute request holding it should drop before doing analysis
+    /// work — its result would describe source the editor has already replaced.
+    async fn request_superseded(&self, entry: &DocumentAnalysisSnapshot) -> bool {
+        !documents_match_analysis_snapshot(&self.documents, entry).await
+    }
+
+    /// Park at the request gate when a test has installed one, so the test can land a
+    /// superseding edit in the window before the supersede check.
+    #[cfg(test)]
+    async fn hold_request_gate(&self) {
+        let gate = self.request_gate.lock().await.clone();
+        if let Some(gate) = gate {
+            gate.hold().await;
         }
     }
 
@@ -826,6 +850,17 @@ fn invalid_data_request(method: &str, error: DataRequestValidationError) -> json
     jsonrpc::Error::invalid_params(format!("invalid {method} params: {}", error.message()))
 }
 
+/// The LSP `ContentModified` error: the document changed after the request was
+/// issued, so answering against the source it named would report stale facts. The
+/// client drops the result and re-requests against the current content.
+fn content_modified() -> jsonrpc::Error {
+    jsonrpc::Error {
+        code: jsonrpc::ErrorCode::ServerError(-32801),
+        message: "content modified".into(),
+        data: None,
+    }
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
@@ -1120,10 +1155,19 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let Some(document) = self.documents.lock().await.snapshot(&url) else {
+        let Some((document, entry)) = snapshot_document_and_analysis(&self.documents, &url).await
+        else {
             return Ok(None);
         };
         let offset = document.index.offset(to_core_position(position.position));
+        #[cfg(test)]
+        self.hold_request_gate().await;
+        // A newer edit landed while this request was queued, so its cursor offset no
+        // longer describes the editor's source; drop it rather than answer for a
+        // superseded document. The client re-requests against the new content.
+        if self.request_superseded(&entry).await {
+            return Err(content_modified());
+        }
         let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(None);
         };
@@ -1342,6 +1386,14 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = document.index.offset(to_core_position(position.position));
+
+        #[cfg(test)]
+        self.hold_request_gate().await;
+        // A newer edit superseded the buffer this completion was requested against;
+        // its results would be for a stale cursor context. Drop rather than compute.
+        if self.request_superseded(&documents).await {
+            return Err(content_modified());
+        }
 
         let empty = EMPTY_PROGRAM.get_or_init(Default::default);
         let analysis = (!self.workspace_invalidation_pending())
@@ -1960,6 +2012,113 @@ mod tests {
             matches!(stale, SemanticTokensFullDeltaResult::Tokens(_)),
             "an unknown previous_result_id must fall back to a full token response"
         );
+    }
+
+    /// A hover parked mid-flight while a newer edit arrives must drop with the LSP
+    /// `ContentModified` error rather than run the analysis body against a superseded
+    /// document: the client has already moved on and will re-request.
+    #[tokio::test]
+    async fn hover_drops_a_request_superseded_by_a_newer_edit() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        let v1 = "module app\n\npub fn answer(): int\n    return 42\n\n\
+                  pub fn caller(): int\n    return answer()\n";
+        std::fs::write(&file, v1).unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(url.clone(), v1.to_string(), Some(1));
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+
+        // A completed recompute leaves a good analysis, so hover would normally answer
+        // Some for the cursor on the `answer` call.
+        {
+            let documents = Arc::clone(&backend.documents);
+            let analysis = Arc::clone(&backend.analysis);
+            let analysis_run = Arc::clone(&backend.analysis_run);
+            let diagnostics = Arc::clone(&backend.diagnostics);
+            let publish = Arc::clone(&backend.diagnostics_publish);
+            let pending = Arc::clone(&backend.pending_workspace_invalidation);
+            let client = backend.client.clone();
+            Backend::recompute_and_publish(
+                RecomputeContext {
+                    documents: &documents,
+                    analysis: &analysis,
+                    analysis_run: &analysis_run,
+                    diagnostics: &diagnostics,
+                    diagnostics_publish: &publish,
+                    pending_workspace_invalidation: &pending,
+                    client: &client,
+                },
+                &file,
+                None,
+            )
+            .await;
+        }
+
+        // Park the next hover between capturing its document world and the analysis read.
+        let gate = TestRecomputeGate::new();
+        *backend.request_gate.lock().await = Some(Arc::clone(&gate));
+
+        let call_position = Position {
+            line: 6,
+            character: 12,
+        };
+        // Run the hover concurrently with an edit that lands while it is parked, both
+        // borrowing the backend on one task so no `'static` spawn is needed.
+        let hover_future = <Backend as LanguageServer>::hover(
+            backend,
+            HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: url.clone() },
+                    position: call_position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        );
+        let supersede_future = async {
+            gate.wait_until_entered().await;
+            // A newer edit bumps the document generation while hover is parked.
+            <Backend as LanguageServer>::did_change(
+                backend,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: url.clone(),
+                        version: 2,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: format!("{v1}\npub fn added(): int\n    return 1\n"),
+                    }],
+                },
+            )
+            .await;
+            gate.release().await;
+        };
+        let (result, ()) = tokio::join!(hover_future, supersede_future);
+        match result {
+            Err(error) => assert_eq!(
+                error.code,
+                jsonrpc::ErrorCode::ServerError(-32801),
+                "a superseded hover must drop with ContentModified"
+            ),
+            Ok(other) => panic!("expected a dropped hover, got {other:?}"),
+        }
     }
 
     #[test]
