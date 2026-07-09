@@ -109,6 +109,12 @@ pub struct Workspace {
     /// fact, it skips the full catalog-snapshot read when the store has not advanced,
     /// keeping the per-debounce recompute cheap.
     catalog_binding: CatalogBindingCache,
+    /// Advanced by every analysis or project invalidation. A recompute captures it
+    /// at prepare time and re-checks it at commit; because the CPU-bound check runs
+    /// with no lock held, a watcher invalidation can land mid-flight, and a bumped
+    /// epoch tells the returning run its snapshot describes a superseded source world
+    /// so it must be discarded rather than installed as the latest.
+    invalidation_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +175,7 @@ pub struct PreparedRecompute {
     accepted: Option<CatalogMetadata>,
     lock: Option<CatalogLock>,
     documents_generation: u64,
+    invalidation_epoch: u64,
 }
 
 impl PreparedRecompute {
@@ -188,6 +195,13 @@ impl PreparedRecompute {
     /// the commit so freshness stays keyed to the analyzed source world.
     pub fn documents_generation(&self) -> u64 {
         self.documents_generation
+    }
+
+    /// The workspace invalidation epoch captured when these inputs were prepared.
+    /// The commit compares it against the workspace's current epoch to detect a
+    /// watcher invalidation that landed while the check ran off the lock.
+    pub fn invalidation_epoch(&self) -> u64 {
+        self.invalidation_epoch
     }
 }
 
@@ -326,8 +340,9 @@ impl Workspace {
     ) -> Result<&AnalysisSnapshot, WorkspaceError> {
         let prepared = self.prepare_recompute(file, documents)?;
         let generation = prepared.documents_generation();
+        let epoch = prepared.invalidation_epoch();
         let snapshot = prepared.analyze().map_err(WorkspaceError::Discover)?;
-        self.commit_recompute(generation, snapshot);
+        self.commit_recompute(generation, epoch, snapshot);
         Ok(self.latest.as_ref().expect("commit stored a snapshot"))
     }
 
@@ -360,17 +375,42 @@ impl Workspace {
             accepted: binding.accepted,
             lock: binding.lock,
             documents_generation: documents.generation(),
+            invalidation_epoch: self.invalidation_epoch,
         })
     }
 
     /// Store a freshly analyzed snapshot as the latest, retaining the outgoing analysis
     /// as last-good when the new one dropped a module to a parse error so hover and
-    /// navigation still resolve through the error.
-    pub fn commit_recompute(&mut self, documents_generation: u64, snapshot: AnalysisSnapshot) {
-        let project = self
-            .project
-            .as_ref()
-            .expect("prepared a project to analyze");
+    /// navigation still resolve through the error. Returns whether the snapshot was
+    /// installed; a run superseded by a concurrent invalidation, or one older than the
+    /// installed generation, is discarded so a stale world is never resurrected.
+    ///
+    /// `captured_epoch` is the invalidation epoch read when the inputs were prepared.
+    pub fn commit_recompute(
+        &mut self,
+        documents_generation: u64,
+        captured_epoch: u64,
+        snapshot: AnalysisSnapshot,
+    ) -> bool {
+        // A watcher invalidation advanced the epoch while this check ran off the lock,
+        // so its snapshot describes a superseded source world. Its own scheduled
+        // recompute rebuilds; installing this one would resurrect stale facts and
+        // falsely report them as fresh against a matching generation.
+        if self.invalidation_epoch != captured_epoch {
+            return false;
+        }
+        // The invalidation that raced this run may also have dropped the project (a
+        // config change clears it); with no project there is nothing to key against.
+        let Some(project) = self.project.as_ref() else {
+            return false;
+        };
+        // A queued older run must not regress a newer commit already installed.
+        if self
+            .latest_documents_generation
+            .is_some_and(|installed| documents_generation < installed)
+        {
+            return false;
+        }
         let binding_index_key = BindingIndexKey::new(project, &snapshot);
 
         // Retain the last program that had modules, so a later recompute whose
@@ -407,6 +447,7 @@ impl Workspace {
             self.binding_index_key = None;
         }
         self.latest_documents_generation = Some(documents_generation);
+        true
     }
 
     /// Pick the analysis a hover or navigation read should answer from: the latest when
@@ -445,6 +486,7 @@ impl Workspace {
     /// last-good fallback is kept: it is a valid prior-generation analysis, so a watcher
     /// invalidation refreshes on the next recompute without blanking reads meanwhile.
     pub fn invalidate_analysis(&mut self) {
+        self.invalidation_epoch += 1;
         self.latest = None;
         self.last_program = None;
         self.binding_index = None;

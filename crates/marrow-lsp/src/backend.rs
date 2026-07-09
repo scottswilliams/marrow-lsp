@@ -532,6 +532,7 @@ impl Backend {
         // Run the checker off the async pump; the workspace data lock is free for
         // read handlers throughout.
         let generation = prepared.documents_generation();
+        let captured_epoch = prepared.invalidation_epoch();
         let snapshot = match tokio::task::spawn_blocking(move || prepared.analyze()).await {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => {
@@ -556,7 +557,15 @@ impl Backend {
             apply_pending_workspace_invalidation(pending, &mut analysis.workspace);
             return;
         }
-        analysis.workspace.commit_recompute(generation, snapshot);
+        if !analysis
+            .workspace
+            .commit_recompute(generation, captured_epoch, snapshot)
+        {
+            // A watcher invalidation raced this off-pump run and superseded it (or a
+            // newer run already committed). The invalidation's own scheduled recompute
+            // repairs state; publishing this snapshot's diagnostics would be stale.
+            return;
+        }
 
         let publish_guard = context.diagnostics_publish.lock().await;
         let pending = context
@@ -2254,6 +2263,199 @@ mod tests {
 
         gate.release().await;
         recompute.await.unwrap();
+    }
+
+    /// A watcher invalidation that lands while a recompute runs off the pump must
+    /// supersede that run. With the data lock free during the check, the watcher
+    /// applies invalidation directly and advances the epoch, so the returning run
+    /// discards its snapshot: it neither panics on a project the config change nulled
+    /// nor resurrects the stale snapshot as a falsely fresh latest. A follow-up
+    /// recompute, as the watcher schedules, repairs state.
+    #[tokio::test]
+    async fn parked_recompute_discards_a_watcher_invalidation_that_races_it() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        let sibling = src.join("defs.mw");
+        let v1 = "module app\n\npub fn answer(): int\n    return 42\n";
+        std::fs::write(&file, v1).unwrap();
+        std::fs::write(&sibling, "module defs\n\npub fn g(): int\n    return 1\n").unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(url.clone(), v1.to_string(), Some(1));
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+
+        let context = |backend: &Backend| {
+            (
+                Arc::clone(&backend.documents),
+                Arc::clone(&backend.analysis),
+                Arc::clone(&backend.analysis_run),
+                Arc::clone(&backend.diagnostics),
+                Arc::clone(&backend.diagnostics_publish),
+                Arc::clone(&backend.pending_workspace_invalidation),
+                backend.client.clone(),
+            )
+        };
+        let run = |backend: &Backend| {
+            let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+                context(backend);
+            let file = file.clone();
+            async move {
+                Backend::recompute_and_publish(
+                    RecomputeContext {
+                        documents: &documents,
+                        analysis: &analysis,
+                        analysis_run: &analysis_run,
+                        diagnostics: &diagnostics,
+                        diagnostics_publish: &publish,
+                        pending_workspace_invalidation: &pending,
+                        client: &client,
+                    },
+                    &file,
+                    None,
+                )
+                .await;
+            }
+        };
+        // Park the next recompute off the pump, then apply a watcher change while it
+        // holds no lock.
+        let park = |backend: &Backend, gate: Arc<TestRecomputeGate>| {
+            let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+                context(backend);
+            let file = file.clone();
+            async move {
+                {
+                    let mut analysis = analysis.lock().await;
+                    analysis.recompute_gate = Some(gate);
+                }
+                tokio::spawn(async move {
+                    Backend::recompute_and_publish(
+                        RecomputeContext {
+                            documents: &documents,
+                            analysis: &analysis,
+                            analysis_run: &analysis_run,
+                            diagnostics: &diagnostics,
+                            diagnostics_publish: &publish,
+                            pending_workspace_invalidation: &pending,
+                            client: &client,
+                        },
+                        &file,
+                        None,
+                    )
+                    .await;
+                })
+            }
+        };
+
+        // A first recompute leaves a good analysis as the latest.
+        run(backend).await;
+
+        // Phase 1: a config change races the parked run. It nulls the project, so a
+        // blind commit would panic; the epoch guard must discard instead.
+        let gate = TestRecomputeGate::new();
+        let recompute = park(backend, Arc::clone(&gate)).await;
+        gate.wait_until_entered().await;
+        let config_url = Url::from_file_path(root.join("marrow.json")).unwrap();
+        <Backend as LanguageServer>::did_change_watched_files(
+            backend,
+            DidChangeWatchedFilesParams {
+                changes: vec![FileEvent {
+                    uri: config_url,
+                    typ: FileChangeType::CHANGED,
+                }],
+            },
+        )
+        .await;
+        assert_eq!(
+            backend.pending_workspace_invalidation.load(Ordering::SeqCst),
+            0,
+            "an off-pump watcher invalidation applies directly, recording no pending bit"
+        );
+        {
+            let analysis = backend.analysis.lock().await;
+            assert!(
+                analysis.workspace.project().is_none(),
+                "the watched config change nulls the project directly"
+            );
+        }
+        gate.release().await;
+        recompute.await.unwrap();
+        {
+            let documents = snapshot_documents(&backend.documents).await;
+            let mut analysis = backend.analysis.lock().await;
+            analysis.recompute_gate = None;
+            assert!(
+                analysis.workspace.latest().is_none(),
+                "the superseded off-pump snapshot must not resurrect as the latest"
+            );
+            assert!(
+                analysis
+                    .workspace
+                    .fresh_latest_from_snapshot(&documents)
+                    .is_none(),
+                "with no latest there is no falsely fresh snapshot to serve"
+            );
+        }
+
+        // A follow-up recompute repairs state: the project re-resolves and a fresh
+        // analysis installs.
+        run(backend).await;
+        {
+            let analysis = backend.analysis.lock().await;
+            assert!(
+                analysis.workspace.project().is_some(),
+                "a follow-up recompute re-resolves the project"
+            );
+            assert!(
+                analysis.workspace.latest().is_some(),
+                "a follow-up recompute installs a fresh analysis"
+            );
+        }
+
+        // Phase 2: an external source change races the next parked run. It invalidates
+        // analysis (project stays), and the returning run must not resurrect its stale
+        // snapshot as a fresh latest.
+        let gate = TestRecomputeGate::new();
+        let recompute = park(backend, Arc::clone(&gate)).await;
+        gate.wait_until_entered().await;
+        let sibling_url = Url::from_file_path(&sibling).unwrap();
+        <Backend as LanguageServer>::did_change_watched_files(
+            backend,
+            DidChangeWatchedFilesParams {
+                changes: vec![FileEvent {
+                    uri: sibling_url,
+                    typ: FileChangeType::CHANGED,
+                }],
+            },
+        )
+        .await;
+        gate.release().await;
+        recompute.await.unwrap();
+        {
+            let documents = snapshot_documents(&backend.documents).await;
+            let analysis = backend.analysis.lock().await;
+            assert!(
+                analysis
+                    .workspace
+                    .fresh_latest_from_snapshot(&documents)
+                    .is_none(),
+                "a source invalidation racing the parked run must not leave a falsely fresh snapshot"
+            );
+        }
     }
 
     /// A one-line parse error drops its module from the checked program, leaving the
