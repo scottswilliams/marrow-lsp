@@ -2730,6 +2730,177 @@ fn custom_data_integrity_method_is_not_registered() {
     let _ = server.0.kill();
 }
 
+/// The server, not only VS Code's static config, registers the project watchers, so
+/// any LSP client invalidates analysis on an external `.mw` or `marrow.lock` change.
+/// Drives the real binary as a bare LSP client that declares dynamic registration,
+/// asserts the registered globs, then confirms an external source change and a
+/// `marrow.lock` change each drive a recompute against fresh disk content.
+#[test]
+fn server_registers_watchers_and_external_changes_invalidate_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("marrow.json"),
+        r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+    )
+    .unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let defs = src.join("defs.mw");
+    let app = src.join("app.mw");
+    let defs_with_thing = "module defs\n\npub fn thing(): int\n    return 1\n";
+    std::fs::write(&defs, defs_with_thing).unwrap();
+    let app_source = "module app\nuse defs\n\npub fn call(): int\n    return defs::thing()\n";
+    std::fs::write(&app, app_source).unwrap();
+
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the marrow-lsp binary runs"),
+    );
+    let mut stdin = server.0.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.0.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "workspace": {
+                        "didChangeWatchedFiles": { "dynamicRegistration": true }
+                    }
+                }
+            }
+        }),
+    );
+    let _ = recv(&mut stdout);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    );
+
+    // The server registers the watchers; unblock its request and assert the globs.
+    let registration = wait_for_server_request(&mut stdout, "client/registerCapability", Duration::from_secs(10));
+    let globs: Vec<String> = registration["params"]["registrations"]
+        .as_array()
+        .expect("registrations array")
+        .iter()
+        .filter(|r| r["method"] == "workspace/didChangeWatchedFiles")
+        .flat_map(|r| {
+            r["registerOptions"]["watchers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|watcher| watcher["globPattern"].as_str().map(str::to_string))
+        .collect();
+    for expected in ["**/marrow.json", "**/*.mw", "**/marrow.lock", "**/marrow.redb"] {
+        assert!(
+            globs.iter().any(|glob| glob == expected),
+            "server must register a {expected} watcher, got {globs:?}"
+        );
+    }
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": registration["id"], "result": null }),
+    );
+
+    let app_uri = url::Url::from_file_path(&app).unwrap().to_string();
+    let lock_uri = url::Url::from_file_path(root.join("marrow.lock")).unwrap().to_string();
+    let defs_uri = url::Url::from_file_path(&defs).unwrap().to_string();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": app_uri,
+                    "languageId": "marrow",
+                    "version": 1,
+                    "text": app_source
+                }
+            }
+        }),
+    );
+    let opened = wait_for_diagnostic_or_empty(&mut stdout, &app_uri, Duration::from_secs(10));
+    assert!(
+        opened["params"]["diagnostics"].as_array().unwrap().is_empty(),
+        "the resolved reference should report no diagnostics initially: {opened}"
+    );
+
+    // An external edit to the closed source file removes `thing`; the watcher event
+    // must invalidate analysis and recompute against the new disk content.
+    std::fs::write(&defs, "module defs\n\npub fn other(): int\n    return 1\n").unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": { "changes": [ { "uri": defs_uri, "type": 2 } ] }
+        }),
+    );
+    let broken = wait_for_diagnostic(&mut stdout, &app_uri, Duration::from_secs(10));
+    assert!(
+        broken.get("range").is_some(),
+        "the external removal of `thing` must surface an unresolved-reference diagnostic: {broken}"
+    );
+
+    // Restore the source on disk, then fire only a `marrow.lock` event: it too must
+    // invalidate analysis, so the recompute picks up the restored file and clears.
+    std::fs::write(&defs, defs_with_thing).unwrap();
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeWatchedFiles",
+            "params": { "changes": [ { "uri": lock_uri, "type": 2 } ] }
+        }),
+    );
+    let cleared = wait_for_empty_diagnostic(&mut stdout, &app_uri, Duration::from_secs(10));
+    assert!(
+        cleared["params"]["diagnostics"].as_array().unwrap().is_empty(),
+        "a marrow.lock change must invalidate analysis so the restored reference clears: {cleared}"
+    );
+
+    let _ = server.0.kill();
+}
+
+/// Read messages until a server-to-client request with `method` arrives, returning it.
+fn wait_for_server_request(reader: &mut impl BufRead, method: &str, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let message = recv(reader);
+        if message["method"] == method && message.get("id").is_some() {
+            return message;
+        }
+    }
+    panic!("no {method} request within the timeout");
+}
+
+/// Read notifications until an empty `publishDiagnostics` for `uri` arrives.
+fn wait_for_empty_diagnostic(reader: &mut impl BufRead, uri: &str, timeout: Duration) -> Value {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let message = recv(reader);
+        if message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == uri
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty())
+        {
+            return message;
+        }
+    }
+    panic!("no cleared diagnostics published within the timeout");
+}
+
 /// Read notifications until a `publishDiagnostics` for `uri` arrives (empty or
 /// not), returning it. Used to wait for the debounced recompute to land before a
 /// request that depends on the fresh snapshot.

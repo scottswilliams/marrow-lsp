@@ -56,6 +56,11 @@ pub struct Backend {
     /// the server to open the native dev store read-only.
     live_data: Arc<AtomicBool>,
     pending_workspace_invalidation: Arc<AtomicU8>,
+    /// Whether the client supports dynamic `workspace/didChangeWatchedFiles`
+    /// registration, learned from its `initialize` capabilities. When it does, the
+    /// server registers the project watchers itself so freshness is client-agnostic;
+    /// a client without it (or a bare test harness) is left to any static config.
+    dynamic_watch_registration: Arc<AtomicBool>,
 }
 
 struct AnalysisState {
@@ -305,6 +310,7 @@ impl Backend {
             edit_seq: Arc::new(AtomicU64::new(0)),
             live_data: Arc::new(AtomicBool::new(false)),
             pending_workspace_invalidation: Arc::new(AtomicU8::new(0)),
+            dynamic_watch_registration: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -628,6 +634,44 @@ impl Backend {
     }
 }
 
+/// Whether the client can honor a dynamic `workspace/didChangeWatchedFiles`
+/// registration.
+fn client_supports_dynamic_watch_registration(capabilities: &ClientCapabilities) -> bool {
+    capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+        .and_then(|watched| watched.dynamic_registration)
+        .unwrap_or(false)
+}
+
+/// The project inputs whose changes make analysis stale: the config, any source
+/// module, the committed lock, and the native store file. Registered server-side so
+/// the client watches them regardless of its own configuration.
+fn watched_files_registrations() -> Vec<Registration> {
+    let globs = [
+        "**/marrow.json".to_string(),
+        "**/*.mw".to_string(),
+        format!("**/{}", marrow_lsp_core::workspace::COMMITTED_LOCK_FILE),
+        "**/marrow.redb".to_string(),
+    ];
+    let watchers = globs
+        .into_iter()
+        .map(|glob| FileSystemWatcher {
+            glob_pattern: GlobPattern::String(glob),
+            kind: None,
+        })
+        .collect();
+    vec![Registration {
+        id: "marrow-watched-files".to_string(),
+        method: "workspace/didChangeWatchedFiles".to_string(),
+        register_options: Some(
+            serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
+                .expect("watched-files registration options serialize"),
+        ),
+    }]
+}
+
 /// Log a recompute failure, staying quiet for a file outside any project (a normal
 /// state, not an error).
 fn log_recompute_error(file: &Path, error: &marrow_lsp_core::workspace::WorkspaceError) {
@@ -706,6 +750,10 @@ impl LanguageServer for Backend {
         {
             self.live_data.store(true, Ordering::Relaxed);
         }
+        if client_supports_dynamic_watch_registration(&params.capabilities) {
+            self.dynamic_watch_registration
+                .store(true, Ordering::Relaxed);
+        }
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "marrow-lsp".to_string(),
@@ -765,6 +813,21 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         eprintln!("{} initialized", crate::stderr_notice("marrow-lsp:"));
+        // Register the project watchers server-side so any client, not only VS Code's
+        // static config, invalidates analysis on a config, source, lock, or store
+        // change. The store watcher is registered here; its change handling lands with
+        // the store-invalidation lane.
+        if self.dynamic_watch_registration.load(Ordering::Relaxed)
+            && let Err(error) = self
+                .client
+                .register_capability(watched_files_registrations())
+                .await
+        {
+            eprintln!(
+                "{} watched-file registration failed: {error}",
+                crate::stderr_error("marrow-lsp:")
+            );
+        }
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
