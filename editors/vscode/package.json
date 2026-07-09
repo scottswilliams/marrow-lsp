@@ -32,10 +32,11 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "Marrow launches a server and debug-adapter binary when you open a project. In a workspace you have not trusted, the machine-scoped executable-path overrides are ignored so a folder cannot redirect Marrow to run an arbitrary binary; the bundled binaries still provide language features.",
+      "description": "Marrow launches a server and debug-adapter binary when you open a project. In a workspace you have not trusted, the machine-scoped executable-path overrides are ignored so a folder cannot redirect Marrow to run an arbitrary binary, and the `marrow.liveData` opt-in is ignored so a folder cannot make the editor open and read a committed store; the bundled binaries still provide language features.",
       "restrictedConfigurations": [
         "marrow.server.path",
-        "marrow.dap.path"
+        "marrow.dap.path",
+        "marrow.liveData"
       ]
     },
     "virtualWorkspaces": {

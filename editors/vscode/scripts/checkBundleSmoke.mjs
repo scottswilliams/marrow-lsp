@@ -164,8 +164,10 @@ check("README development docs are cross-platform honest", () => {
 });
 
 check("marketplace governance metadata is present", () => {
-  // A verified org publisher, not the individual scaffold account, so the listing is
-  // owned by the project rather than one person's bus factor.
+  // An org publisher id, not the individual scaffold account, so the listing is owned by
+  // the project rather than one person's bus factor. The id is a placeholder until the
+  // publisher is registered and verified on the marketplace; this asserts only that it is
+  // not the personal account.
   assert.notEqual(
     packageJson.publisher,
     "scottswilliams",

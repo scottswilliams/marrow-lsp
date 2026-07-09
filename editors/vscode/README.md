@@ -146,7 +146,7 @@ code --install-extension --force marrow-<target>-<version>.vsix
 
 `--force` replaces the currently installed version. If you rebuilt without bumping `version` in
 `package.json`, bump it or fully uninstall first
-(`code --uninstall-extension scottswilliams.marrow`) so VSCode does not keep the old copy cached.
+(`code --uninstall-extension marrow-lang.marrow`) so VSCode does not keep the old copy cached.
 Run **Developer: Reload Window** (or restart VSCode) to load the new build.
 
 See `CHANGELOG.md` for release notes.

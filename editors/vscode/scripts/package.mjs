@@ -3,10 +3,11 @@
 // .vsix. The VS Code package target is host-detected by default but can be set
 // explicitly with `--target <vsce-target>` so one runner can package for a
 // cross-compiled triple (the Rust triple travels separately in CARGO_BUILD_TARGET,
-// consumed by bundle.mjs). Reproducibility guard: packaging refuses to run while
-// the upstream marrow crates are local `../marrow` path dependencies, because a
-// published extension must resolve them at the pinned git revision. `--allow-path-deps`
-// produces a deliberately non-reproducible dev/e2e VSIX and must never be published.
+// consumed by bundle.mjs). Pinned-source guard: packaging refuses to run while the
+// upstream marrow crates are local `../marrow` path dependencies, because a published
+// extension must resolve them at the pinned git revision so it is rebuildable from that
+// exact source. `--allow-path-deps` produces a deliberately unpinned dev/e2e VSIX (built
+// against whatever marrow sits beside the repo) and must never be published.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -90,7 +91,7 @@ function cargoTargetDir() {
 // Refuse to package a publishable .vsix while any upstream marrow crate resolves
 // through a local `../marrow` path dependency: the resulting binary would depend on
 // whatever happens to be checked out beside the repo, so the artifact is not
-// reproducible from source. A release flips these to the pinned git revision first.
+// rebuildable from the pinned source. A release flips these to the pinned git revision first.
 function assertReproducibleUpstream() {
   const manifest = readFileSync(join(repoRoot, "Cargo.toml"), "utf8");
   const offenders = [];

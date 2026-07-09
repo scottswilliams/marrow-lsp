@@ -4,6 +4,11 @@
 // do on rejection (surface an error, tear the client down); this only owns the race.
 
 export async function withStartTimeout<T>(start: Promise<T>, timeoutMs: number): Promise<T> {
+  // When the watchdog wins the race, the losing start promise stays pending and may
+  // reject later (after the caller has torn the client down). Swallow that late rejection
+  // so it cannot surface as an unhandledRejection; the race still observes an early one.
+  start.catch(() => {});
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   const watchdog = new Promise<never>((_, reject) => {
     timer = setTimeout(

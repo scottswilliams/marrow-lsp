@@ -4,10 +4,13 @@ name: Release
 # pushed, then publishes them together. Five platforms are a release promise, so the
 # matrix is fixed at five and a downstream job fails the release if fewer than five
 # artifacts arrive. Every build resolves marrow at the single pinned git revision
-# (pins/marrow-rev.toml) so the artifacts are reproducible from source.
+# (pins/marrow-rev.toml) so the artifacts are rebuildable from the pinned source (the
+# pin fixes identical source, not a bit-for-bit deterministic build).
 #
-# Untrusted input (the tag ref) is never interpolated into a run: body; it is passed
-# through an env var and referenced as "$RELEASE_TAG".
+# A manual workflow_dispatch supplies the tag to build; every marrow-lsp checkout
+# resolves that tag (falling back to the pushed tag ref) so a dispatch builds the tagged
+# commit, never default-branch HEAD. Untrusted input (the tag ref) is never interpolated
+# into a run: body: it reaches checkout only as `ref` and steps only as "$RELEASE_TAG".
 
 on:
   push:
@@ -29,7 +32,12 @@ jobs:
   preflight:
     runs-on: ubuntu-latest
     steps:
+      # Check out the commit the release names: the dispatched tag input, or on a tag
+      # push the pushed tag ref. The version-stamp gate must run against the tagged
+      # commit, not default-branch HEAD.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -76,6 +84,9 @@ jobs:
       - name: Check out marrow-lsp
         uses: actions/checkout@v4
         with:
+          # The tagged commit (dispatch input or pushed tag), so the built and
+          # version-stamped binary is the one the tag names, not default-branch HEAD.
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
           path: marrow-lsp
 
       - name: Read the pinned marrow revision
@@ -141,6 +152,16 @@ jobs:
         shell: bash
         run: node ./scripts/package.mjs --target "$VSCE_TARGET"
 
+      - name: Smoke the built server binary (native LSP handshake)
+        # Launch the just-built marrow-lsp through a real LSP initialize/exit handshake to
+        # catch a wrong-arch build, a missing glibc floor, or an unsigned-darwin launch
+        # failure before the artifact ships — byte-copying the .vsix cannot. linux-arm64 is
+        # cross-linked on an x64 runner so its binary cannot run here; that leg is a
+        # documented residual, verified only when an arm64 Linux runner is available.
+        if: matrix.vsce_target != 'linux-arm64'
+        working-directory: marrow-lsp/editors/vscode
+        run: node ./scripts/lspHandshakeSmoke.mjs
+
       - name: Upload the .vsix artifact
         uses: actions/upload-artifact@v4
         with:
@@ -179,7 +200,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # The tagged commit, so `npm ci` and the packager metadata match the release the
+      # tag names rather than default-branch HEAD.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
