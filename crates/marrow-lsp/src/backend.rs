@@ -655,14 +655,13 @@ fn client_supports_dynamic_watch_registration(capabilities: &ClientCapabilities)
 }
 
 /// The project inputs whose changes make analysis stale: the config, any source
-/// module, the committed lock, and the native store file. Registered server-side so
-/// the client watches them regardless of its own configuration.
+/// module, and the committed lock. Registered server-side so the client watches them
+/// regardless of its own configuration.
 fn watched_files_registrations() -> Vec<Registration> {
     let globs = [
         "**/marrow.json".to_string(),
         "**/*.mw".to_string(),
         format!("**/{}", marrow_lsp_core::workspace::COMMITTED_LOCK_FILE),
-        "**/marrow.redb".to_string(),
     ];
     let watchers = globs
         .into_iter()
@@ -822,10 +821,9 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         eprintln!("{} initialized", crate::stderr_notice("marrow-lsp:"));
-        // Register the project watchers server-side so any client, not only VS Code's
-        // static config, invalidates analysis on a config, source, lock, or store
-        // change. The store watcher is registered here; its change handling lands with
-        // the store-invalidation lane.
+        // Register the project watchers server-side so any client, not only one with
+        // its own static file-event config, invalidates analysis on a config, source,
+        // or committed-lock change.
         if self.dynamic_watch_registration.load(Ordering::Relaxed)
             && let Err(error) = self
                 .client
@@ -1900,10 +1898,6 @@ mod tests {
         let source = "module app\n\nfn f(): int\n    return 1\n";
         std::fs::write(&file, source).unwrap();
 
-        let url = Url::from_file_path(&file).unwrap();
-        let mut documents = Documents::new();
-        documents.open_with_version(url, source.to_string(), Some(1));
-        let _ = documents;
         let mut workspace = Workspace::new();
 
         assert!(
@@ -2331,34 +2325,27 @@ mod tests {
                 .await;
             }
         };
-        // Park the next recompute off the pump, then apply a watcher change while it
-        // holds no lock.
-        let park = |backend: &Backend, gate: Arc<TestRecomputeGate>| {
+        // Spawn a recompute onto the runtime so a gate can park it off the pump.
+        let spawn_recompute = |backend: &Backend| {
             let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
                 context(backend);
             let file = file.clone();
-            async move {
-                {
-                    let mut analysis = analysis.lock().await;
-                    analysis.recompute_gate = Some(gate);
-                }
-                tokio::spawn(async move {
-                    Backend::recompute_and_publish(
-                        RecomputeContext {
-                            documents: &documents,
-                            analysis: &analysis,
-                            analysis_run: &analysis_run,
-                            diagnostics: &diagnostics,
-                            diagnostics_publish: &publish,
-                            pending_workspace_invalidation: &pending,
-                            client: &client,
-                        },
-                        &file,
-                        None,
-                    )
-                    .await;
-                })
-            }
+            tokio::spawn(async move {
+                Backend::recompute_and_publish(
+                    RecomputeContext {
+                        documents: &documents,
+                        analysis: &analysis,
+                        analysis_run: &analysis_run,
+                        diagnostics: &diagnostics,
+                        diagnostics_publish: &publish,
+                        pending_workspace_invalidation: &pending,
+                        client: &client,
+                    },
+                    &file,
+                    None,
+                )
+                .await;
+            })
         };
 
         // A first recompute leaves a good analysis as the latest.
@@ -2367,7 +2354,11 @@ mod tests {
         // Phase 1: a config change races the parked run. It nulls the project, so a
         // blind commit would panic; the epoch guard must discard instead.
         let gate = TestRecomputeGate::new();
-        let recompute = park(backend, Arc::clone(&gate)).await;
+        {
+            let mut analysis = backend.analysis.lock().await;
+            analysis.recompute_gate = Some(Arc::clone(&gate));
+        }
+        let recompute = spawn_recompute(backend);
         gate.wait_until_entered().await;
         let config_url = Url::from_file_path(root.join("marrow.json")).unwrap();
         <Backend as LanguageServer>::did_change_watched_files(
@@ -2381,7 +2372,9 @@ mod tests {
         )
         .await;
         assert_eq!(
-            backend.pending_workspace_invalidation.load(Ordering::SeqCst),
+            backend
+                .pending_workspace_invalidation
+                .load(Ordering::SeqCst),
             0,
             "an off-pump watcher invalidation applies directly, recording no pending bit"
         );
@@ -2430,7 +2423,11 @@ mod tests {
         // analysis (project stays), and the returning run must not resurrect its stale
         // snapshot as a fresh latest.
         let gate = TestRecomputeGate::new();
-        let recompute = park(backend, Arc::clone(&gate)).await;
+        {
+            let mut analysis = backend.analysis.lock().await;
+            analysis.recompute_gate = Some(Arc::clone(&gate));
+        }
+        let recompute = spawn_recompute(backend);
         gate.wait_until_entered().await;
         let sibling_url = Url::from_file_path(&sibling).unwrap();
         <Backend as LanguageServer>::did_change_watched_files(

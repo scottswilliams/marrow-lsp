@@ -145,7 +145,9 @@ struct LastGoodAnalysis {
 pub enum ReadSource {
     /// The latest analysis. When it matches the editor-visible source these are current
     /// facts; otherwise they are the most recent good facts while a recompute for newer
-    /// source is in flight.
+    /// source is in flight. Serving those prior-generation facts can drift a cursor
+    /// offset against older spans during the debounce window — the accepted cost of
+    /// answering from stale facts rather than blanking.
     Latest,
     /// The retained last-good analysis, used when the latest one dropped the target
     /// module to a parse error.

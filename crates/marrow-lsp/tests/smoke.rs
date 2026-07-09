@@ -2786,7 +2786,11 @@ fn server_registers_watchers_and_external_changes_invalidate_analysis() {
     );
 
     // The server registers the watchers; unblock its request and assert the globs.
-    let registration = wait_for_server_request(&mut stdout, "client/registerCapability", Duration::from_secs(10));
+    let registration = wait_for_server_request(
+        &mut stdout,
+        "client/registerCapability",
+        Duration::from_secs(10),
+    );
     let globs: Vec<String> = registration["params"]["registrations"]
         .as_array()
         .expect("registrations array")
@@ -2800,7 +2804,7 @@ fn server_registers_watchers_and_external_changes_invalidate_analysis() {
         })
         .filter_map(|watcher| watcher["globPattern"].as_str().map(str::to_string))
         .collect();
-    for expected in ["**/marrow.json", "**/*.mw", "**/marrow.lock", "**/marrow.redb"] {
+    for expected in ["**/marrow.json", "**/*.mw", "**/marrow.lock"] {
         assert!(
             globs.iter().any(|glob| glob == expected),
             "server must register a {expected} watcher, got {globs:?}"
@@ -2812,7 +2816,9 @@ fn server_registers_watchers_and_external_changes_invalidate_analysis() {
     );
 
     let app_uri = url::Url::from_file_path(&app).unwrap().to_string();
-    let lock_uri = url::Url::from_file_path(root.join("marrow.lock")).unwrap().to_string();
+    let lock_uri = url::Url::from_file_path(root.join("marrow.lock"))
+        .unwrap()
+        .to_string();
     let defs_uri = url::Url::from_file_path(&defs).unwrap().to_string();
     send(
         &mut stdin,
@@ -2831,7 +2837,10 @@ fn server_registers_watchers_and_external_changes_invalidate_analysis() {
     );
     let opened = wait_for_diagnostic_or_empty(&mut stdout, &app_uri, Duration::from_secs(10));
     assert!(
-        opened["params"]["diagnostics"].as_array().unwrap().is_empty(),
+        opened["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "the resolved reference should report no diagnostics initially: {opened}"
     );
 
@@ -2865,7 +2874,10 @@ fn server_registers_watchers_and_external_changes_invalidate_analysis() {
     );
     let cleared = wait_for_empty_diagnostic(&mut stdout, &app_uri, Duration::from_secs(10));
     assert!(
-        cleared["params"]["diagnostics"].as_array().unwrap().is_empty(),
+        cleared["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "a marrow.lock change must invalidate analysis so the restored reference clears: {cleared}"
     );
 
