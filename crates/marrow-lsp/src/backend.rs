@@ -479,9 +479,10 @@ impl Backend {
         }
     }
 
-    /// One-shot: if a test armed panic injection, panic inside the guarded read so the
-    /// per-handler boundary is exercised on the real compute path. Disarms itself so
-    /// the next request runs normally, proving the server still answers.
+    /// One-shot: if a test armed panic injection, panic inside the guarded read while
+    /// the analysis lock is held, so the boundary is exercised on the real torn-state
+    /// question — whether the caught unwind drops the guard and frees the lock. Disarms
+    /// itself so the next request runs normally, proving the server still answers.
     #[cfg(test)]
     fn maybe_inject_read_panic(&self, handler: &str) {
         if self.inject_read_panic.swap(false, Ordering::SeqCst) {
@@ -1353,11 +1354,14 @@ impl LanguageServer for Backend {
             return Err(content_modified());
         }
         guard_read("hover", || {
-            #[cfg(test)]
-            self.maybe_inject_read_panic("hover");
             let Ok(mut analysis) = self.analysis.try_lock() else {
                 return Ok(None);
             };
+            // Fire the injected fault with the analysis lock held, so the test proves
+            // the caught unwind drops the guard and releases the lock rather than
+            // leaving it poisoned for the next reader.
+            #[cfg(test)]
+            self.maybe_inject_read_panic("hover");
             if self.workspace_invalidation_pending() {
                 return Ok(None);
             }
@@ -1396,11 +1400,11 @@ impl LanguageServer for Backend {
             return Err(content_modified());
         }
         guard_read("goto_definition", || {
-            #[cfg(test)]
-            self.maybe_inject_read_panic("goto_definition");
             let Ok(mut analysis) = self.analysis.try_lock() else {
                 return Ok(None);
             };
+            #[cfg(test)]
+            self.maybe_inject_read_panic("goto_definition");
             if self.workspace_invalidation_pending() {
                 return Ok(None);
             }
@@ -1441,11 +1445,11 @@ impl LanguageServer for Backend {
             return Err(content_modified());
         }
         guard_read("references", || {
-            #[cfg(test)]
-            self.maybe_inject_read_panic("references");
             let Ok(mut analysis) = self.analysis.try_lock() else {
                 return Ok(None);
             };
+            #[cfg(test)]
+            self.maybe_inject_read_panic("references");
             if self.workspace_invalidation_pending() {
                 return Ok(None);
             }
@@ -1491,11 +1495,11 @@ impl LanguageServer for Backend {
             return Err(content_modified());
         }
         guard_read("prepare_rename", || {
-            #[cfg(test)]
-            self.maybe_inject_read_panic("prepare_rename");
             let Ok(mut analysis) = self.analysis.try_lock() else {
                 return Ok(None);
             };
+            #[cfg(test)]
+            self.maybe_inject_read_panic("prepare_rename");
             if self.workspace_invalidation_pending() {
                 return Ok(None);
             }
@@ -1535,11 +1539,11 @@ impl LanguageServer for Backend {
             return Err(content_modified());
         }
         guard_read("rename", || {
-            #[cfg(test)]
-            self.maybe_inject_read_panic("rename");
             let Ok(mut analysis) = self.analysis.try_lock() else {
                 return Ok(None);
             };
+            #[cfg(test)]
+            self.maybe_inject_read_panic("rename");
             if self.workspace_invalidation_pending() {
                 return Ok(None);
             }
@@ -1575,8 +1579,10 @@ impl LanguageServer for Backend {
         let Some(document) = self.documents.lock().await.snapshot(&url) else {
             return Ok(None);
         };
-        let outline = symbols::document_symbols(&document.parsed.file, &document.index);
-        Ok(Some(DocumentSymbolResponse::Nested(outline)))
+        guard_read("document_symbol", || {
+            let outline = symbols::document_symbols(&document.parsed.file, &document.index);
+            Ok(Some(DocumentSymbolResponse::Nested(outline)))
+        })
     }
 
     async fn symbol(
@@ -1585,20 +1591,22 @@ impl LanguageServer for Backend {
     ) -> jsonrpc::Result<Option<Vec<SymbolInformation>>> {
         let search_text = params.query;
         let documents = snapshot_documents(&self.documents).await;
-        let Ok(analysis) = self.analysis.try_lock() else {
-            return Ok(None);
-        };
-        if self.workspace_invalidation_pending() {
-            return Ok(None);
-        }
-        // Workspace symbols stay fresh-gated: an editor-wide symbol list that names
-        // a symbol the user just renamed is more misleading than a blank result,
-        // and unlike a cursor read it has no position to anchor prior-generation
-        // facts to.
-        let Some(snapshot) = analysis.workspace.fresh_latest_from_snapshot(&documents) else {
-            return Ok(None);
-        };
-        Ok(Some(symbols::workspace_symbols(snapshot, &search_text)))
+        guard_read("symbol", || {
+            let Ok(analysis) = self.analysis.try_lock() else {
+                return Ok(None);
+            };
+            if self.workspace_invalidation_pending() {
+                return Ok(None);
+            }
+            // Workspace symbols stay fresh-gated: an editor-wide symbol list that names
+            // a symbol the user just renamed is more misleading than a blank result,
+            // and unlike a cursor read it has no position to anchor prior-generation
+            // facts to.
+            let Some(snapshot) = analysis.workspace.fresh_latest_from_snapshot(&documents) else {
+                return Ok(None);
+            };
+            Ok(Some(symbols::workspace_symbols(snapshot, &search_text)))
+        })
     }
 
     /// Complete at the cursor. Reads only the document's cached lex/parse and the
@@ -1631,28 +1639,34 @@ impl LanguageServer for Backend {
             return Err(content_modified());
         }
 
-        let empty = EMPTY_PROGRAM.get_or_init(Default::default);
-        let analysis = (!self.workspace_invalidation_pending())
-            .then(|| self.analysis.try_lock().ok())
-            .flatten();
-        let program = analysis
-            .as_ref()
-            .and_then(|analysis| {
-                analysis
-                    .workspace
-                    .fresh_program_or_empty_from_snapshot(&documents)
-            })
-            .unwrap_or(empty);
+        guard_read("completion", || {
+            let empty = EMPTY_PROGRAM.get_or_init(Default::default);
+            let analysis = (!self.workspace_invalidation_pending())
+                .then(|| self.analysis.try_lock().ok())
+                .flatten();
+            let program = analysis
+                .as_ref()
+                .and_then(|analysis| {
+                    analysis
+                        .workspace
+                        .fresh_program_or_empty_from_snapshot(&documents)
+                })
+                .unwrap_or(empty);
 
-        let items = completion::completion(
-            program,
-            &path,
-            &document.text,
-            &document.parsed,
-            &document.lexed,
-            offset,
-        );
-        Ok(Some(CompletionResponse::Array(items)))
+            // With the analysis lock held (when a fresh program backs completion), fire
+            // the injected fault so the boundary is tested against a lock-holding read.
+            #[cfg(test)]
+            self.maybe_inject_read_panic("completion");
+            let items = completion::completion(
+                program,
+                &path,
+                &document.text,
+                &document.parsed,
+                &document.lexed,
+                offset,
+            );
+            Ok(Some(CompletionResponse::Array(items)))
+        })
     }
 
     /// Show the single callable signature for the innermost call at the cursor.
@@ -1683,27 +1697,29 @@ impl LanguageServer for Backend {
         if self.request_superseded(&documents).await {
             return Err(content_modified());
         }
-        let Ok(analysis) = self.analysis.try_lock() else {
-            return Ok(None);
-        };
-        if self.workspace_invalidation_pending() {
-            return Ok(None);
-        }
-        let Some(snapshot) = analysis.workspace.fresh_latest_from_snapshot(&documents) else {
-            return Ok(None);
-        };
-        let program = &snapshot.program;
-        if program.modules.is_empty() {
-            return Ok(None);
-        }
-        Ok(signature_help::signature_help(
-            program,
-            Some(snapshot),
-            &path,
-            &document.text,
-            &document.lexed,
-            offset,
-        ))
+        guard_read("signature_help", || {
+            let Ok(analysis) = self.analysis.try_lock() else {
+                return Ok(None);
+            };
+            if self.workspace_invalidation_pending() {
+                return Ok(None);
+            }
+            let Some(snapshot) = analysis.workspace.fresh_latest_from_snapshot(&documents) else {
+                return Ok(None);
+            };
+            let program = &snapshot.program;
+            if program.modules.is_empty() {
+                return Ok(None);
+            }
+            Ok(signature_help::signature_help(
+                program,
+                Some(snapshot),
+                &path,
+                &document.text,
+                &document.lexed,
+                offset,
+            ))
+        })
     }
 
     /// Classify the document's cached lex into semantic tokens. Reads only the
@@ -1723,7 +1739,9 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let data = self.compute_semantic_tokens(&document, &documents, &path);
+        let data = guard_read("semantic_tokens_full", || {
+            Ok(self.compute_semantic_tokens(&document, &documents, &path))
+        })?;
         let result_id = self
             .semantic_tokens_cache
             .lock()
@@ -1752,7 +1770,9 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let data = self.compute_semantic_tokens(&document, &documents, &path);
+        let data = guard_read("semantic_tokens_full_delta", || {
+            Ok(self.compute_semantic_tokens(&document, &documents, &path))
+        })?;
         let mut cache = self.semantic_tokens_cache.lock().await;
         let edits = cache
             .previous(&url, &params.previous_result_id)
@@ -1781,11 +1801,13 @@ impl LanguageServer for Backend {
         let Some(document) = self.documents.lock().await.snapshot(&url) else {
             return Ok(None);
         };
-        Ok(formatting::formatting(
-            &document.text,
-            &document.parsed,
-            &document.index,
-        ))
+        guard_read("formatting", || {
+            Ok(formatting::formatting(
+                &document.text,
+                &document.parsed,
+                &document.index,
+            ))
+        })
     }
 
     /// Format the indentation of the current line after a newline. Reads only the
@@ -1802,12 +1824,14 @@ impl LanguageServer for Backend {
         let Some(document) = self.documents.lock().await.snapshot(&url) else {
             return Ok(None);
         };
-        Ok(indentation::newline_indentation(
-            &document.text,
-            &document.lexed,
-            position,
-            &params.options,
-        ))
+        guard_read("on_type_formatting", || {
+            Ok(indentation::newline_indentation(
+                &document.text,
+                &document.lexed,
+                position,
+                &params.options,
+            ))
+        })
     }
 }
 
@@ -2214,6 +2238,91 @@ mod tests {
                  wall-clock literal `{deadline}`"
             );
         }
+    }
+
+    /// Every hot-path read RPC that computes over the analysis or a parsed document
+    /// must route that compute through `guard_read`, so a panic in core compute becomes
+    /// a JSON-RPC error for one request instead of unwinding the shared transport task
+    /// and dropping every open editor. This structural gate fails if a new `async fn`
+    /// read handler calls a language-intelligence compute without the boundary: a read
+    /// handler cannot ship unguarded.
+    #[test]
+    fn every_read_handler_routes_its_compute_through_guard_read() {
+        // Each needle is a call a read handler makes into `marrow-lsp-core` (or the
+        // local semantic-token helper) — the exact surface that asserts hot-path
+        // invariants an upstream analysis change or a malformed edit could violate. A
+        // handler that contains one of these must also contain a `guard_read` boundary.
+        const COMPUTE_NEEDLES: &[&str] = &[
+            "hover::hover",
+            "navigation::definition",
+            "navigation::references",
+            "navigation::prepare_rename",
+            "navigation::rename",
+            "completion::completion",
+            "signature_help::signature_help",
+            "symbols::document_symbols",
+            "symbols::workspace_symbols",
+            "compute_semantic_tokens",
+            "formatting::formatting",
+            "indentation::newline_indentation",
+        ];
+        let source = include_str!("backend.rs");
+        for handler in async_fn_blocks(source) {
+            if let Some(needle) = COMPUTE_NEEDLES
+                .iter()
+                .find(|needle| handler.body.contains(**needle))
+            {
+                assert!(
+                    handler.body.contains("guard_read("),
+                    "the `{}` read handler calls `{needle}` but does not route it through \
+                     guard_read; an unguarded core-compute panic would unwind the shared \
+                     transport task and drop every editor",
+                    handler.name,
+                );
+            }
+        }
+    }
+
+    struct AsyncFnBlock<'a> {
+        name: &'a str,
+        body: &'a str,
+    }
+
+    /// Split source into each `async fn`'s name and brace-balanced body, so a
+    /// structural test can inspect one handler at a time. A crude scan is enough here:
+    /// the read handlers hold no unbalanced brace inside a string literal, so counting
+    /// braces from the signature's opening `{` finds the matching close.
+    fn async_fn_blocks(source: &str) -> Vec<AsyncFnBlock<'_>> {
+        const MARKER: &str = "async fn ";
+        let mut blocks = Vec::new();
+        for (index, _) in source.match_indices(MARKER) {
+            let after = &source[index + MARKER.len()..];
+            let name = after[..after.find('(').unwrap_or(after.len())].trim();
+            let Some(brace) = after.find('{') else {
+                continue;
+            };
+            let body = balanced_braces(&after[brace..]);
+            blocks.push(AsyncFnBlock { name, body });
+        }
+        blocks
+    }
+
+    /// The prefix of `source` from its leading `{` through the matching `}`.
+    fn balanced_braces(source: &str) -> &str {
+        let mut depth = 0usize;
+        for (offset, byte) in source.bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[..=offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        source
     }
 
     /// A full request hands back a `result_id`; a follow-up delta request that echoes
@@ -3274,9 +3383,13 @@ mod tests {
 
     /// A hot-path read handler that panics must not kill the editing session: the
     /// per-handler boundary turns the panic into a JSON-RPC error for that one request,
-    /// and the very next request is still answered with correct facts. Runs under the
-    /// virtual-time harness so a hung server (rather than an answered one) trips the
-    /// deadline deterministically.
+    /// and the very next request is still answered with correct facts. The injected
+    /// panic fires with the analysis lock held, so the follow-up request answering at
+    /// all proves the caught unwind dropped the guard and freed the lock rather than
+    /// leaving it wedged — the torn-state question. Both a cursor read (hover) and a
+    /// newly-guarded sibling (completion) are exercised, so the whole guarded family is
+    /// covered, not one handler. Runs under the virtual-time harness so a hung server
+    /// (rather than an answered one) trips the deadline deterministically.
     #[tokio::test(start_paused = true)]
     async fn a_panicking_read_handler_returns_an_error_and_the_next_request_is_answered() {
         let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
@@ -3353,6 +3466,44 @@ mod tests {
         assert!(
             recovered.is_some(),
             "the request after a panicking one must resolve real hover facts, proving isolation"
+        );
+
+        let completion_params = || CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: url.clone() },
+                position: Position {
+                    line: 6,
+                    character: 11,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        };
+
+        // The same fault injected into a newly-guarded sibling: completion holds the
+        // analysis lock while it borrows the fresh program, so a panic there is the same
+        // lock-held torn-state case. The boundary must contain it too.
+        backend.inject_read_panic.store(true, Ordering::SeqCst);
+        let panicked = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
+            <Backend as LanguageServer>::completion(backend, completion_params()).await
+        })
+        .await
+        .expect("a panicking completion must return promptly, not hang the transport");
+        let error = panicked.expect_err("a panicking completion must surface a JSON-RPC error");
+        assert_eq!(error.code, jsonrpc::ErrorCode::InternalError);
+
+        // The lock the panicking completion held must be free again: the follow-up
+        // completion can only answer if the caught unwind released it.
+        let recovered = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
+            <Backend as LanguageServer>::completion(backend, completion_params()).await
+        })
+        .await
+        .expect("the server must keep answering after an isolated completion panic")
+        .expect("the follow-up completion must succeed");
+        assert!(
+            recovered.is_some(),
+            "completion after a panicking one must answer, proving the lock was released on unwind"
         );
     }
 

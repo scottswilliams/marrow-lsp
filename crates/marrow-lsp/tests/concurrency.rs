@@ -136,6 +136,13 @@ fn write_project(dir: &std::path::Path) -> String {
 /// Interleaving didChange with two reads and a cancellation must neither wedge the
 /// transport nor let the cancelled request corrupt a later one: both surviving reads
 /// answer, and a fresh hover afterwards still returns a well-formed response.
+///
+/// Whether the `$/cancelRequest` for id 10 lands while that hover is genuinely in
+/// flight or after it has already resolved is racy — driving the real server over
+/// stdio, the test cannot park the hover without adding production-only test surface,
+/// which is not worth it. The assertions are non-vacuous under either ordering: the
+/// transport must stay deadlock-free and every surviving request must answer cleanly
+/// regardless of when the cancel is observed.
 #[test]
 fn interleaved_reads_and_a_cancel_do_not_deadlock_or_corrupt_a_later_request() {
     let dir = tempfile::tempdir().unwrap();

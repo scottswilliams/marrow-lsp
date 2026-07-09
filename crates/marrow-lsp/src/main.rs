@@ -108,10 +108,14 @@ impl ExitWatcher {
 
     /// End the process on `exit`. The frame has already been forwarded to tower-lsp by
     /// the read that delivered it, so the service has seen `exit`. Per the LSP spec the
-    /// code is 0 only when a clean `shutdown` preceded it, else 1. Flush stdout first:
-    /// `process::exit` runs no destructors, so a still-buffered response (the shutdown
-    /// reply) would otherwise be dropped.
+    /// code is 0 only when a clean `shutdown` preceded it, else 1.
     fn exit_now(&self) -> ! {
+        // A conformant client awaits the `shutdown` response before sending `exit`, so
+        // the shutdown handler's flag write happens-before this read and the code is 0.
+        // A non-conformant client that pipelines `shutdown` and `exit` without awaiting
+        // the response may have this read race the flag write and be scored unclean
+        // (code 1); that is an acceptable outcome for a protocol violation, not a race
+        // to engineer around.
         let clean = self.shutdown_seen.load(Ordering::SeqCst);
         let code = if clean { 0 } else { 1 };
         let reason = if clean {
@@ -123,8 +127,6 @@ impl ExitWatcher {
             "{} exit notification received ({reason}), stopping",
             stderr_notice("marrow-lsp:")
         );
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
         std::process::exit(code);
     }
 }
@@ -181,13 +183,14 @@ fn is_exit_notification(body: &[u8]) -> bool {
     value.get("method").and_then(|m| m.as_str()) == Some("exit") && value.get("id").is_none()
 }
 
-/// The exit notification frame is tiny and its bytes literally contain `exit`; a body
-/// larger than any exit frame, or one without the token, cannot be `exit`, so it never
-/// reaches the full JSON parse. This short-circuit is the whole point: a document edit
-/// is not re-serialized to a `serde_json::Value` just to be rejected.
+/// An `exit` notification's bytes literally contain the token `exit`; a body without
+/// it cannot be `exit`, so it never reaches the full JSON parse. This substring guard
+/// is the whole point: a document edit is not re-serialized to a `serde_json::Value`
+/// just to be rejected. Length is deliberately not a factor — a conformant but verbose
+/// `exit` (pretty-printed, `"params": null`, future fields) can exceed any tight cap,
+/// and false-negating it would leave a client that holds stdin open hanging forever.
 fn is_exit_candidate(body: &[u8]) -> bool {
-    const MAX_EXIT_FRAME_LEN: usize = 128;
-    body.len() <= MAX_EXIT_FRAME_LEN && find_subslice(body, b"exit").is_some()
+    find_subslice(body, b"exit").is_some()
 }
 
 /// The index of the first occurrence of `needle` in `haystack`, or `None`.
@@ -208,21 +211,40 @@ mod tests {
         assert!(is_exit_notification(body));
     }
 
-    /// A whole-document `didChange` body — even one whose text contains the token
-    /// `exit` — is rejected by the cheap size pre-guard, so it never reaches the full
-    /// `serde_json` parse on the transport hot path.
+    /// A whole-document `didChange` body without the token `exit` is rejected by the
+    /// cheap substring pre-guard, so it never reaches the full `serde_json` parse on the
+    /// transport hot path — the frames that dominate a session skip the parse.
     #[test]
-    fn a_large_did_change_body_skips_the_json_parse() {
+    fn a_large_did_change_body_without_the_token_skips_the_json_parse() {
         let mut body =
             br#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"text":""#.to_vec();
         body.extend_from_slice(&vec![b'x'; 4096]);
-        body.extend_from_slice(b"exit");
         body.extend_from_slice(br#""}}"#);
         assert!(
             !is_exit_candidate(&body),
-            "an oversized frame must be rejected before the JSON parse"
+            "a body without the token must be rejected before the JSON parse"
         );
         assert!(!is_exit_notification(&body));
+    }
+
+    /// A conformant `exit` notification larger than any tight size cap — pretty-printed
+    /// or padded with insignificant whitespace, as a verbose client's serializer can
+    /// produce — must still be recognized. Capping detection on length would
+    /// false-negate it, so the server would never call `exit_now` and would hang for a
+    /// client that holds stdin open.
+    #[test]
+    fn a_large_exit_notification_is_still_recognized() {
+        let mut body = br#"{ "jsonrpc": "2.0", "method": "exit", "params": null"#.to_vec();
+        // Whitespace inside the object is insignificant JSON but pushes the frame well
+        // past the old 128-byte cap.
+        body.extend_from_slice(&[b' '; 128]);
+        body.push(b'}');
+        assert!(
+            body.len() > 128,
+            "the frame must exceed the old cap to matter"
+        );
+        assert!(is_exit_candidate(&body));
+        assert!(is_exit_notification(&body));
     }
 
     /// A small frame whose method merely contains `exit` passes the pre-guard but the
