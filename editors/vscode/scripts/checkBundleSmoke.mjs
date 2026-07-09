@@ -236,6 +236,38 @@ check("README development docs are cross-platform honest", () => {
   assert.doesNotMatch(readme, /\/tmp\/marrow-vscode-target/, "README must not use POSIX-only /tmp examples");
 });
 
+check("marketplace governance metadata is present", () => {
+  // A verified org publisher, not the individual scaffold account, so the listing is
+  // owned by the project rather than one person's bus factor.
+  assert.notEqual(
+    packageJson.publisher,
+    "scottswilliams",
+    "publisher must be the org publisher, not the personal placeholder account",
+  );
+  assert.match(packageJson.publisher, /^[a-z0-9][a-z0-9-]*$/, "publisher must be a valid marketplace id");
+
+  // A top-level gallery icon the marketplace can render, present on disk and a PNG.
+  assert.ok(typeof packageJson.icon === "string" && packageJson.icon.length > 0, "a top-level gallery icon is declared");
+  const iconPath = join(extensionDir, packageJson.icon);
+  assert.ok(existsSync(iconPath), `gallery icon exists on disk: ${packageJson.icon}`);
+  assert.equal(
+    readFileSync(iconPath).subarray(1, 4).toString("ascii"),
+    "PNG",
+    "gallery icon must be a PNG (the marketplace does not accept SVG gallery icons)",
+  );
+
+  // The trust boundary is declared for both workspace-trust and virtual-workspace support.
+  assert.ok(packageJson.capabilities, "a capabilities block is declared");
+  assert.ok(
+    packageJson.capabilities.untrustedWorkspaces,
+    "capabilities.untrustedWorkspaces states the workspace-trust boundary",
+  );
+  assert.ok(
+    packageJson.capabilities.virtualWorkspaces,
+    "capabilities.virtualWorkspaces states the virtual-workspace support level",
+  );
+});
+
 if (failures.length > 0) {
   throw new Error(`bundle/package smoke check failed:\n- ${failures.join("\n- ")}`);
 }
