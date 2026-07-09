@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lsp_types::Url;
 use marrow_syntax::{LexedSource, ParsedSource, lex_source, parse_source};
@@ -15,6 +16,12 @@ use crate::positions::LineIndex;
 /// One open buffer: its current text, a position index, and the parse/lex of the
 /// text — all rebuilt once per edit.
 ///
+/// Every derived artifact is held behind an [`Arc`] so a [`DocumentSnapshot`] can
+/// share them rather than deep-copy them: taking a snapshot for one request is a
+/// handful of refcount bumps, not an O(file-size) clone of the text, index, lex,
+/// and parse. The `index` shares the very same `Arc<str>` as `text`, so a buffer's
+/// source lives in exactly one allocation instead of being stored twice.
+///
 /// The cached `lexed` and `parsed` are the performance foundation for the
 /// per-document requests (completion, semantic tokens, formatting): each reads
 /// this snapshot of the buffer instead of re-lexing or re-parsing on every
@@ -22,20 +29,23 @@ use crate::positions::LineIndex;
 /// the parser are error-recovering and always succeed, so the cache is always
 /// present even while the buffer has errors.
 pub struct Document {
-    pub text: String,
+    pub text: Arc<str>,
     pub version: Option<i32>,
-    pub index: LineIndex,
-    pub lexed: LexedSource,
-    pub parsed: ParsedSource,
+    pub index: Arc<LineIndex>,
+    pub lexed: Arc<LexedSource>,
+    pub parsed: Arc<ParsedSource>,
 }
 
+/// A shared, immutable view of one [`Document`] for a single request. Cloning it
+/// only bumps refcounts on the shared text, index, lex, and parse; it never copies
+/// the buffer.
 #[derive(Clone)]
 pub struct DocumentSnapshot {
-    pub text: String,
+    pub text: Arc<str>,
     pub version: Option<i32>,
-    pub index: LineIndex,
-    pub lexed: LexedSource,
-    pub parsed: ParsedSource,
+    pub index: Arc<LineIndex>,
+    pub lexed: Arc<LexedSource>,
+    pub parsed: Arc<ParsedSource>,
 }
 
 pub struct DocumentAnalysisSnapshot {
@@ -46,17 +56,20 @@ pub struct DocumentAnalysisSnapshot {
 pub struct OpenDocumentForAnalysis {
     pub url: Url,
     pub path: PathBuf,
-    pub text: String,
+    pub text: Arc<str>,
     pub version: Option<i32>,
-    pub index: LineIndex,
+    pub index: Arc<LineIndex>,
 }
 
 impl Document {
     /// Build a document from its text, computing the index, lex, and parse once.
+    /// The text is moved into a single `Arc<str>` that the index shares, so the
+    /// buffer's source is never stored twice.
     fn new(text: String, version: Option<i32>) -> Self {
-        let index = LineIndex::new(text.clone());
-        let lexed = lex_source(&text);
-        let parsed = parse_source(&text);
+        let text: Arc<str> = Arc::from(text);
+        let index = Arc::new(LineIndex::new(Arc::clone(&text)));
+        let lexed = Arc::new(lex_source(&text));
+        let parsed = Arc::new(parse_source(&text));
         Self {
             text,
             version,
@@ -131,13 +144,16 @@ impl Documents {
         self.generation
     }
 
+    /// A shared view of one open buffer for a single request. Cloning the buffer's
+    /// `Arc`s is a refcount bump, so this stays O(1) in the file size no matter how
+    /// many buffers are open.
     pub fn snapshot(&self, url: &Url) -> Option<DocumentSnapshot> {
         self.documents.get(url).map(|document| DocumentSnapshot {
-            text: document.text.clone(),
+            text: Arc::clone(&document.text),
             version: document.version,
-            index: document.index.clone(),
-            lexed: document.lexed.clone(),
-            parsed: document.parsed.clone(),
+            index: Arc::clone(&document.index),
+            lexed: Arc::clone(&document.lexed),
+            parsed: Arc::clone(&document.parsed),
         })
     }
 
@@ -149,9 +165,9 @@ impl Documents {
                 url.to_file_path().ok().map(|path| OpenDocumentForAnalysis {
                     url: url.clone(),
                     path,
-                    text: document.text.clone(),
+                    text: Arc::clone(&document.text),
                     version: document.version,
-                    index: document.index.clone(),
+                    index: Arc::clone(&document.index),
                 })
             })
             .collect();
@@ -186,14 +202,14 @@ impl DocumentAnalysisSnapshot {
         self.open_documents
             .iter()
             .find(|document| document.path == path)
-            .map(|document| &document.index)
+            .map(|document| document.index.as_ref())
     }
 
     pub fn text_for_path(&self, path: &Path) -> Option<&str> {
         self.open_documents
             .iter()
             .find(|document| document.path == path)
-            .map(|document| document.text.as_str())
+            .map(|document| document.text.as_ref())
     }
 }
 
@@ -212,7 +228,7 @@ mod tests {
         documents.change(&url(), "new text".to_string());
 
         let document = documents.get(&url()).unwrap();
-        assert_eq!(document.text, "new text");
+        assert_eq!(document.text.as_ref(), "new text");
         assert_eq!(document.version, None);
         assert_eq!(documents.generation(), 2);
         // The index reflects the new text, not the old.
@@ -226,7 +242,7 @@ mod tests {
         documents.change_with_version(&url(), "new text".to_string(), Some(2));
 
         let document = documents.get(&url()).unwrap();
-        assert_eq!(document.text, "new text");
+        assert_eq!(document.text.as_ref(), "new text");
         assert_eq!(document.version, Some(2));
         assert_eq!(documents.generation(), 2);
         // The index reflects the new text, not the old.
@@ -276,6 +292,51 @@ mod tests {
         assert_eq!(
             snapshot.text_for_path(&url().to_file_path().unwrap()),
             Some("module a\n")
+        );
+    }
+
+    /// A snapshot of a large open buffer must be a set of refcount bumps, never a
+    /// deep copy of the text, index, lex, and parse. Pointer identity between the
+    /// document's `Arc`s and the snapshot's proves nothing was reallocated, so
+    /// snapshot cost is O(1) in the file size rather than O(file-size × requests).
+    #[test]
+    fn snapshot_shares_storage_without_deep_cloning() {
+        let mut documents = Documents::new();
+        // A buffer large enough that a deep clone would be an obvious cost.
+        let big = "pub fn f(): int\n    return 1\n".repeat(50_000);
+        documents.open(url(), big);
+
+        let document = documents.get(&url()).unwrap();
+        let text_ptr = Arc::as_ptr(&document.text);
+        let index_ptr = Arc::as_ptr(&document.index);
+        let lexed_ptr = Arc::as_ptr(&document.lexed);
+        let parsed_ptr = Arc::as_ptr(&document.parsed);
+
+        let snapshot = documents.snapshot(&url()).unwrap();
+
+        assert!(
+            std::ptr::eq(Arc::as_ptr(&snapshot.text), text_ptr),
+            "snapshot text must share the buffer allocation, not copy it"
+        );
+        assert!(std::ptr::eq(Arc::as_ptr(&snapshot.index), index_ptr));
+        assert!(std::ptr::eq(Arc::as_ptr(&snapshot.lexed), lexed_ptr));
+        assert!(std::ptr::eq(Arc::as_ptr(&snapshot.parsed), parsed_ptr));
+    }
+
+    /// The buffer's source lives in one allocation: the document text `Arc` and the
+    /// index's internal text must name the same bytes, so text is not stored twice.
+    #[test]
+    fn document_and_its_index_share_one_text_allocation() {
+        let mut documents = Documents::new();
+        documents.open(
+            url(),
+            "module a\n\npub fn f(): int\n    return 1\n".to_string(),
+        );
+
+        let document = documents.get(&url()).unwrap();
+        assert!(
+            std::ptr::eq(document.text.as_ptr(), document.index.text().as_ptr()),
+            "the document text and its line index must share one allocation"
         );
     }
 }

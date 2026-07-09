@@ -594,7 +594,9 @@ impl Backend {
         let urls = open_analysis_document_urls(&analysis_snapshot, &project);
         let versions = open_document_versions(&analysis_snapshot);
         let mut diagnostics_by_url = snapshot_to_diagnostics(&snapshot, &urls, |url| {
-            analysis_snapshot.get(url).map(|document| &document.index)
+            analysis_snapshot
+                .get(url)
+                .map(|document| document.index.as_ref())
         });
         drop(analysis);
         if context

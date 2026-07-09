@@ -7,6 +7,8 @@
 //! within the Basic Multilingual Plane; an astral character such as an emoji
 //! occupies two UTF-16 units, so its columns were off.)
 
+use std::sync::Arc;
+
 /// An LSP position: a zero-based line and a zero-based `character` measured in
 /// UTF-16 code units from the start of that line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,16 +19,24 @@ pub struct Position {
 
 /// A per-document index from byte offsets to line/character positions and back.
 /// Built once per document edit.
+///
+/// The text is held as an [`Arc<str>`] so an index can share the buffer's single
+/// text allocation rather than owning a second copy of it: a [`Document`] hands
+/// its own `Arc<str>` here, so the document and its index name one allocation.
+///
+/// [`Document`]: crate::documents::Document
 #[derive(Clone)]
 pub struct LineIndex {
     /// Byte offset of the first character of each line. Always starts with `0`.
     line_starts: Vec<usize>,
-    text: String,
+    text: Arc<str>,
 }
 
 impl LineIndex {
-    /// Build the index for a document.
-    pub fn new(text: impl Into<String>) -> Self {
+    /// Build the index for a document. Accepts anything convertible to an
+    /// `Arc<str>`, so a caller holding the buffer's `Arc<str>` can pass a clone of
+    /// it (a refcount bump) and the index shares that one allocation.
+    pub fn new(text: impl Into<Arc<str>>) -> Self {
         let text = text.into();
         let mut line_starts = vec![0];
         for (offset, byte) in text.bytes().enumerate() {

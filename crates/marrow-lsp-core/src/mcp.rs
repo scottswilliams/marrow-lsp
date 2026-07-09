@@ -787,7 +787,7 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
         // The classifier reads the cached lex's spans against this text, and the
         // parse came from the same on-disk text, so read and index that text.
         let source = read_to_string(file);
-        let index = crate::positions::LineIndex::new(&source);
+        let index = crate::positions::LineIndex::new(source.as_str());
         let offset = index.offset(Position { line, character });
         let lexed = marrow_syntax::lex_source(&source);
         let fact = source_completion_fact(

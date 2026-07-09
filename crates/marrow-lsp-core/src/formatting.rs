@@ -85,7 +85,7 @@ mod tests {
     fn an_already_canonical_buffer_yields_no_edits() {
         let source = format_source("module a\n\nconst N: int = 1\n");
         let parsed = parse_source(&source);
-        let index = LineIndex::new(&source);
+        let index = LineIndex::new(source.as_str());
         assert!(
             formatting(&source, &parsed, &index).is_none(),
             "a canonical buffer needs no edit"

@@ -567,7 +567,7 @@ fn overlay_snapshot(root: &Path, documents: &DocumentAnalysisSnapshot) -> Projec
     let mut sources = ProjectSources::new();
     for document in documents.open_documents() {
         if document.path.starts_with(root) {
-            sources.insert(document.path.clone(), document.text.clone());
+            sources.insert(document.path.clone(), document.text.to_string());
         }
     }
     sources
@@ -720,8 +720,9 @@ mod tests {
 
         // The error is published for the buffer's URL.
         let urls: Vec<Url> = documents.urls().cloned().collect();
-        let published =
-            snapshot_to_diagnostics(snapshot, &urls, |u| documents.get(u).map(|d| &d.index));
+        let published = snapshot_to_diagnostics(snapshot, &urls, |u| {
+            documents.get(u).map(|d| d.index.as_ref())
+        });
         let diagnostics = &published[&url];
         assert!(
             diagnostics.iter().any(|d| matches!(
