@@ -233,12 +233,15 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
+    // A typed error means the server could not resolve this path or open the store, so
+    // it carries no boundary. Check it before the boundary branch: otherwise a real
+    // error collapses into the stale-data "changed" node and the blocked node is dead.
+    if (result.error !== undefined) {
+      return [blockedNode(result.error)];
+    }
     const boundary = dataViewBoundaryFromWire(result.data_view_boundary);
     if (boundary === undefined || !sameBoundary(expectedBoundary, boundary)) {
       return [changedNode()];
-    }
-    if (result.error !== undefined) {
-      return [{ kind: "blocked", label: "path unavailable" }];
     }
     const nodes: SavedResourceNode[] = result.children.map((child): SavedSegmentNode => ({
       kind: "segment",
@@ -291,12 +294,14 @@ export class SavedResourceProvider implements vscode.TreeDataProvider<SavedResou
     if (!result.available) {
       return [unavailableNode()];
     }
+    // A typed error carries no boundary; surface it before the boundary check so a real
+    // Path or Store failure renders as its own blocked node, not a stale-data refresh.
+    if (result.error !== undefined) {
+      return [blockedNode(result.error)];
+    }
     const boundary = dataViewBoundaryFromWire(result.data_view_boundary);
     if (boundary === undefined || !sameBoundary(expectedBoundary, boundary)) {
       return [changedNode()];
-    }
-    if (result.error !== undefined) {
-      return [{ kind: "blocked", label: "path unavailable" }];
     }
     if (result.value !== undefined) {
       return [{ kind: "value", label: result.value, valueTruncated: result.value_truncated }];
@@ -314,4 +319,18 @@ function unavailableNode(): SavedPlaceholderNode {
 
 function changedNode(): SavedPlaceholderNode {
   return { kind: "changed", label: "data changed; refresh" };
+}
+
+// The server tags a data-view failure as a Path error (the requested path is not
+// reachable) or a Store error (the store could not be opened or read). Render them as
+// distinct blocked nodes so a store outage is not mistaken for a bad path.
+function blockedNode(error: unknown): SavedPlaceholderNode {
+  const kind =
+    typeof error === "object" && error !== null
+      ? (error as { readonly kind?: unknown }).kind
+      : undefined;
+  if (kind === "store") {
+    return { kind: "blocked", label: "store unavailable" };
+  }
+  return { kind: "blocked", label: "path unavailable" };
 }

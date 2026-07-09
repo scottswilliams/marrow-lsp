@@ -727,6 +727,56 @@ try {
 
   const staleValue = await provider.getChildren(keys[2]);
   assert.deepEqual(staleValue, [{ kind: "changed", label: "data changed; refresh" }]);
+
+  // Typed Path and Store errors must render as distinct blocked nodes, not collapse
+  // into the stale-data "changed" node. An error response carries no boundary, so the
+  // pre-fix boundary check would have masked every real error as a refresh prompt.
+  const pathRoot = { kind: "root", store_catalog_id: "cat_00000000000000000000000000000011" };
+  const storeRoot = { kind: "root", store_catalog_id: "cat_00000000000000000000000000000012" };
+  const typedErrorClient = {
+    async sendRequest(method, params) {
+      if (method === "marrow/savedRoots") {
+        return {
+          available: true,
+          roots: [
+            { segment: pathRoot, label: "PathRoot" },
+            { segment: storeRoot, label: "StoreRoot" },
+          ],
+          store_snapshot: baseSnapshot,
+          data_view_boundary: baseBoundary,
+        };
+      }
+      if (method === "marrow/dataChildren") {
+        const error = deepEqual(params.segments, [pathRoot])
+          ? { kind: "path", value: { code: "member_absent", message: "no such path" } }
+          : { kind: "store", value: { code: "format_version", message: "store unreadable" } };
+        return {
+          available: true,
+          children: [],
+          truncated: false,
+          cursor: null,
+          store_snapshot: null,
+          data_view_boundary: undefined,
+          error,
+        };
+      }
+      throw new Error(`unexpected request ${method}`);
+    },
+  };
+  const errorProvider = new SavedResourceProvider();
+  errorProvider.setClient(typedErrorClient);
+  const errorRoots = await errorProvider.getChildren();
+  assert.equal(errorRoots.length, 2);
+  assert.deepEqual(
+    await errorProvider.getChildren(errorRoots[0]),
+    [{ kind: "blocked", label: "path unavailable" }],
+    "a typed Path error must render as a path-unavailable blocked node",
+  );
+  assert.deepEqual(
+    await errorProvider.getChildren(errorRoots[1]),
+    [{ kind: "blocked", label: "store unavailable" }],
+    "a typed Store error must render as a store-unavailable blocked node",
+  );
 } finally {
   Module._load = restoreLoad;
   rmSync(outDir, { recursive: true, force: true });
