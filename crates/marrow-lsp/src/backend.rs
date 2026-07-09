@@ -89,6 +89,10 @@ pub struct Backend {
     /// The analyzed-file count of the last successful recompute, so the debounce can
     /// adapt: a small project checks quickly and need not wait the full window.
     project_file_count: Arc<AtomicU64>,
+    /// Set when the client sends `shutdown`. The stdin exit watcher reads it so a later
+    /// `exit` after a clean shutdown exits 0, while an `exit` with no prior shutdown —
+    /// an unclean teardown — exits 1, as the LSP spec requires.
+    shutdown_seen: Arc<AtomicBool>,
     /// Parks a compute request between capturing its document world and touching the
     /// analysis, so a test can land a superseding edit in that window and assert the
     /// request drops. Never set in production.
@@ -426,6 +430,12 @@ async fn documents_match_analysis_snapshot(
 }
 
 impl Backend {
+    /// A handle to the shutdown-seen flag, shared with the stdin exit watcher so it can
+    /// choose the spec's exit code when the `exit` notification arrives.
+    pub fn shutdown_seen(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown_seen)
+    }
+
     pub fn new(client: Client) -> Self {
         Self {
             client,
@@ -444,6 +454,7 @@ impl Backend {
             dynamic_watch_registration: Arc::new(AtomicBool::new(false)),
             semantic_tokens_cache: Arc::new(Mutex::new(SemanticTokensCache::default())),
             project_file_count: Arc::new(AtomicU64::new(0)),
+            shutdown_seen: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             request_gate: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -1102,6 +1113,9 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> jsonrpc::Result<()> {
+        // Record the clean-teardown handshake so a following `exit` exits 0; without it
+        // the exit watcher treats the `exit` as unclean and exits 1.
+        self.shutdown_seen.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1395,8 +1409,10 @@ impl LanguageServer for Backend {
             };
             let (snapshot, index) = read_facts(&analysis.workspace, source);
             let indices = snapshot_indices(snapshot, &documents);
-            Ok(navigation::definition(snapshot, index, &indices, &path, offset)
-                .map(GotoDefinitionResponse::Scalar))
+            Ok(
+                navigation::definition(snapshot, index, &indices, &path, offset)
+                    .map(GotoDefinitionResponse::Scalar),
+            )
         })
     }
 
@@ -3793,8 +3809,7 @@ mod tests {
         );
         tokio::pin!(watched);
 
-        let blocked =
-            tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched).await;
+        let blocked = tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched).await;
         assert!(
             blocked.is_err(),
             "test setup should leave the busy watcher queued on diagnostics"
@@ -3844,8 +3859,7 @@ mod tests {
         );
         tokio::pin!(watched);
 
-        let blocked =
-            tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched).await;
+        let blocked = tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched).await;
         assert!(
             blocked.is_err(),
             "test setup should leave the watcher queued on the document snapshot"
@@ -3876,8 +3890,7 @@ mod tests {
         let backend = service.inner();
         let analysis_guard = backend.analysis.lock().await;
 
-        let roots =
-            tokio::time::timeout(NONBLOCKING_DEADLINE, backend.saved_roots()).await;
+        let roots = tokio::time::timeout(NONBLOCKING_DEADLINE, backend.saved_roots()).await;
         assert!(
             roots.is_ok(),
             "savedRoots must return unavailable instead of waiting for analysis"
@@ -3917,11 +3930,8 @@ mod tests {
         );
         assert!(!read.unwrap().unwrap().available);
 
-        let watch_targets = tokio::time::timeout(
-            NONBLOCKING_DEADLINE,
-            backend.data_watch_targets(),
-        )
-        .await;
+        let watch_targets =
+            tokio::time::timeout(NONBLOCKING_DEADLINE, backend.data_watch_targets()).await;
         assert!(
             watch_targets.is_ok(),
             "dataWatchTargets must return empty instead of waiting for analysis"

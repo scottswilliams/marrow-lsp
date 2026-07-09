@@ -95,6 +95,39 @@ fn exit_notification_terminates_the_process_with_stdin_open() {
     );
 }
 
+/// initialize → exit (notification) with NO intervening shutdown: an unclean
+/// teardown. Per the LSP spec the server must exit with code 1, distinguishing it
+/// from the clean shutdown-then-exit path that exits 0.
+#[test]
+fn exit_without_shutdown_terminates_with_code_one() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the marrow-lsp binary runs");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }),
+    );
+    let response = recv(&mut stdout);
+    assert_eq!(response["result"]["serverInfo"]["name"], "marrow-lsp");
+
+    // Skip shutdown: send exit directly.
+    send(&mut stdin, &json!({ "jsonrpc": "2.0", "method": "exit" }));
+
+    let code = wait_for_exit(&mut child, Duration::from_secs(2));
+    drop(stdin);
+    assert_eq!(
+        code,
+        Some(1),
+        "an exit notification without a prior shutdown must exit with code 1"
+    );
+}
+
 #[test]
 fn initialized_notification_writes_a_ready_notice() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_marrow-lsp"))

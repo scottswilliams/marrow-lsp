@@ -9,6 +9,8 @@
 mod backend;
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use marrow_terminal::{Style, paint_stderr};
@@ -33,7 +35,6 @@ async fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    let stdin = ExitWatcher::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();
 
     // The standard LSP methods come from the `LanguageServer` impl; saved-data
@@ -45,6 +46,9 @@ async fn main() {
         .custom_method("marrow/dataRead", Backend::data_read)
         .custom_method("marrow/dataWatchTargets", Backend::data_watch_targets)
         .finish();
+    // Share the backend's shutdown-seen flag with the watcher so the `exit` code
+    // reflects whether a clean `shutdown` handshake preceded it.
+    let stdin = ExitWatcher::new(tokio::io::stdin(), service.inner().shutdown_seen());
     Server::new(stdin, stdout, socket).serve(service).await;
 
     // Reached only when stdin closes (EOF) without an `exit` notification — an
@@ -58,7 +62,8 @@ async fn main() {
 /// the pipe open after `exit`, so the process would hang. This wrapper forwards
 /// stdin verbatim to tower-lsp (which keeps its own framing and method routing)
 /// and, watching the same bytes, exits the process the moment a complete `exit`
-/// notification frame has passed through — code 0, the spec's clean teardown.
+/// notification frame has passed through — code 0 when a clean `shutdown` preceded
+/// it, code 1 otherwise, as the spec requires.
 ///
 /// Detection reuses the LSP framing the protocol already mandates: a
 /// `Content-Length` header, a blank line, then exactly that many body bytes. The
@@ -68,13 +73,17 @@ struct ExitWatcher {
     /// Bytes seen but not yet consumed as complete frames, so a frame split across
     /// reads is reassembled before its method is inspected.
     buffer: Vec<u8>,
+    /// The backend's shutdown-seen flag, read when `exit` arrives to choose the exit
+    /// code: 0 after a clean `shutdown`, 1 for an `exit` with no prior shutdown.
+    shutdown_seen: Arc<AtomicBool>,
 }
 
 impl ExitWatcher {
-    fn new(inner: Stdin) -> Self {
+    fn new(inner: Stdin, shutdown_seen: Arc<AtomicBool>) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
+            shutdown_seen,
         }
     }
 
@@ -91,16 +100,32 @@ impl ExitWatcher {
             }
             let body = &self.buffer[header_len..frame_len];
             if is_exit_notification(body) {
-                // The frame has already been forwarded to tower-lsp by the read
-                // that delivered it, so the service has seen `exit`; exit cleanly.
-                eprintln!(
-                    "{} exit notification received, stopping",
-                    stderr_notice("marrow-lsp:")
-                );
-                std::process::exit(0);
+                self.exit_now();
             }
             self.buffer.drain(..frame_len);
         }
+    }
+
+    /// End the process on `exit`. The frame has already been forwarded to tower-lsp by
+    /// the read that delivered it, so the service has seen `exit`. Per the LSP spec the
+    /// code is 0 only when a clean `shutdown` preceded it, else 1. Flush stdout first:
+    /// `process::exit` runs no destructors, so a still-buffered response (the shutdown
+    /// reply) would otherwise be dropped.
+    fn exit_now(&self) -> ! {
+        let clean = self.shutdown_seen.load(Ordering::SeqCst);
+        let code = if clean { 0 } else { 1 };
+        let reason = if clean {
+            "clean shutdown"
+        } else {
+            "no prior shutdown"
+        };
+        eprintln!(
+            "{} exit notification received ({reason}), stopping",
+            stderr_notice("marrow-lsp:")
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(code);
     }
 }
 
@@ -143,13 +168,26 @@ fn parse_header(buffer: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Whether a JSON-RPC message body is the `exit` notification: `method` is `exit`
-/// and there is no `id` (a notification, not a request). Parsing the body avoids
-/// matching `exit` inside, say, a document's text.
+/// and there is no `id` (a notification, not a request). The full JSON parse confirms
+/// it precisely; the cheap pre-guard keeps that parse off the hot path for the frames
+/// that dominate a session — large `didChange` bodies carrying whole documents.
 fn is_exit_notification(body: &[u8]) -> bool {
+    if !is_exit_candidate(body) {
+        return false;
+    }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
     value.get("method").and_then(|m| m.as_str()) == Some("exit") && value.get("id").is_none()
+}
+
+/// The exit notification frame is tiny and its bytes literally contain `exit`; a body
+/// larger than any exit frame, or one without the token, cannot be `exit`, so it never
+/// reaches the full JSON parse. This short-circuit is the whole point: a document edit
+/// is not re-serialized to a `serde_json::Value` just to be rejected.
+fn is_exit_candidate(body: &[u8]) -> bool {
+    const MAX_EXIT_FRAME_LEN: usize = 128;
+    body.len() <= MAX_EXIT_FRAME_LEN && find_subslice(body, b"exit").is_some()
 }
 
 /// The index of the first occurrence of `needle` in `haystack`, or `None`.
@@ -157,4 +195,42 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_exit_candidate, is_exit_notification};
+
+    #[test]
+    fn a_real_exit_frame_is_recognized() {
+        let body = br#"{"jsonrpc":"2.0","method":"exit"}"#;
+        assert!(is_exit_candidate(body));
+        assert!(is_exit_notification(body));
+    }
+
+    /// A whole-document `didChange` body — even one whose text contains the token
+    /// `exit` — is rejected by the cheap size pre-guard, so it never reaches the full
+    /// `serde_json` parse on the transport hot path.
+    #[test]
+    fn a_large_did_change_body_skips_the_json_parse() {
+        let mut body =
+            br#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"text":""#.to_vec();
+        body.extend_from_slice(&vec![b'x'; 4096]);
+        body.extend_from_slice(b"exit");
+        body.extend_from_slice(br#""}}"#);
+        assert!(
+            !is_exit_candidate(&body),
+            "an oversized frame must be rejected before the JSON parse"
+        );
+        assert!(!is_exit_notification(&body));
+    }
+
+    /// A small frame whose method merely contains `exit` passes the pre-guard but the
+    /// full parse rejects it, so the token guard never over-accepts.
+    #[test]
+    fn a_small_non_exit_frame_is_rejected_by_the_parse() {
+        let body = br#"{"jsonrpc":"2.0","method":"exithook"}"#;
+        assert!(is_exit_candidate(body));
+        assert!(!is_exit_notification(body));
+    }
 }
