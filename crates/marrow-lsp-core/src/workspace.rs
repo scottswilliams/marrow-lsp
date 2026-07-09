@@ -548,27 +548,17 @@ pub fn project_root_of(file: &Path) -> Option<PathBuf> {
 /// Walk up from `file` to the nearest directory holding a `marrow.json`, parse it,
 /// and return the project rooted there.
 fn resolve_project(file: &Path) -> Result<Project, WorkspaceError> {
-    let mut directory = file.parent();
-    while let Some(current) = directory {
-        let config_path = current.join(CONFIG_FILE);
-        if config_path.is_file() {
-            let text = std::fs::read_to_string(&config_path).map_err(|error| {
-                WorkspaceError::Config(marrow_project::ConfigError {
-                    code: marrow_project::CONFIG_INVALID,
-                    kind: marrow_project::ConfigErrorKind::InvalidJson,
-                    message: error.to_string(),
-                    position: None,
-                })
-            })?;
-            let config = parse_config(&text).map_err(WorkspaceError::Config)?;
-            return Ok(Project {
-                root: current.to_path_buf(),
-                config,
-            });
-        }
-        directory = current.parent();
-    }
-    Err(WorkspaceError::NoProject)
+    let root = project_root_of(file).ok_or(WorkspaceError::NoProject)?;
+    let text = std::fs::read_to_string(root.join(CONFIG_FILE)).map_err(|error| {
+        WorkspaceError::Config(marrow_project::ConfigError {
+            code: marrow_project::CONFIG_INVALID,
+            kind: marrow_project::ConfigErrorKind::InvalidJson,
+            message: error.to_string(),
+            position: None,
+        })
+    })?;
+    let config = parse_config(&text).map_err(WorkspaceError::Config)?;
+    Ok(Project { root, config })
 }
 
 /// Build a source overlay from every open buffer whose file lives under `root`.

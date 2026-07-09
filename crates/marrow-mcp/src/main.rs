@@ -55,7 +55,7 @@ fn main() {
     // before serving a single request. This is the transport half of the boundary;
     // the core refuses any file that resolves outside the root.
     marrow_lsp_core::mcp::set_allowed_root(allowed_root.clone());
-    let policy = Policy::new(allow_read, allow_write, run_budget()).with_allowed_root(allowed_root);
+    let policy = Policy::new(allow_read, allow_write, run_budget());
     // Startup is observable in the agent's stderr/output channel; note whether the
     // data tools are armed — and separately whether writes are — plus the root the
     // session is confined to, so an operator can confirm the boundary at a glance.
@@ -73,10 +73,7 @@ fn main() {
         } else {
             "disabled"
         },
-        policy
-            .allowed_root()
-            .map(|root| root.display().to_string())
-            .unwrap_or_else(|| ".".to_string()),
+        allowed_root.display(),
     );
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

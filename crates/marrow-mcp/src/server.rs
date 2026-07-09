@@ -5,7 +5,7 @@
 //! shows an agent; [`call`] decodes a `tools/call`'s arguments and returns the
 //! tool's JSON result, which the transport wraps in the MCP content envelope.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use marrow_lsp_core::data_explorer::{
@@ -51,14 +51,14 @@ pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
 /// distinct [`WriteAccess`](mcp::WriteAccess), so a read-only policy yields no write
 /// grant and the writable executor is unreachable — not merely gated at runtime.
 ///
-/// The allowed root is applied to the core once at launch (see [`crate::main`]); it
-/// is recorded here so a session's confinement is inspectable alongside its grants.
+/// The allowed root is not held here: it is applied to the core once at launch (see
+/// [`crate::main`]) and the core is its sole owner, so the confinement authority is
+/// never represented twice.
 #[derive(Clone)]
 pub struct Policy {
     pub allow_read: bool,
     pub allow_write: bool,
     pub run_budget: Duration,
-    pub allowed_root: Option<PathBuf>,
 }
 
 impl Policy {
@@ -67,21 +67,7 @@ impl Policy {
             allow_read,
             allow_write,
             run_budget,
-            allowed_root: None,
         }
-    }
-
-    /// Confine this session's tools to `root`. The transport applies the same root
-    /// to the core at launch; recording it on the policy keeps the session's reach
-    /// beside its access grants.
-    pub fn with_allowed_root(mut self, root: impl Into<PathBuf>) -> Self {
-        self.allowed_root = Some(root.into());
-        self
-    }
-
-    /// The directory this session's tools are confined to, if any.
-    pub fn allowed_root(&self) -> Option<&Path> {
-        self.allowed_root.as_deref()
     }
 
     /// The read grant to hand a data read, present only when read access is on.

@@ -1146,8 +1146,8 @@ fn store_stamp_json(stamp: StoreStamp) -> Json {
 }
 
 /// `mw_saved_roots`: the project's durable saved root views, read through
-/// Marrow's linked surface-read session. Gated: with `allow_data = false` the
-/// function returns a refusal envelope and never opens the store. A project with
+/// Marrow's linked surface-read session. Gated: with no read grant (`access` is
+/// `None`) the function returns a refusal envelope and never opens the store. A project with
 /// no native store, or a store that cannot be read right now, answers
 /// `available: false`.
 pub fn saved_roots(file: &Path, access: Option<ReadAccess>) -> Json {
