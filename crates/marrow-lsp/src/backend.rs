@@ -761,13 +761,15 @@ fn client_supports_dynamic_watch_registration(capabilities: &ClientCapabilities)
 }
 
 /// The project inputs whose changes make analysis stale: the config, any source
-/// module, and the committed lock. Registered server-side so the client watches them
-/// regardless of its own configuration.
+/// module, the committed lock, and the native committed store. Registered server-side
+/// so the client watches them regardless of its own configuration — in particular the
+/// store, so a CLI commit re-binds catalog identity without an intervening edit.
 fn watched_files_registrations() -> Vec<Registration> {
     let globs = [
         "**/marrow.json".to_string(),
         "**/*.mw".to_string(),
         format!("**/{}", marrow_lsp_core::workspace::COMMITTED_LOCK_FILE),
+        format!("**/{}", marrow_lsp_core::workspace::NATIVE_STORE_FILE_NAME),
     ];
     let watchers = globs
         .into_iter()
@@ -1770,6 +1772,18 @@ fn watched_project_changes(
             deleted_url: None,
         });
     }
+    // A commit to the native store advances the catalog identity analysis binds. Treat
+    // it as an analysis-invalidation input so the next recompute re-probes the store and
+    // re-binds, rather than serving the identity pinned before the commit.
+    if let Some(store_path) = project.store_file()
+        && let Some(change) = changes.iter().find(|change| change.path == store_path)
+    {
+        watched.push(WatchedProjectChange::AnalysisFile {
+            root: project.root.clone(),
+            path: change.path.clone(),
+            deleted_url: None,
+        });
+    }
     if let Some(change) = changes.iter().find(|change| {
         project.analyzes_file(&change.path) || snapshot_has_file(workspace.latest(), &change.path)
     }) {
@@ -1829,6 +1843,8 @@ fn busy_watched_pre_invalidation_bits(changes: &[WatchedPathChange]) -> u8 {
             bits |= PENDING_PROJECT_INVALIDATION;
         } else if (change.path.file_name().and_then(|name| name.to_str())
             == Some(marrow_lsp_core::workspace::COMMITTED_LOCK_FILE)
+            || change.path.file_name().and_then(|name| name.to_str())
+                == Some(marrow_lsp_core::workspace::NATIVE_STORE_FILE_NAME)
             || change.path.extension().and_then(|ext| ext.to_str()) == Some("mw"))
             && nearest_project_root(&change.path).is_some()
         {
@@ -1887,6 +1903,8 @@ fn nearest_project_root(path: &Path) -> Option<PathBuf> {
 fn tracked_root_analysis_change(root: &Path, change: &WatchedPathChange) -> bool {
     change.path == root.join(marrow_lsp_core::workspace::COMMITTED_LOCK_FILE)
         || change.path.extension().and_then(|ext| ext.to_str()) == Some("mw")
+        || change.path.file_name().and_then(|name| name.to_str())
+            == Some(marrow_lsp_core::workspace::NATIVE_STORE_FILE_NAME)
 }
 
 fn snapshot_has_file(snapshot: Option<&AnalysisSnapshot>, path: &std::path::Path) -> bool {
@@ -2012,6 +2030,129 @@ mod tests {
             matches!(stale, SemanticTokensFullDeltaResult::Tokens(_)),
             "an unknown previous_result_id must fall back to a full token response"
         );
+    }
+
+    #[test]
+    fn watched_file_registration_includes_the_native_store() {
+        let store_glob = format!("**/{}", marrow_lsp_core::workspace::NATIVE_STORE_FILE_NAME);
+        let registered: Vec<String> = watched_files_registrations()
+            .into_iter()
+            .filter_map(|registration| registration.register_options)
+            .filter_map(|options| {
+                serde_json::from_value::<DidChangeWatchedFilesRegistrationOptions>(options).ok()
+            })
+            .flat_map(|options| options.watchers)
+            .filter_map(|watcher| match watcher.glob_pattern {
+                GlobPattern::String(glob) => Some(glob),
+                GlobPattern::Relative(_) => None,
+            })
+            .collect();
+        assert!(
+            registered.contains(&store_glob),
+            "the server must register the native store file so a CLI commit invalidates analysis"
+        );
+    }
+
+    /// A committed-store change (a CLI `marrow run`/`apply` writing `marrow.redb`) must
+    /// be an analysis-invalidation input: it advances the workspace invalidation epoch
+    /// and drops the cached analysis so the next recompute re-binds catalog identity,
+    /// even with no intervening source edit. A follow-up recompute repairs the analysis.
+    #[tokio::test]
+    async fn a_store_file_change_invalidates_analysis_and_bumps_the_epoch() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "native", "dataDir": "data" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        std::fs::write(&file, "module app\n\npub fn answer(): int\n    return 1\n").unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(
+                url.clone(),
+                "module app\n\npub fn answer(): int\n    return 1\n".to_string(),
+                Some(1),
+            );
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+
+        // An initial recompute resolves the native project and leaves a good analysis.
+        let (store_path, epoch_before) = {
+            let documents = snapshot_documents(&backend.documents).await;
+            let mut analysis = backend.analysis.lock().await;
+            analysis
+                .workspace
+                .recompute_from_snapshot(&file, &documents)
+                .unwrap();
+            let store_path = analysis
+                .workspace
+                .project()
+                .and_then(|project| project.store_file())
+                .expect("a native project resolves its store file");
+            assert!(
+                analysis.workspace.latest().is_some(),
+                "initial analysis lands"
+            );
+            (store_path, analysis.workspace.invalidation_epoch())
+        };
+        assert_eq!(
+            store_path,
+            root.join("data").join("marrow.redb"),
+            "the resolved store path is dataDir/marrow.redb"
+        );
+
+        // A CLI commit changes the store file. No source edit accompanies it.
+        let store_url = Url::from_file_path(&store_path).unwrap();
+        <Backend as LanguageServer>::did_change_watched_files(
+            backend,
+            DidChangeWatchedFilesParams {
+                changes: vec![FileEvent {
+                    uri: store_url,
+                    typ: FileChangeType::CHANGED,
+                }],
+            },
+        )
+        .await;
+
+        {
+            let analysis = backend.analysis.lock().await;
+            assert!(
+                analysis.workspace.invalidation_epoch() > epoch_before,
+                "a store-file change must bump the invalidation epoch"
+            );
+            assert!(
+                analysis.workspace.latest().is_none(),
+                "the store change invalidates the cached analysis so identity re-binds"
+            );
+            assert!(
+                analysis.workspace.last_good_facts().is_some(),
+                "the prior good analysis is retained for reads across the re-bind"
+            );
+        }
+
+        // A follow-up recompute re-binds and repairs the analysis.
+        {
+            let documents = snapshot_documents(&backend.documents).await;
+            let mut analysis = backend.analysis.lock().await;
+            analysis
+                .workspace
+                .recompute_from_snapshot(&file, &documents)
+                .unwrap();
+            assert!(
+                analysis.workspace.latest().is_some(),
+                "the recompute the store change scheduled restores a fresh analysis"
+            );
+        }
     }
 
     /// A hover parked mid-flight while a newer edit arrives must drop with the LSP

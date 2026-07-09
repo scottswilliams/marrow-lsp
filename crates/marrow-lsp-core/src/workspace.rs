@@ -11,6 +11,7 @@ use lsp_types::Url;
 use marrow_catalog::{CatalogLock, CatalogMetadata};
 use marrow_check::{
     AnalysisGeneration, ProjectIoError, ProjectSources, analyze_project, build_binding_index,
+    native_store_path,
 };
 use marrow_project::{ProjectConfig, parse_config, test_module_file};
 
@@ -23,6 +24,13 @@ use crate::documents::{DocumentAnalysisSnapshot, Documents};
 const CONFIG_FILE: &str = "marrow.json";
 pub const COMMITTED_LOCK_FILE: &str = marrow_project::CATALOG_FILE_NAME;
 
+/// The file name of a native project's committed store, under its configured
+/// `dataDir`. A commit to this file changes the catalog identity the editor binds,
+/// so the watcher treats a change to it as an analysis-invalidation input. The
+/// resolved store path comes from [`Project::store_file`]; this bare name lets the
+/// watcher recognize a store event before a project has been resolved.
+pub const NATIVE_STORE_FILE_NAME: &str = "marrow.redb";
+
 /// A resolved project: its root directory and parsed configuration.
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -34,6 +42,14 @@ impl Project {
     /// Whether `path` can contribute a file to Marrow project analysis.
     pub fn analyzes_file(&self, path: &Path) -> bool {
         self.source_module_file(path) || test_module_file(&self.root, &self.config, path).is_some()
+    }
+
+    /// The native committed store file whose commits change the catalog identity this
+    /// project binds, or `None` for a memory-backed or misconfigured store. The watcher
+    /// treats a change to this path as an analysis-invalidation input so the next
+    /// recompute re-binds the store's accepted catalog.
+    pub fn store_file(&self) -> Option<PathBuf> {
+        native_store_path(&self.root, &self.config).ok().flatten()
     }
 
     fn source_module_file(&self, path: &Path) -> bool {
@@ -223,6 +239,13 @@ impl Workspace {
     /// features read the store path and config from it without re-resolving.
     pub fn project(&self) -> Option<&Project> {
         self.project.as_ref()
+    }
+
+    /// The current invalidation epoch, advanced by every analysis or project
+    /// invalidation. Exposed so a watcher-driven invalidation (including a store-file
+    /// change) can be observed to have superseded the prior analysis world.
+    pub fn invalidation_epoch(&self) -> u64 {
+        self.invalidation_epoch
     }
 
     /// The latest non-empty program, falling back to the previous non-empty one.
