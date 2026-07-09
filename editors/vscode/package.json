@@ -26,6 +26,16 @@
     "onDebugDynamicConfigurations:marrow"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Marrow launches a server and debug-adapter binary when you open a project. In a workspace you have not trusted, the machine-scoped executable-path overrides are ignored so a folder cannot redirect Marrow to run an arbitrary binary; the bundled binaries still provide language features.",
+      "restrictedConfigurations": [
+        "marrow.server.path",
+        "marrow.dap.path"
+      ]
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -422,12 +432,14 @@
         "marrow.server.path": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to an existing `marrow-lsp` server binary. When empty, the extension uses the bundled `./server/marrow-lsp` if present. Extension development hosts may also fall back to `../../target/debug/marrow-lsp`."
+          "scope": "machine-overridable",
+          "markdownDescription": "Absolute path to an existing `marrow-lsp` server binary. When empty, the extension uses the bundled `./server/marrow-lsp` if present. Extension development hosts may also fall back to `../../target/debug/marrow-lsp`. Machine-scoped: a workspace or folder settings file cannot redirect the launched binary, so opening an untrusted folder cannot silently run an arbitrary executable."
         },
         "marrow.dap.path": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to an existing `marrow-dap` debug adapter binary. When empty, the extension uses the bundled `./server/marrow-dap` if present. Extension development hosts may also fall back to `../../target/debug/marrow-dap`."
+          "scope": "machine-overridable",
+          "markdownDescription": "Absolute path to an existing `marrow-dap` debug adapter binary. When empty, the extension uses the bundled `./server/marrow-dap` if present. Extension development hosts may also fall back to `../../target/debug/marrow-dap`. Machine-scoped: a workspace or folder settings file cannot redirect the launched binary, so opening an untrusted folder cannot silently run an arbitrary executable."
         },
         "marrow.liveData": {
           "type": "boolean",
@@ -441,7 +453,8 @@
     "compile": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "compile:release": "esbuild ./src/extension.ts --bundle --minify --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "vscode:prepublish": "npm run compile:release",
-    "check": "node ./scripts/checkGrammar.mjs && tsc --noEmit && npm run check:savedResourceInspector && npm run check:copy && npm run check:bundleSmoke",
+    "check": "node ./scripts/checkGrammar.mjs && node ./scripts/checkManifestScopes.mjs && tsc --noEmit && npm run check:savedResourceInspector && npm run check:copy && npm run check:bundleSmoke",
+    "check:manifestScopes": "node ./scripts/checkManifestScopes.mjs",
     "check:savedResourceInspector": "node ./scripts/checkSavedResourceInspector.mjs",
     "check:copy": "node ./scripts/checkCopy.mjs",
     "check:bundleSmoke": "node ./scripts/checkBundleSmoke.mjs",
