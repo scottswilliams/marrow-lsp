@@ -530,6 +530,21 @@ impl Workspace {
     }
 }
 
+/// Walk up from `file` to the nearest directory holding a `marrow.json`, returning
+/// that directory. This does no more IO than probing for the config file, so a
+/// caller that only needs the project's location — such as a confinement check —
+/// pays nothing for parsing the config.
+pub fn project_root_of(file: &Path) -> Option<PathBuf> {
+    let mut directory = file.parent();
+    while let Some(current) = directory {
+        if current.join(CONFIG_FILE).is_file() {
+            return Some(current.to_path_buf());
+        }
+        directory = current.parent();
+    }
+    None
+}
+
 /// Walk up from `file` to the nearest directory holding a `marrow.json`, parse it,
 /// and return the project rooted there.
 fn resolve_project(file: &Path) -> Result<Project, WorkspaceError> {

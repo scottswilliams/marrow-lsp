@@ -23,6 +23,7 @@
 mod server;
 
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use marrow_lsp_core::mcp::DEFAULT_RUN_BUDGET;
@@ -49,12 +50,17 @@ fn main() {
     // the store it mutates, and a write-only grant would be a confusing half-state.
     let allow_write = write_access_enabled();
     let allow_read = read_access_enabled() || allow_write;
-    let policy = Policy::new(allow_read, allow_write, run_budget());
+    let allowed_root = configured_root();
+    // Confine every project-loading tool to the allowed root for the whole session,
+    // before serving a single request. This is the transport half of the boundary;
+    // the core refuses any file that resolves outside the root.
+    marrow_lsp_core::mcp::set_allowed_root(allowed_root.clone());
+    let policy = Policy::new(allow_read, allow_write, run_budget()).with_allowed_root(allowed_root);
     // Startup is observable in the agent's stderr/output channel; note whether the
-    // data tools are armed — and separately whether writes are — so an operator can
-    // confirm the gate's state at a glance.
+    // data tools are armed — and separately whether writes are — plus the root the
+    // session is confined to, so an operator can confirm the boundary at a glance.
     eprintln!(
-        "{} starting (version {}, data reads {}, data writes {})",
+        "{} starting (version {}, data reads {}, data writes {}, root {})",
         stderr_notice("marrow-mcp:"),
         env!("CARGO_PKG_VERSION"),
         if policy.allow_read {
@@ -66,7 +72,11 @@ fn main() {
             "enabled"
         } else {
             "disabled"
-        }
+        },
+        policy
+            .allowed_root()
+            .map(|root| root.display().to_string())
+            .unwrap_or_else(|| ".".to_string()),
     );
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -86,6 +96,38 @@ fn run_budget() -> Duration {
         Some(seconds) if seconds > 0 => Duration::from_secs(seconds),
         _ => DEFAULT_RUN_BUDGET,
     }
+}
+
+/// The directory MCP tools are confined to for the session: `--root <dir>` (or
+/// `--root=<dir>`) or `MARROW_MCP_ROOT` when set, otherwise the launch working
+/// directory. A relative value resolves against the launch directory. Fixed for the
+/// session, so an agent cannot widen its own reach after startup.
+fn configured_root() -> PathBuf {
+    let explicit = arg_value("--root").or_else(|| {
+        std::env::var("MARROW_MCP_ROOT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
+    match explicit {
+        Some(value) => PathBuf::from(value),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    }
+}
+
+/// The value an operator passed for `flag`, accepting both `--flag value` and
+/// `--flag=value`.
+fn arg_value(flag: &str) -> Option<String> {
+    let prefix = format!("{flag}=");
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == flag {
+            return args.next();
+        }
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 /// Whether the data tools may read real stored data: enabled by `--allow-data` on
@@ -136,7 +178,7 @@ fn serve(input: impl BufRead, out: &mut impl Write, policy: Policy) {
                 continue;
             }
         };
-        if let Some(reply) = handle(&message, policy) {
+        if let Some(reply) = handle(&message, &policy) {
             write_message(out, &reply);
         }
     }
@@ -145,7 +187,7 @@ fn serve(input: impl BufRead, out: &mut impl Write, policy: Policy) {
 /// Handle one parsed JSON-RPC message, returning the reply to send, or `None` for
 /// a notification (which gets no reply). An `id` present marks a request; absent
 /// marks a notification.
-fn handle(message: &Json, policy: Policy) -> Option<Json> {
+fn handle(message: &Json, policy: &Policy) -> Option<Json> {
     let method = message.get("method").and_then(Json::as_str).unwrap_or("");
     let id = message.get("id").cloned();
 
@@ -208,7 +250,7 @@ fn with_params(
 /// result (even one describing a Marrow error) is a successful call; only a
 /// malformed request (no tool name, unknown tool, bad arguments) is a protocol
 /// error.
-fn handle_tools_call(id: Json, params: &Json, policy: Policy) -> Json {
+fn handle_tools_call(id: Json, params: &Json, policy: &Policy) -> Json {
     let Some(name) = params.get("name").and_then(Json::as_str) else {
         return error(id, INVALID_PARAMS, "tools/call needs a tool `name`");
     };
@@ -266,6 +308,8 @@ fn summarize(name: &str, result: &Json) -> String {
     // A surfaced refusal or fault speaks for itself, regardless of which tool ran.
     let base = if result.get("dataAccess").and_then(Json::as_str) == Some("disabled") {
         "data access disabled".to_string()
+    } else if let Some(refusal) = result.get("refusal").and_then(Json::as_str) {
+        format!("refused: {}", clip(refusal))
     } else if let Some(error) = error_summary(result) {
         error
     } else {
@@ -572,14 +616,14 @@ mod tests {
 
     /// Drive the server loop over an in-memory stdin and collect its line-framed
     /// replies as parsed JSON.
-    fn drive(requests: &[Json], policy: Policy) -> Vec<Json> {
+    fn drive(requests: &[Json], policy: &Policy) -> Vec<Json> {
         let mut input = String::new();
         for request in requests {
             input.push_str(&serde_json::to_string(request).unwrap());
             input.push('\n');
         }
         let mut output: Vec<u8> = Vec::new();
-        serve(input.as_bytes(), &mut output, policy);
+        serve(input.as_bytes(), &mut output, policy.clone());
         String::from_utf8(output)
             .unwrap()
             .lines()
@@ -635,7 +679,7 @@ mod tests {
                     }
                 }),
             ],
-            policy,
+            &policy,
         );
         assert_eq!(replies.len(), 2, "both calls must be answered: {replies:?}");
         let run = &replies[0]["result"]["structuredContent"];
@@ -659,7 +703,7 @@ mod tests {
                 // A mismatched (unsupported) version falls back to the server's latest.
                 json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": { "protocolVersion": "2020-01-01" } }),
             ],
-            policy,
+            &policy,
         );
         assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(
@@ -696,7 +740,7 @@ mod tests {
                     }
                 }),
             ],
-            policy,
+            &policy,
         );
         let fault = &replies[0]["result"];
         assert_eq!(
@@ -730,7 +774,7 @@ mod tests {
                 json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
                 json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
             ],
-            policy,
+            &policy,
         );
         // The notification drew no reply, so two responses for two requests.
         assert_eq!(replies.len(), 2, "got {replies:?}");
@@ -769,7 +813,7 @@ mod tests {
                     }
                 }
             })],
-            policy,
+            &policy,
         );
         let result = &replies[0]["result"];
         assert_eq!(result["isError"], false, "{result}");
@@ -798,7 +842,7 @@ mod tests {
                     "arguments": { "source": "module a\n\npub fn broken(:\n" }
                 }
             })],
-            policy,
+            &policy,
         );
         let result = &replies[0]["result"];
         assert_eq!(result["isError"], false);
@@ -1133,7 +1177,7 @@ mod tests {
         ];
 
         for request in cases {
-            let replies = drive(&[request], policy);
+            let replies = drive(&[request], &policy);
             assert_eq!(replies.len(), 1, "got {replies:?}");
             assert!(
                 replies[0].get("result").is_none(),
@@ -1159,7 +1203,7 @@ mod tests {
                 json!({ "jsonrpc": "2.0", "id": 6, "method": "frobnicate", "params": [] }),
                 json!({ "jsonrpc": "2.0", "method": "notifications/initialized", "params": [] }),
             ],
-            policy,
+            &policy,
         );
 
         assert_eq!(
@@ -1200,7 +1244,7 @@ mod tests {
         ];
 
         for (request, field) in cases {
-            let replies = drive(&[request], policy);
+            let replies = drive(&[request], &policy);
             let error = &replies[0]["error"];
             assert_eq!(error["code"], INVALID_PARAMS);
             assert!(
@@ -1216,7 +1260,7 @@ mod tests {
 
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": null })],
-            policy,
+            &policy,
         );
         let message = replies[0]["error"]["message"].as_str().unwrap();
         assert_eq!(replies[0]["error"]["code"], INVALID_PARAMS);
@@ -1234,7 +1278,7 @@ mod tests {
                     "method": "tools/call",
                     "params": params,
                 })],
-                policy,
+                &policy,
             );
             let message = replies[0]["error"]["message"].as_str().unwrap();
             assert_eq!(replies[0]["error"]["code"], INVALID_PARAMS);
@@ -1255,7 +1299,7 @@ mod tests {
                     "arguments": { "source": "module a" },
                 },
             })],
-            policy,
+            &policy,
         );
         assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
     }
@@ -1265,7 +1309,7 @@ mod tests {
         let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "id": 7, "method": "frobnicate" })],
-            policy,
+            &policy,
         );
         assert_eq!(replies[0]["error"]["code"], METHOD_NOT_FOUND);
     }
@@ -1275,7 +1319,7 @@ mod tests {
         let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })],
-            policy,
+            &policy,
         );
         assert!(
             replies.is_empty(),

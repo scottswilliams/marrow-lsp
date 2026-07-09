@@ -5,7 +5,7 @@
 //! shows an agent; [`call`] decodes a `tools/call`'s arguments and returns the
 //! tool's JSON result, which the transport wraps in the MCP content envelope.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use marrow_lsp_core::data_explorer::{
@@ -41,19 +41,24 @@ pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
 }
 
 /// The server's runtime policy: whether the data tools may read real stored data,
-/// whether they may write it (a separate opt-in from read), and how long a single
-/// `mw_run` may execute. Set once at launch from the environment / flags and never
-/// mutated, so a tool can never escalate its own access or budget mid-session.
+/// whether they may write it (a separate opt-in from read), how long a single
+/// `mw_run` may execute, and the directory tree tools are confined to. Set once at
+/// launch from the environment / flags and never mutated, so a tool can never
+/// escalate its own access, budget, or reach mid-session.
 ///
 /// Read and write are separate grants rather than one "data access" bit: the read
 /// tools receive a [`ReadAccess`](mcp::ReadAccess) and `mw_surface_write` receives a
 /// distinct [`WriteAccess`](mcp::WriteAccess), so a read-only policy yields no write
 /// grant and the writable executor is unreachable — not merely gated at runtime.
-#[derive(Clone, Copy)]
+///
+/// The allowed root is applied to the core once at launch (see [`crate::main`]); it
+/// is recorded here so a session's confinement is inspectable alongside its grants.
+#[derive(Clone)]
 pub struct Policy {
     pub allow_read: bool,
     pub allow_write: bool,
     pub run_budget: Duration,
+    pub allowed_root: Option<PathBuf>,
 }
 
 impl Policy {
@@ -62,7 +67,21 @@ impl Policy {
             allow_read,
             allow_write,
             run_budget,
+            allowed_root: None,
         }
+    }
+
+    /// Confine this session's tools to `root`. The transport applies the same root
+    /// to the core at launch; recording it on the policy keeps the session's reach
+    /// beside its access grants.
+    pub fn with_allowed_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.allowed_root = Some(root.into());
+        self
+    }
+
+    /// The directory this session's tools are confined to, if any.
+    pub fn allowed_root(&self) -> Option<&Path> {
+        self.allowed_root.as_deref()
     }
 
     /// The read grant to hand a data read, present only when read access is on.
@@ -178,7 +197,21 @@ fn completion_contract() -> Json {
 }
 
 fn marrow_meta(contract: Json) -> Json {
-    json!({ "marrow/contract": contract })
+    json!({ "marrow/contract": contract, "marrow/boundary": boundary_statement() })
+}
+
+/// What a data-enabled server can and cannot reach, stated plainly so an operator
+/// reading a tool's metadata knows the trust boundary before granting access. It is
+/// a description of the server's guarantees, not a per-tool contract, so every tool
+/// carries the same statement.
+fn boundary_statement() -> Json {
+    json!({
+        "reach": "data, source, and run tools operate only on projects whose resolved root is under the operator's allowed root; a file outside it is refused before any store is opened",
+        "runSandbox": "mw_run executes project source but only against a fresh in-memory store — the project's real store is never opened",
+        "writeGrant": "the write grant is as strong as the project's most destructive surface action; it is not scoped to individual records",
+        "auditTrail": "the write-audit trail is an operational record of what an agent changed, not a tamper-evident log",
+        "grants": "read access, write access, and the allowed root come only from launch flags or environment variables, never from a tool call",
+    })
 }
 
 /// The tool catalog: one entry per agent tool, each with the JSON Schema for its
@@ -423,7 +456,7 @@ pub fn tools() -> Json {
 /// `Err` carries a message for an invalid-arguments protocol error (a missing
 /// required argument or an unknown tool); `Ok` carries the tool's own result,
 /// which the transport renders into the MCP content envelope.
-pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String> {
+pub fn call(name: &str, arguments: &Json, policy: &Policy) -> Result<Json, String> {
     match name {
         "mw_check" => {
             let file = optional_path(arguments, "file")?;
@@ -982,7 +1015,7 @@ mod tests {
     #[test]
     fn an_unknown_tool_is_an_error() {
         let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
-        assert!(call("mw_nope", &json!({}), policy).is_err());
+        assert!(call("mw_nope", &json!({}), &policy).is_err());
     }
 
     #[test]
@@ -991,7 +1024,7 @@ mod tests {
         let result = call(
             "mw_data_integrity",
             &json!({ "file": "/nope/x.mw" }),
-            policy,
+            &policy,
         );
         assert!(
             result.is_err(),
@@ -1004,7 +1037,7 @@ mod tests {
         let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         // A nonexistent file is fine: the gate is checked before any project load,
         // so the refusal envelope comes back without touching the filesystem.
-        let result = call("mw_saved_roots", &json!({ "file": "/nope/x.mw" }), policy).unwrap();
+        let result = call("mw_saved_roots", &json!({ "file": "/nope/x.mw" }), &policy).unwrap();
         assert_eq!(result["dataAccess"], "disabled");
         let result = call(
             "mw_data_children",
@@ -1013,7 +1046,7 @@ mod tests {
                 "segments": [{ "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }],
                 "limit": 1,
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
@@ -1023,7 +1056,7 @@ mod tests {
                 "file": "/nope/x.mw",
                 "segments": [{ "kind": "root", "store_catalog_id": "cat_00000000000000000000000000000001" }],
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
@@ -1037,7 +1070,7 @@ mod tests {
                     "request": { "kind": "singleton_read" }
                 }
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
@@ -1062,7 +1095,7 @@ mod tests {
                     }
                 }
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_eq!(result["dataAccess"], "disabled");
@@ -1098,7 +1131,7 @@ mod tests {
                     }
                 }
             }),
-            read_only,
+            &read_only,
         )
         .unwrap();
         assert_eq!(write["dataAccess"], "disabled", "{write}");
@@ -1114,7 +1147,7 @@ mod tests {
         let read = call(
             "mw_saved_roots",
             &json!({ "file": "/nope/x.mw" }),
-            read_only,
+            &read_only,
         )
         .unwrap();
         assert_ne!(read["dataAccess"], "disabled", "{read}");
@@ -1123,13 +1156,20 @@ mod tests {
     #[test]
     fn a_missing_required_argument_is_an_error() {
         let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
-        assert!(call("mw_type_at", &json!({ "file": "/x.mw", "line": 0 }), policy).is_err());
+        assert!(
+            call(
+                "mw_type_at",
+                &json!({ "file": "/x.mw", "line": 0 }),
+                &policy
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn mw_resource_schema_requires_a_named_resource() {
         let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
-        let error = call("mw_resource_schema", &json!({ "file": "/x.mw" }), policy)
+        let error = call("mw_resource_schema", &json!({ "file": "/x.mw" }), &policy)
             .expect_err("mw_resource_schema must require a resource name");
         assert!(
             error.contains("name"),
@@ -1148,7 +1188,7 @@ mod tests {
             json!({ "file": "/nope/project/src/main.mw", "qualifier": ["books", 7] }),
             json!({ "file": "/nope/project/src/main.mw", "qualifier": ["books", ""] }),
         ] {
-            let error = call("mw_namespace_complete", &arguments, policy)
+            let error = call("mw_namespace_complete", &arguments, &policy)
                 .expect_err("mw_namespace_complete must validate qualifier arguments");
             assert!(
                 error.contains("mw_namespace_complete") && error.contains("qualifier"),
@@ -1186,7 +1226,7 @@ mod tests {
                 "limit": 1,
             }),
         ] {
-            let error = call("mw_data_children", &arguments, policy)
+            let error = call("mw_data_children", &arguments, &policy)
                 .expect_err("mw_data_children must validate typed request arguments");
             assert!(
                 error.contains("mw_data_children"),
@@ -1217,7 +1257,7 @@ mod tests {
                 "segments": [{ "kind": "root", "value": "counter" }],
             }),
         ] {
-            let error = call("mw_data_read", &arguments, policy)
+            let error = call("mw_data_read", &arguments, &policy)
                 .expect_err("mw_data_read must validate typed request arguments");
             assert!(
                 error.contains("mw_data_read"),
@@ -1236,7 +1276,7 @@ mod tests {
                 "entry": "app::main",
                 "args": 1,
             }),
-            policy,
+            &policy,
         )
         .expect_err("non-array run args must be a protocol argument error");
         assert!(
@@ -1264,7 +1304,7 @@ mod tests {
         ];
 
         for (tool, arguments, key) in cases {
-            let error = call(tool, &arguments, policy)
+            let error = call(tool, &arguments, &policy)
                 .expect_err(&format!("{tool} should reject non-string `{key}`"));
             assert!(
                 error.contains(key),
@@ -1285,7 +1325,7 @@ mod tests {
                 "entry": null,
                 "args": [{ "name": "n", "value": { "kind": "int", "value": "1" } }],
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_ne!(result["diagnostics"][0]["code"], "mcp.run.args");
@@ -1298,7 +1338,7 @@ mod tests {
             "null optional strings should be absent and valid typed args should reach project loading: {result}"
         );
 
-        let error = call("mw_check", &json!({ "source": null }), policy)
+        let error = call("mw_check", &json!({ "source": null }), &policy)
             .expect_err("null source should be absent, not a source snippet");
         assert!(
             error.contains("file") && error.contains("source"),
@@ -1318,7 +1358,7 @@ mod tests {
                     { "name": "value", "value": { "kind": "int", "value": 1 } }
                 ],
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_eq!(
@@ -1337,7 +1377,7 @@ mod tests {
                 "entry": "app::main",
                 "args": [1],
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_eq!(
@@ -1358,7 +1398,7 @@ mod tests {
                     { "name": "value", "value": { "kind": "int", "value": "1" } }
                 ],
             }),
-            policy,
+            &policy,
         )
         .unwrap();
         assert_eq!(

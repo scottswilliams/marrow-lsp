@@ -435,17 +435,154 @@ fn catalog_fingerprint(project: &Project) -> Option<u64> {
     Some(std::hash::Hasher::finish(&hasher))
 }
 
+thread_local! {
+    /// The directory tree this thread's project-loading tools are confined to.
+    /// `None` — the default the LSP brain and confinement-agnostic tests leave in
+    /// place — confines nothing; the MCP transport sets it once at launch from its
+    /// immutable policy, and a sandboxed `mw_run` re-applies it on its watchdog
+    /// thread. When set, a tool refuses any file whose canonical location, or whose
+    /// resolved project root, escapes the tree, before it opens a store or analyzes.
+    static ALLOWED_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Confine every project-loading tool on this thread to `root` for the rest of the
+/// session. The MCP transport calls this once at launch; because the confinement
+/// lives in a thread-local, `mw_run`'s watchdog thread re-applies it so a run
+/// cannot escape a boundary the transport honors.
+pub fn set_allowed_root(root: PathBuf) {
+    ALLOWED_ROOT.with(|cell| *cell.borrow_mut() = Some(root));
+}
+
+/// The directory the current thread's tools are confined to, if any.
+fn current_allowed_root() -> Option<PathBuf> {
+    ALLOWED_ROOT.with(|cell| cell.borrow().clone())
+}
+
+/// Why a project could not be loaded for a tool.
+#[derive(Debug)]
+enum ProjectAccessError {
+    /// The file, or the project it resolves to, lies outside the allowed root.
+    OutOfRoot,
+    /// The project could not be resolved or checked; carries the render message.
+    Load(String),
+}
+
+impl ProjectAccessError {
+    /// Render this failure into a tool result. An out-of-root refusal is a uniform
+    /// typed DTO across every tool; any other failure is rendered by `load` into the
+    /// tool's own error envelope.
+    fn render(self, load: impl FnOnce(String) -> Json) -> Json {
+        match self {
+            ProjectAccessError::OutOfRoot => out_of_root_refusal(),
+            ProjectAccessError::Load(message) => load(message),
+        }
+    }
+}
+
+/// The refusal a project-loading tool returns when confinement rejects its file.
+/// Identical whether the outside path exists, so it reveals nothing about the
+/// filesystem beyond the boundary; not marked a tool fault, since a confined server
+/// refusing an out-of-root path is behaving exactly as configured.
+fn out_of_root_refusal() -> Json {
+    json!({
+        "available": false,
+        "refusal": "path.out_of_root",
+        "message": "the requested file resolves outside the marrow-mcp allowed root",
+    })
+}
+
+/// Reject `file` when the session is confined and the file — or the project it
+/// resolves to — escapes the allowed root. The input path is checked first, so an
+/// outside path is refused before any project walk touches it; then the resolved
+/// project root is checked, so a file inside the root whose `marrow.json` sits
+/// outside it is refused too. Both comparisons are component-wise over canonical
+/// paths, never a string prefix.
+fn confinement_check(file: &Path) -> Result<(), ProjectAccessError> {
+    let Some(root) = current_allowed_root() else {
+        return Ok(());
+    };
+    let Some(root) = canonical_existing_prefix(&root) else {
+        // A confined session whose root cannot be resolved fails closed: admitting
+        // everything would silently drop the boundary.
+        return Err(ProjectAccessError::OutOfRoot);
+    };
+    if !path_within(&root, file) {
+        return Err(ProjectAccessError::OutOfRoot);
+    }
+    if let Some(project_root) = crate::workspace::project_root_of(file)
+        && !path_within(&root, &project_root)
+    {
+        return Err(ProjectAccessError::OutOfRoot);
+    }
+    Ok(())
+}
+
+/// Whether `target` lies within `root` once both are reduced to real, absolute
+/// locations. `target` may not exist yet, so its existing prefix is canonicalized
+/// (resolving symlinks and `..`) and the trailing not-yet-created components are
+/// folded lexically — a non-existent path cannot smuggle a parent escape past the
+/// check, and a symlink cannot point the existing prefix outside undetected.
+fn path_within(root: &Path, target: &Path) -> bool {
+    match canonical_existing_prefix(target) {
+        Some(resolved) => is_within(root, &resolved),
+        None => false,
+    }
+}
+
+/// Canonicalize the longest existing prefix of `path`, then re-attach the trailing
+/// components that do not exist yet, folding `.`/`..` lexically. Returns `None` only
+/// when no prefix resolves, which the caller treats as outside the boundary.
+fn canonical_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        if let Ok(mut resolved) = probe.canonicalize() {
+            for name in trailing.iter().rev() {
+                if name == ".." {
+                    resolved.pop();
+                } else if name != "." {
+                    resolved.push(name);
+                }
+            }
+            return Some(resolved);
+        }
+        let name = probe.file_name()?.to_os_string();
+        trailing.push(name);
+        if !probe.pop() {
+            return None;
+        }
+    }
+}
+
+/// Whether `target`'s path components begin with all of `root`'s, so `target` is
+/// `root` itself or nested beneath it.
+fn is_within(root: &Path, target: &Path) -> bool {
+    let mut root_components = root.components();
+    let mut target_components = target.components();
+    loop {
+        match root_components.next() {
+            None => return true,
+            Some(root_component) => match target_components.next() {
+                Some(target_component) if target_component == root_component => continue,
+                _ => return false,
+            },
+        }
+    }
+}
+
 /// Load the project `file` belongs to (walking up to its `marrow.json`), check it
 /// if the cache is cold or stale, and run `f` against the checked workspace and
 /// the file's absolute path. `source`, when given, overlays the file's on-disk
 /// text so analysis reflects an agent's unsaved edit; a distinct overlay counts as
-/// a source change and re-checks. A file outside any project, or one that cannot
-/// be checked, yields the error string for the tool's diagnostics envelope.
+/// a source change and re-checks. Confinement is enforced before any project walk,
+/// so an out-of-root file never reaches analysis; a file outside any project, or
+/// one that cannot be checked, yields a load error for the tool's envelope.
 fn with_loaded_project<R>(
     file: &Path,
     source: Option<&str>,
     f: impl FnOnce(&Workspace, &Path) -> R,
-) -> Result<R, String> {
+) -> Result<R, ProjectAccessError> {
+    confinement_check(file)?;
     let overlay = source.map(|source| (file, source));
     PROJECT_CACHE.with(|cache| {
         let cache = &mut *cache.borrow_mut();
@@ -455,15 +592,16 @@ fn with_loaded_project<R>(
             if let Some(source) = source {
                 // Overlay the buffer the same way the LSP overlays an open editor
                 // buffer, so a project file with an unsaved edit checks against it.
-                let url =
-                    path_to_url(file).ok_or_else(|| "the file path is not absolute".to_string())?;
+                let url = path_to_url(file).ok_or_else(|| {
+                    ProjectAccessError::Load("the file path is not absolute".to_string())
+                })?;
                 documents.open(url, source.to_string());
             }
             let sources = documents.analysis_snapshot();
             cache
                 .workspace
                 .recompute_from_snapshot(file, &sources)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| ProjectAccessError::Load(error.to_string()))?;
             let (source_fp, catalog_fp) = match cache.workspace.project() {
                 Some(project) => (
                     source_fingerprint(project, overlay),
@@ -499,6 +637,13 @@ pub(crate) fn recompute_count() -> u64 {
 pub(crate) fn reset_project_cache() {
     PROJECT_CACHE.with(|cache| *cache.borrow_mut() = CachedProject::default());
     RECOMPUTE_COUNT.with(|count| count.set(0));
+}
+
+/// Lift confinement on this thread, so a confinement test cannot leak its allowed
+/// root onto a thread the harness later reuses for another test.
+#[cfg(test)]
+pub(crate) fn clear_allowed_root() {
+    ALLOWED_ROOT.with(|cell| *cell.borrow_mut() = None);
 }
 
 /// One diagnostic in the agent-facing JSON: a stable dotted `code`, a severity
@@ -568,7 +713,9 @@ fn check_result(file: Option<&Path>, source: Option<&str>) -> Json {
             json!({ "diagnostics": diagnostics })
         }) {
             Ok(result) => result,
-            Err(error) => tool_error(json!({ "diagnostics": [], "error": error })),
+            Err(err) => {
+                err.render(|error| tool_error(json!({ "diagnostics": [], "error": error })))
+            }
         },
         None => check_snippet(source.unwrap_or_default()),
     }
@@ -623,7 +770,7 @@ fn type_at_result(file: &Path, line: u32, character: u32) -> Json {
         json!({ "type": ty.map(|ty| render_type(&ty)) })
     }) {
         Ok(result) => result,
-        Err(error) => tool_error(json!({ "type": Json::Null, "error": error })),
+        Err(err) => err.render(|error| tool_error(json!({ "type": Json::Null, "error": error }))),
     }
 }
 
@@ -667,7 +814,10 @@ pub fn complete(file: &Path, line: u32, character: u32) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(tool_error(empty_completion_result(Some(error))), contract),
+        Err(err) => with_contract(
+            err.render(|error| tool_error(empty_completion_result(Some(error)))),
+            contract,
+        ),
     }
 }
 
@@ -710,8 +860,8 @@ pub fn namespace_complete(file: &Path, qualifier: &[String]) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(
-            tool_error(empty_namespace_completion_result(Some(error))),
+        Err(err) => with_contract(
+            err.render(|error| tool_error(empty_namespace_completion_result(Some(error)))),
             contract,
         ),
     }
@@ -812,13 +962,15 @@ pub fn resource_schema(file: &Path, name: &str) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(
-            tool_error(json!({
-                "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
-                "resources": [],
-                "diagnostics": [],
-                "error": error,
-            })),
+        Err(err) => with_contract(
+            err.render(|error| {
+                tool_error(json!({
+                    "profile_version": RESOURCE_SCHEMA_PROFILE_VERSION,
+                    "resources": [],
+                    "diagnostics": [],
+                    "error": error,
+                }))
+            }),
             contract,
         ),
     }
@@ -850,7 +1002,10 @@ pub fn surface_routes(file: &Path, scope: SurfaceRouteScope) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(tool_error(empty_surface_route_manifest(error)), contract),
+        Err(err) => with_contract(
+            err.render(|error| tool_error(empty_surface_route_manifest(error))),
+            contract,
+        ),
     }
 }
 
@@ -899,8 +1054,8 @@ pub fn surface_read(
     });
     Ok(match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(
-            tool_error(json!({ "available": false, "error": error })),
+        Err(err) => with_contract(
+            err.render(|error| tool_error(json!({ "available": false, "error": error }))),
             contract,
         ),
     })
@@ -975,8 +1130,8 @@ pub fn surface_write(
     });
     Ok(match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(
-            tool_error(json!({ "available": false, "error": error })),
+        Err(err) => with_contract(
+            err.render(|error| tool_error(json!({ "available": false, "error": error }))),
             contract,
         ),
     })
@@ -1013,8 +1168,10 @@ pub fn saved_roots(file: &Path, access: Option<ReadAccess>) -> Json {
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => with_contract(
-            tool_error(json!({ "available": false, "roots": [], "error": error })),
+        Err(err) => with_contract(
+            err.render(|error| {
+                tool_error(json!({ "available": false, "roots": [], "error": error }))
+            }),
             contract,
         ),
     }
@@ -1071,11 +1228,14 @@ pub fn data_children(
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => {
-            let mut value = unavailable;
-            value["error"] = json!(error);
-            with_contract(tool_error(value), contract)
-        }
+        Err(err) => with_contract(
+            err.render(|error| {
+                let mut value = unavailable;
+                value["error"] = json!(error);
+                tool_error(value)
+            }),
+            contract,
+        ),
     }
 }
 
@@ -1126,11 +1286,14 @@ pub fn data_read(file: &Path, request: DataReadRequest, access: Option<ReadAcces
     });
     match result {
         Ok(result) => with_contract(result, contract),
-        Err(error) => {
-            let mut value = unavailable;
-            value["error"] = json!(error);
-            with_contract(tool_error(value), contract)
-        }
+        Err(err) => with_contract(
+            err.render(|error| {
+                let mut value = unavailable;
+                value["error"] = json!(error);
+                tool_error(value)
+            }),
+            contract,
+        ),
     }
 }
 
@@ -1241,10 +1404,17 @@ fn run_within_budget(
     let file = file.to_path_buf();
     let entry = entry.map(str::to_string);
     let args = args.to_vec();
+    // A freshly spawned thread starts unconfined, so carry the caller thread's
+    // allowed root onto the watchdog thread; a sandboxed run must honor the same
+    // boundary the transport set for every other tool.
+    let allowed_root = current_allowed_root();
     let (sender, receiver) = mpsc::channel();
     let handle = std::thread::Builder::new()
         .name("marrow-mcp-run".to_string())
         .spawn(move || {
+            if let Some(root) = allowed_root {
+                set_allowed_root(root);
+            }
             let _ = sender.send(run_result(&file, entry.as_deref(), &args, mode));
         })
         .expect("spawning the run watchdog thread");
@@ -1305,8 +1475,10 @@ fn run_result(file: &Path, entry: Option<&str>, args: &[Json], mode: RunMode) ->
 
     let root = match load_project_for_run(file) {
         Ok(root) => root,
-        Err(error) => {
-            return tool_error(json!({ "diagnostics": [{ "message": error }], "output": "" }));
+        Err(err) => {
+            return err.render(|error| {
+                tool_error(json!({ "diagnostics": [{ "message": error }], "output": "" }))
+            });
         }
     };
 
@@ -1326,12 +1498,14 @@ fn run_args_error(message: &str) -> Json {
     })
 }
 
-/// Load `file`'s project far enough to find the root Marrow will run.
-fn load_project_for_run(file: &Path) -> Result<PathBuf, String> {
+/// Load `file`'s project far enough to find the root Marrow will run. Confinement
+/// runs inside `with_loaded_project`, so an out-of-root run is refused here before
+/// any session opens.
+fn load_project_for_run(file: &Path) -> Result<PathBuf, ProjectAccessError> {
     with_loaded_project(file, None, |workspace, _| {
         workspace.project().map(|project| project.root.clone())
     })?
-    .ok_or_else(|| "no project resolved for the file".to_string())
+    .ok_or_else(|| ProjectAccessError::Load("no project resolved for the file".to_string()))
 }
 
 /// Evaluate one `entry` through Marrow's fresh-memory session under the locked

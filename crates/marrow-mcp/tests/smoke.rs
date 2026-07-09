@@ -102,6 +102,9 @@ fn initialize_list_tools_then_call_mw_check() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // Confine the server to the temp dir the throwaway project lives under, so
+            // the default-cwd root does not refuse it.
+            .env("MARROW_MCP_ROOT", std::env::temp_dir())
             .spawn()
             .expect("the marrow-mcp binary runs"),
     );
@@ -400,6 +403,9 @@ fn mw_run_executes_over_a_sandboxed_store() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // Confine the server to the temp dir the throwaway project lives under, so
+            // the default-cwd root does not refuse it.
+            .env("MARROW_MCP_ROOT", std::env::temp_dir())
             .spawn()
             .expect("the marrow-mcp binary runs"),
     );

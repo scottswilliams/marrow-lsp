@@ -1,7 +1,8 @@
 use super::*;
 
 /// The read grant a data-tool test hands to a read tool, standing in for the
-/// operator opt-in the transport would supply.
+/// operator opt-in the transport would supply. Root-confinement tests set their own
+/// allowed root with [`confine`] and assert the boundary refusal instead.
 fn granted_read() -> Option<ReadAccess> {
     Some(ReadAccess::granted())
 }
@@ -9,6 +10,22 @@ fn granted_read() -> Option<ReadAccess> {
 /// The write grant a surface-write test hands to [`surface_write`].
 fn granted_write() -> Option<WriteAccess> {
     Some(WriteAccess::granted())
+}
+
+/// Confine this thread's tools to `root` until the returned guard drops, restoring
+/// the unconfined default even if the test panics, so a confinement test never
+/// leaks its root onto a thread the harness reuses.
+fn confine(root: &Path) -> RootGuard {
+    set_allowed_root(root.to_path_buf());
+    RootGuard
+}
+
+struct RootGuard;
+
+impl Drop for RootGuard {
+    fn drop(&mut self) {
+        clear_allowed_root();
+    }
 }
 
 use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
@@ -2887,4 +2904,101 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
     assert_eq!(result["cursor"], Json::Null, "{result}");
     assert_store_snapshot(&result["store_snapshot"]);
     assert_data_children_contract(&result);
+}
+
+#[test]
+fn confined_tools_refuse_a_file_outside_the_allowed_root() {
+    reset_project_cache();
+    // The allowed root is an empty directory; the project — and its real store —
+    // live in a sibling directory, so any tool pointed at the project escapes the
+    // boundary and must be refused before it opens the store.
+    let allowed = tempfile::tempdir().unwrap();
+    let (_project, file) = native_counter_project(1..=1);
+    let _guard = confine(allowed.path());
+
+    // A source tool refuses with the uniform typed refusal and never reaches
+    // analysis, so it carries no diagnostics and no load error.
+    let checked = check(Some(&file), None);
+    assert_eq!(checked["refusal"], "path.out_of_root", "{checked}");
+    assert!(checked.get("diagnostics").is_none(), "{checked}");
+    assert!(checked.get("error").is_none(), "{checked}");
+
+    // A data tool refuses identically and opens no store, so no snapshot rides back.
+    let roots = saved_roots(&file, granted_read());
+    assert_eq!(roots["refusal"], "path.out_of_root", "{roots}");
+    assert_eq!(roots["available"], false, "{roots}");
+    assert!(roots.get("store_snapshot").is_none(), "{roots}");
+    assert!(roots.get("error").is_none(), "{roots}");
+    assert_saved_roots_contract(&roots);
+
+    // A nonexistent outside path is refused exactly the same way, so the boundary
+    // never reveals whether a path beyond it exists.
+    let nonexistent = check(Some(Path::new("/nope/outside/project/src/main.mw")), None);
+    assert_eq!(nonexistent["refusal"], "path.out_of_root", "{nonexistent}");
+    assert!(nonexistent.get("error").is_none(), "{nonexistent}");
+}
+
+#[test]
+fn confinement_refuses_a_file_inside_the_root_whose_project_resolves_outside() {
+    reset_project_cache();
+    let (project, file) = native_counter_project(1..=1);
+    // Confine to the project's `src` subtree. The source file lives under it, so the
+    // input path itself is inside the root — but the project's `marrow.json` sits at
+    // the project root, one level above the boundary. The resolved-root check refuses
+    // it, proving confinement keys on the project location, not the input path.
+    let inner_root = project.path().join("src");
+    assert!(
+        file.starts_with(&inner_root),
+        "the fixture file must sit under the inner root"
+    );
+    let _guard = confine(&inner_root);
+
+    let roots = saved_roots(&file, granted_read());
+    assert_eq!(
+        roots["refusal"], "path.out_of_root",
+        "a project resolving above the allowed root must be refused: {roots}"
+    );
+    let checked = check(Some(&file), None);
+    assert_eq!(checked["refusal"], "path.out_of_root", "{checked}");
+}
+
+#[test]
+fn a_file_inside_the_allowed_root_is_permitted() {
+    reset_project_cache();
+    let (project, file) = native_counter_project(1..=1);
+    // The project root is the allowed root, so the file and its project both sit
+    // inside it: the tool runs and reads the store instead of refusing.
+    let _guard = confine(project.path());
+
+    let roots = saved_roots(&file, granted_read());
+    assert!(
+        roots.get("refusal").is_none(),
+        "an in-root file must not be refused: {roots}"
+    );
+    assert_eq!(roots["available"], true, "{roots}");
+    assert_saved_roots_contract(&roots);
+}
+
+#[test]
+fn mw_run_is_confined_on_its_watchdog_thread() {
+    reset_project_cache();
+    let (_project, file) = pure_project();
+    let allowed = tempfile::tempdir().unwrap();
+    let _guard = confine(allowed.path());
+
+    // The run executes on a watchdog thread that starts unconfined; it must inherit
+    // the caller's allowed root, so a run pointed outside it is refused rather than
+    // executed.
+    let result = run(
+        &file,
+        Some("shelf::books::shout"),
+        &[],
+        RunMode::Run,
+        DEFAULT_RUN_BUDGET,
+    );
+    assert_eq!(
+        result["refusal"], "path.out_of_root",
+        "mw_run must honor confinement on its watchdog thread: {result}"
+    );
+    assert_eq!(result["output"].as_str().unwrap_or(""), "", "{result}");
 }

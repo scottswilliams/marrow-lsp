@@ -37,3 +37,25 @@ rename, and attaching to served (running) programs. The
 the current state to production; the [fact-consumption ledger](docs/roadmaps/lsp-fact-consumption-ledger.md)
 records what each surface may treat as semantic authority. See `AGENTS.md` for working
 conventions.
+
+## MCP trust boundary
+
+The MCP server (`marrow-mcp`) is a data-exfiltration and mutation surface when data access is
+enabled, so its reach is bounded and stated up front. A data-enabled server can reach exactly
+this much:
+
+- **Confined to one root.** Data, source, and run tools operate only on projects whose resolved
+  root is under the operator's allowed root (`--root <dir>` or `MARROW_MCP_ROOT`, defaulting to
+  the launch working directory). A file whose canonical location, or whose project's `marrow.json`,
+  resolves outside the root is refused with `path.out_of_root` before any store is opened.
+- **`mw_run` is sandboxed.** It executes project source but only against a fresh in-memory store;
+  the project's real store is never opened.
+- **The write grant is coarse.** With `--allow-write`, the grant is as strong as the project's most
+  destructive surface action; it is not scoped to individual records.
+- **The audit trail is operational, not tamper-evident.** Every granted write appends a record
+  (timestamp, operation, target identity, outcome, store identity before/after) to
+  `marrow-mcp-write-audit.jsonl` beside the project — a record of what an agent changed, not a
+  secured log.
+- **Grants come only from launch configuration.** Read access, write access, and the allowed root
+  are set by launch flags or environment variables and are fixed for the session; no tool call can
+  widen them.
