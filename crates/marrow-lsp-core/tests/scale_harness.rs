@@ -1,7 +1,7 @@
-//! Source-scale latency-budget harness (roadmap lane S5.3).
+//! Source-scale latency-budget harness.
 //!
 //! A reusable synthetic-project generator (`N` modules x `M` lines) plus the
-//! interactive-request assertions that are the exit gate for the S1 latency lanes.
+//! interactive-request assertions that are the exit gate for interactive latency.
 //!
 //! The gate favors **scale-invariant work-count assertions** over wall-clock
 //! numbers, because wall-clock budgets are flaky under CI load. The load-bearing
@@ -187,7 +187,7 @@ fn freshness_check_reads_no_disk_and_survives_deleting_the_project() {
 
 /// Every warm interactive request answers from the cached snapshot and the open
 /// buffer's shared state, so all of them survive the on-disk project being deleted.
-/// This is the scale-invariant core of the S1 budget gate: a request that walked
+/// This is the scale-invariant core of the latency gate: a request that walked
 /// the project per call would return `None` (or fail) once the files are gone.
 #[test]
 fn warm_requests_do_no_per_request_disk_work() {
@@ -197,8 +197,8 @@ fn warm_requests_do_no_per_request_disk_work() {
     let entry_url = project.entry_url();
 
     // A snapshot of the open buffer is a refcount bump, not a copy: the same text
-    // allocation backs the document and the snapshot (the S1.5 invariant, asserted
-    // here at project scale as the budget gate's per-request document cost).
+    // allocation backs the document and the snapshot (the Arc-shared-snapshot
+    // invariant, asserted here at project scale as the per-request document cost).
     let buffer = documents
         .snapshot(&entry_url)
         .expect("entry buffer is open");
@@ -329,8 +329,8 @@ fn warm_request_latency_stays_under_a_generous_ceiling() {
     assert_within("completion", completion_time, REQUEST_CEILING);
 
     // The diagnostics floor is a whole-project recheck, so its ceiling is larger.
-    // This is the one budget that scales with project size today (the incremental
-    // reanalysis lane is future work); the generous ceiling still catches blow-ups.
+    // This is the one budget that scales with project size today (incremental
+    // reanalysis is future work); the generous ceiling still catches blow-ups.
     const RECHECK_CEILING: Duration = Duration::from_secs(10);
     let recheck_time = timed(|| {
         workspace
