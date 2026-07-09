@@ -454,8 +454,7 @@ try {
   const watchEventLog = [];
   const notificationRequests = [];
   let refreshCount = 0;
-  const watchProvider = new SavedResourceProvider();
-  watchProvider.refresh = () => {
+  const onStoreChanged = () => {
     refreshCount += 1;
     watchEventLog.push({ kind: "refresh" });
   };
@@ -474,7 +473,7 @@ try {
         return request.promise;
       },
     },
-    watchProvider,
+    onStoreChanged,
   );
   await watchRegistry.refresh();
   assert.deepEqual(watchClientCalls, [
@@ -542,6 +541,14 @@ try {
     watchNotification(3),
     { kind: "refresh" },
   ]);
+  const watchersBeforeUnchangedRefresh = vscodeStub.watchers.length;
+  await watchRegistry.refresh();
+  assert.equal(
+    vscodeStub.watchers.length,
+    watchersBeforeUnchangedRefresh,
+    "an unchanged watch-target set must not tear down and recreate identical watchers",
+  );
+
   watchRegistry.dispose();
   assert.equal(vscodeStub.watchers[0].disposed, true);
 
@@ -556,7 +563,7 @@ try {
         throw new Error("ignored watch targets must not notify the language server");
       },
     },
-    watchProvider,
+    onStoreChanged,
   );
   await ignoredTargetRegistry.refresh();
   assert.deepEqual(
@@ -577,7 +584,7 @@ try {
         return request.promise;
       },
     },
-    watchProvider,
+    onStoreChanged,
   );
   const watchTargetA = join(outDir, "project", "data", "a.redb");
   const watchTargetB = join(outDir, "project", "data", "b.redb");

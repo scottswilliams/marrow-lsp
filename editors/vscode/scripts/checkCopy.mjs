@@ -248,7 +248,7 @@ assertOrderedSourceCalls(
   diagnosticsMiddleware[1],
   "src/extension.ts diagnostics middleware",
   "diagnostics middleware",
-  ["next(uri, diagnostics);", "refreshWatchTargets();", "dataProvider.refresh();"],
+  ["next(uri, diagnostics);", "scheduleDataViewRefresh();"],
 );
 assertMentions(
   changelog,

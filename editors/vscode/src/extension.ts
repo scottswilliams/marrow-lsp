@@ -12,6 +12,7 @@ import {
   SavedResourceProvider,
   type SavedResourceNode,
 } from "./savedResourceInspector";
+import { DataViewRefresher, sameWatchTargets } from "./dataViewRefresh";
 import { type LauncherHost, type LauncherMode, resolveBinaryPath } from "./launcher";
 import { withStartTimeout } from "./watchdog";
 
@@ -28,6 +29,11 @@ const DAP_BINARY = `marrow-dap${EXE_SUFFIX}`;
 const REQUEST_DATA_WATCH_TARGETS = "marrow/dataWatchTargets";
 const NOTIFICATION_DID_CHANGE_WATCHED_FILES = "workspace/didChangeWatchedFiles";
 
+// The saved-data view refresh coalescing window. A rapid burst of diagnostics publishes or CLI
+// commits collapses to one refresh per window, so the server sees at most one read-only session
+// open per window instead of one per publish.
+const DATA_VIEW_REFRESH_DEBOUNCE_MS = 150;
+
 interface SavedDataWatchTargets {
   readonly paths: string[];
 }
@@ -37,18 +43,15 @@ interface DataWatchTargetClient {
   sendNotification(method: string, params: unknown): Thenable<void>;
 }
 
-interface RefreshableSavedResourceProvider {
-  refresh(): void;
-}
-
 export class SavedDataWatchTargetRegistry implements vscode.Disposable {
   private watchers: vscode.FileSystemWatcher[] = [];
+  private watchedPaths: string[] = [];
   private refreshSeq = 0;
   private disposed = false;
 
   constructor(
     private readonly client: DataWatchTargetClient,
-    private readonly provider: RefreshableSavedResourceProvider,
+    private readonly onStoreChanged: () => void,
   ) {}
 
   async refresh(): Promise<void> {
@@ -62,20 +65,15 @@ export class SavedDataWatchTargetRegistry implements vscode.Disposable {
     if (this.disposed || seq !== this.refreshSeq) {
       return;
     }
-    const nextWatchers: vscode.FileSystemWatcher[] = [];
-    for (const target of result.paths) {
-      const fsPath = watchTargetFsPath(target);
-      if (fsPath === undefined) {
-        continue;
-      }
-      const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(path.dirname(fsPath), path.basename(fsPath)),
-      );
-      watcher.onDidChange(() => void this.handleTargetEvent(fsPath, FileChangeType.Changed));
-      watcher.onDidCreate(() => void this.handleTargetEvent(fsPath, FileChangeType.Created));
-      watcher.onDidDelete(() => void this.handleTargetEvent(fsPath, FileChangeType.Deleted));
-      nextWatchers.push(watcher);
+    const nextPaths = result.paths.filter(
+      (target): target is string => watchTargetFsPath(target) !== undefined,
+    );
+    // An unchanged target set already has live watchers; re-registering identical ones only churns
+    // file handles, so keep the existing watchers rather than tear them down and recreate them.
+    if (sameWatchTargets(this.watchedPaths, nextPaths)) {
+      return;
     }
+    const nextWatchers = nextPaths.map((fsPath) => this.watchTarget(fsPath));
     if (this.disposed || seq !== this.refreshSeq) {
       for (const watcher of nextWatchers) {
         watcher.dispose();
@@ -84,12 +82,24 @@ export class SavedDataWatchTargetRegistry implements vscode.Disposable {
     }
     this.disposeWatchers();
     this.watchers = nextWatchers;
+    this.watchedPaths = nextPaths;
   }
 
   dispose(): void {
     this.disposed = true;
     this.refreshSeq += 1;
     this.disposeWatchers();
+    this.watchedPaths = [];
+  }
+
+  private watchTarget(fsPath: string): vscode.FileSystemWatcher {
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(path.dirname(fsPath), path.basename(fsPath)),
+    );
+    watcher.onDidChange(() => void this.handleTargetEvent(fsPath, FileChangeType.Changed));
+    watcher.onDidCreate(() => void this.handleTargetEvent(fsPath, FileChangeType.Created));
+    watcher.onDidDelete(() => void this.handleTargetEvent(fsPath, FileChangeType.Deleted));
+    return watcher;
   }
 
   private disposeWatchers(): void {
@@ -107,7 +117,7 @@ export class SavedDataWatchTargetRegistry implements vscode.Disposable {
     } catch {
       // A failed invalidation notification must not leave the inspector stale forever.
     }
-    this.provider.refresh();
+    this.onStoreChanged();
   }
 }
 
@@ -117,13 +127,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     treeDataProvider: dataProvider,
   });
   let dataWatchTargets: SavedDataWatchTargetRegistry | undefined;
-  const refreshWatchTargets = () => {
-    void dataWatchTargets?.refresh();
+  let dataViewRefresher: DataViewRefresher | undefined;
+  const scheduleDataViewRefresh = () => {
+    dataViewRefresher?.schedule();
   };
 
   context.subscriptions.push(
     dataTree,
     vscode.commands.registerCommand("marrow.refreshData", () => {
+      // An explicit manual refresh bypasses the debounce and visibility gate: the user asked for
+      // it now, so re-resolve the watch targets and re-query the tree immediately.
       void dataWatchTargets?.refresh();
       dataProvider.refresh();
     }),
@@ -165,8 +178,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     middleware: {
       handleDiagnostics(uri, diagnostics, next) {
         next(uri, diagnostics);
-        refreshWatchTargets();
-        dataProvider.refresh();
+        // Every publish would otherwise re-resolve watch targets and re-query the tree; coalesce
+        // them so a keystroke or CLI-commit storm becomes at most one refresh per debounce window.
+        scheduleDataViewRefresh();
       },
     },
   };
@@ -185,26 +199,42 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   dataProvider.setClient(client);
 
-  dataWatchTargets = new SavedDataWatchTargetRegistry(client, dataProvider);
+  dataWatchTargets = new SavedDataWatchTargetRegistry(client, scheduleDataViewRefresh);
+  dataViewRefresher = new DataViewRefresher(
+    {
+      refreshWatchTargets: () => dataWatchTargets?.refresh() ?? Promise.resolve(),
+      refreshTree: () => dataProvider.refresh(),
+      isInspectorVisible: () => dataTree.visible,
+    },
+    DATA_VIEW_REFRESH_DEBOUNCE_MS,
+  );
 
   const projectConfigWatcher = vscode.workspace.createFileSystemWatcher("**/marrow.json");
-  projectConfigWatcher.onDidChange(refreshWatchTargets);
-  projectConfigWatcher.onDidCreate(refreshWatchTargets);
-  projectConfigWatcher.onDidDelete(refreshWatchTargets);
+  projectConfigWatcher.onDidChange(scheduleDataViewRefresh);
+  projectConfigWatcher.onDidCreate(scheduleDataViewRefresh);
+  projectConfigWatcher.onDidDelete(scheduleDataViewRefresh);
 
   // Defer the first watch-target round-trip past activation: cold start already
   // pays for the server handshake, and serializing this request behind it delays
   // when the editor becomes responsive. Scheduling it lets activation return first.
-  const initialRefresh = setTimeout(refreshWatchTargets, 0);
+  const initialRefresh = setTimeout(scheduleDataViewRefresh, 0);
 
   context.subscriptions.push(
     dataWatchTargets,
+    dataViewRefresher,
     projectConfigWatcher,
     { dispose: () => clearTimeout(initialRefresh) },
-    vscode.window.onDidChangeActiveTextEditor(refreshWatchTargets),
+    // A hidden inspector skips the tree round-trip; refresh once it comes back on screen so it
+    // reflects any store or source change that landed while it was hidden.
+    dataTree.onDidChangeVisibility((event) => {
+      if (event.visible) {
+        scheduleDataViewRefresh();
+      }
+    }),
+    vscode.window.onDidChangeActiveTextEditor(scheduleDataViewRefresh),
     vscode.workspace.onDidOpenTextDocument((document) => {
       if (document.languageId === "marrow") {
-        refreshWatchTargets();
+        scheduleDataViewRefresh();
       }
     }),
   );
