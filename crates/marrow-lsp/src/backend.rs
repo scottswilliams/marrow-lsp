@@ -20,7 +20,9 @@ use marrow_lsp_core::positions::Position as CorePosition;
 use marrow_lsp_core::store::{
     SavedDataSession, SavedDataWatchTargets, open_saved_data_session, saved_data_watch_targets,
 };
-use marrow_lsp_core::workspace::{AnalysisSnapshot, Project, Workspace, url_to_path};
+use marrow_lsp_core::workspace::{
+    AnalysisSnapshot, Project, RecomputeScope, Workspace, url_to_path,
+};
 use marrow_lsp_core::{
     completion, formatting, hover, indentation, navigation, semantic_tokens, signature_help,
     symbols,
@@ -31,11 +33,30 @@ use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, jsonrpc};
 
-/// How long to wait after an edit before checking the project, so a burst of
-/// keystrokes settles into one recompute.
-const DEBOUNCE: Duration = Duration::from_millis(700);
+/// The longest wait after an edit before checking the project, so a burst of
+/// keystrokes on a large project settles into one recompute. Large projects pay the
+/// most per check, so they get the fullest coalescing window.
+const DEBOUNCE_MAX: Duration = Duration::from_millis(700);
+/// The shortest debounce, used for a small project whose check is cheap enough that a
+/// long wait would only add latency without meaningfully saving work.
+const DEBOUNCE_MIN: Duration = Duration::from_millis(150);
+/// At or below this analyzed-file count a project is treated as small and gets the
+/// minimum debounce; above it, the full window.
+const SMALL_PROJECT_FILE_LIMIT: u64 = 8;
 const PENDING_ANALYSIS_INVALIDATION: u8 = 0b01;
 const PENDING_PROJECT_INVALIDATION: u8 = 0b10;
+
+/// The debounce for a project of `file_count` analyzed files: the minimum window for a
+/// small project (a cheap check where a long wait is pure latency), the full window
+/// otherwise. Zero — before the first analysis has counted files — is treated as small
+/// so the first check starts promptly.
+fn adaptive_debounce(file_count: u64) -> Duration {
+    if file_count <= SMALL_PROJECT_FILE_LIMIT {
+        DEBOUNCE_MIN
+    } else {
+        DEBOUNCE_MAX
+    }
+}
 
 pub struct Backend {
     client: Client,
@@ -65,6 +86,9 @@ pub struct Backend {
     /// the client echoes on a `semanticTokens/full/delta` request. Lets a delta reply
     /// with only the edits against that stream instead of a full re-encode.
     semantic_tokens_cache: Arc<Mutex<SemanticTokensCache>>,
+    /// The analyzed-file count of the last successful recompute, so the debounce can
+    /// adapt: a small project checks quickly and need not wait the full window.
+    project_file_count: Arc<AtomicU64>,
     /// Parks a compute request between capturing its document world and touching the
     /// analysis, so a test can land a superseding edit in that window and assert the
     /// request drops. Never set in production.
@@ -268,6 +292,7 @@ struct RecomputeContext<'a> {
     diagnostics: &'a Mutex<DiagnosticsTracker>,
     diagnostics_publish: &'a Mutex<()>,
     pending_workspace_invalidation: &'a AtomicU8,
+    project_file_count: &'a AtomicU64,
     client: &'a Client,
 }
 
@@ -361,6 +386,7 @@ impl Backend {
             pending_workspace_invalidation: Arc::new(AtomicU8::new(0)),
             dynamic_watch_registration: Arc::new(AtomicBool::new(false)),
             semantic_tokens_cache: Arc::new(Mutex::new(SemanticTokensCache::default())),
+            project_file_count: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             request_gate: Arc::new(Mutex::new(None)),
         }
@@ -530,10 +556,18 @@ impl Backend {
 
     /// Note that an edit happened and schedule a debounced recompute for `file`.
     /// The recompute is dropped if another edit lands before the debounce elapses.
-    fn schedule_recompute(&self, file: PathBuf, root_epoch: Option<(PathBuf, u64)>) {
+    /// An interactive keystroke recompute may skip test-module checking; the debounce
+    /// adapts to the last analyzed-file count so a small project responds sooner.
+    fn schedule_recompute(
+        &self,
+        file: PathBuf,
+        root_epoch: Option<(PathBuf, u64)>,
+        scope: RecomputeScope,
+    ) {
         let seq = root_epoch
             .is_none()
             .then(|| self.edit_seq.fetch_add(1, Ordering::SeqCst) + 1);
+        let debounce = adaptive_debounce(self.project_file_count.load(Ordering::Relaxed));
         let documents = Arc::clone(&self.documents);
         let analysis = Arc::clone(&self.analysis);
         let analysis_run = Arc::clone(&self.analysis_run);
@@ -541,9 +575,10 @@ impl Backend {
         let edit_seq = Arc::clone(&self.edit_seq);
         let diagnostics_publish = Arc::clone(&self.diagnostics_publish);
         let pending_workspace_invalidation = Arc::clone(&self.pending_workspace_invalidation);
+        let project_file_count = Arc::clone(&self.project_file_count);
         let client = self.client.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(DEBOUNCE).await;
+            tokio::time::sleep(debounce).await;
             match (&root_epoch, seq) {
                 // A newer edit for this project root has been scheduled; let it
                 // do the work instead. The publish path checks again after
@@ -567,10 +602,12 @@ impl Backend {
                     diagnostics: &diagnostics,
                     diagnostics_publish: &diagnostics_publish,
                     pending_workspace_invalidation: &pending_workspace_invalidation,
+                    project_file_count: &project_file_count,
                     client: &client,
                 },
                 &file,
                 root_epoch,
+                scope,
             )
             .await;
         });
@@ -584,6 +621,7 @@ impl Backend {
         context: RecomputeContext<'_>,
         file: &Path,
         root_epoch: Option<(PathBuf, u64)>,
+        scope: RecomputeScope,
     ) {
         let analysis_snapshot = {
             let documents = context.documents.lock().await;
@@ -612,7 +650,7 @@ impl Backend {
                 .pending_workspace_invalidation
                 .swap(0, Ordering::SeqCst);
             apply_pending_workspace_invalidation(pending, workspace);
-            match workspace.prepare_recompute(file, &analysis_snapshot) {
+            match workspace.prepare_recompute(file, &analysis_snapshot, scope) {
                 Ok(prepared) => prepared,
                 // A buffer outside any project, or a project that cannot be walked,
                 // has no fresh source diagnostics to publish. Explicit filesystem
@@ -669,6 +707,17 @@ impl Backend {
             // newer run already committed). The invalidation's own scheduled recompute
             // repairs state; publishing this snapshot's diagnostics would be stale.
             return;
+        }
+        // Record the analyzed-file count so the next edit's debounce adapts to project
+        // size. A source-only run counts fewer files, which only shortens the debounce.
+        if let Some(count) = analysis
+            .workspace
+            .latest()
+            .map(|snapshot| snapshot.files.len())
+        {
+            context
+                .project_file_count
+                .store(count as u64, Ordering::Relaxed);
         }
 
         let publish_guard = context.diagnostics_publish.lock().await;
@@ -984,7 +1033,7 @@ impl LanguageServer for Backend {
             })
         };
         if let Some(path) = path {
-            self.schedule_recompute(path, root_epoch);
+            self.schedule_recompute(path, root_epoch, RecomputeScope::Full);
         }
     }
 
@@ -1017,7 +1066,8 @@ impl LanguageServer for Backend {
             })
         };
         if let Some(path) = path {
-            self.schedule_recompute(path, root_epoch);
+            // The keystroke path: latency-sensitive, so it may skip test-module checking.
+            self.schedule_recompute(path, root_epoch, RecomputeScope::Interactive);
         }
     }
 
@@ -1049,7 +1099,7 @@ impl LanguageServer for Backend {
         // A closed buffer's problems no longer apply to the editor's view.
         self.client.publish_diagnostics(url, Vec::new(), None).await;
         if let Some(path) = path {
-            self.schedule_recompute(path, root_epoch);
+            self.schedule_recompute(path, root_epoch, RecomputeScope::Full);
         }
     }
 
@@ -1146,7 +1196,7 @@ impl LanguageServer for Backend {
             }
         }
         for schedule in schedules {
-            self.schedule_recompute(schedule.path, schedule.root_epoch);
+            self.schedule_recompute(schedule.path, schedule.root_epoch, RecomputeScope::Full);
         }
     }
 
@@ -2033,6 +2083,30 @@ mod tests {
     }
 
     #[test]
+    fn debounce_is_shorter_for_a_small_project_than_a_large_one() {
+        assert_eq!(
+            adaptive_debounce(0),
+            DEBOUNCE_MIN,
+            "no analyzed files yet is small"
+        );
+        assert_eq!(adaptive_debounce(1), DEBOUNCE_MIN);
+        assert_eq!(
+            adaptive_debounce(SMALL_PROJECT_FILE_LIMIT),
+            DEBOUNCE_MIN,
+            "at the small-project limit the debounce is still the minimum"
+        );
+        assert_eq!(
+            adaptive_debounce(SMALL_PROJECT_FILE_LIMIT + 1),
+            DEBOUNCE_MAX,
+            "past the limit the debounce is the full window"
+        );
+        assert!(
+            DEBOUNCE_MIN < DEBOUNCE_MAX,
+            "a small project must wait less than a large one"
+        );
+    }
+
+    #[test]
     fn watched_file_registration_includes_the_native_store() {
         let store_glob = format!("**/{}", marrow_lsp_core::workspace::NATIVE_STORE_FILE_NAME);
         let registered: Vec<String> = watched_files_registrations()
@@ -2194,6 +2268,7 @@ mod tests {
             let diagnostics = Arc::clone(&backend.diagnostics);
             let publish = Arc::clone(&backend.diagnostics_publish);
             let pending = Arc::clone(&backend.pending_workspace_invalidation);
+            let project_file_count = Arc::clone(&backend.project_file_count);
             let client = backend.client.clone();
             Backend::recompute_and_publish(
                 RecomputeContext {
@@ -2203,10 +2278,12 @@ mod tests {
                     diagnostics: &diagnostics,
                     diagnostics_publish: &publish,
                     pending_workspace_invalidation: &pending,
+                    project_file_count: &project_file_count,
                     client: &client,
                 },
                 &file,
                 None,
+                RecomputeScope::Full,
             )
             .await;
         }
@@ -2467,6 +2544,7 @@ mod tests {
         let diagnostics = Arc::clone(&backend.diagnostics);
         let diagnostics_publish = Arc::clone(&backend.diagnostics_publish);
         let pending_workspace_invalidation = Arc::clone(&backend.pending_workspace_invalidation);
+        let project_file_count = Arc::clone(&backend.project_file_count);
         let client = backend.client.clone();
         let recompute = tokio::spawn(async move {
             Backend::recompute_and_publish(
@@ -2477,10 +2555,12 @@ mod tests {
                     diagnostics: &diagnostics,
                     diagnostics_publish: &diagnostics_publish,
                     pending_workspace_invalidation: &pending_workspace_invalidation,
+                    project_file_count: &project_file_count,
                     client: &client,
                 },
                 &file,
                 None,
+                RecomputeScope::Full,
             )
             .await;
         });
@@ -2647,13 +2727,14 @@ mod tests {
                 Arc::clone(&backend.diagnostics),
                 Arc::clone(&backend.diagnostics_publish),
                 Arc::clone(&backend.pending_workspace_invalidation),
+                Arc::clone(&backend.project_file_count),
                 backend.client.clone(),
             )
         };
 
         // A first recompute completes and leaves a good analysis as the latest.
         {
-            let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+            let (documents, analysis, analysis_run, diagnostics, publish, pending, count, client) =
                 context(backend);
             Backend::recompute_and_publish(
                 RecomputeContext {
@@ -2663,10 +2744,12 @@ mod tests {
                     diagnostics: &diagnostics,
                     diagnostics_publish: &publish,
                     pending_workspace_invalidation: &pending,
+                    project_file_count: &count,
                     client: &client,
                 },
                 &file,
                 None,
+                RecomputeScope::Full,
             )
             .await;
         }
@@ -2685,7 +2768,7 @@ mod tests {
             let mut analysis = backend.analysis.lock().await;
             analysis.recompute_gate = Some(Arc::clone(&gate));
         }
-        let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+        let (documents, analysis, analysis_run, diagnostics, publish, pending, count, client) =
             context(backend);
         let file_for_task = file.clone();
         let recompute = tokio::spawn(async move {
@@ -2697,10 +2780,12 @@ mod tests {
                     diagnostics: &diagnostics,
                     diagnostics_publish: &publish,
                     pending_workspace_invalidation: &pending,
+                    project_file_count: &count,
                     client: &client,
                 },
                 &file_for_task,
                 None,
+                RecomputeScope::Full,
             )
             .await;
         });
@@ -2792,11 +2877,12 @@ mod tests {
                 Arc::clone(&backend.diagnostics),
                 Arc::clone(&backend.diagnostics_publish),
                 Arc::clone(&backend.pending_workspace_invalidation),
+                Arc::clone(&backend.project_file_count),
                 backend.client.clone(),
             )
         };
         let run = |backend: &Backend| {
-            let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+            let (documents, analysis, analysis_run, diagnostics, publish, pending, count, client) =
                 context(backend);
             let file = file.clone();
             async move {
@@ -2808,17 +2894,19 @@ mod tests {
                         diagnostics: &diagnostics,
                         diagnostics_publish: &publish,
                         pending_workspace_invalidation: &pending,
+                        project_file_count: &count,
                         client: &client,
                     },
                     &file,
                     None,
+                    RecomputeScope::Full,
                 )
                 .await;
             }
         };
         // Spawn a recompute onto the runtime so a gate can park it off the pump.
         let spawn_recompute = |backend: &Backend| {
-            let (documents, analysis, analysis_run, diagnostics, publish, pending, client) =
+            let (documents, analysis, analysis_run, diagnostics, publish, pending, count, client) =
                 context(backend);
             let file = file.clone();
             tokio::spawn(async move {
@@ -2830,10 +2918,12 @@ mod tests {
                         diagnostics: &diagnostics,
                         diagnostics_publish: &publish,
                         pending_workspace_invalidation: &pending,
+                        project_file_count: &count,
                         client: &client,
                     },
                     &file,
                     None,
+                    RecomputeScope::Full,
                 )
                 .await;
             })
@@ -2984,6 +3074,7 @@ mod tests {
             let diagnostics = Arc::clone(&backend.diagnostics);
             let publish = Arc::clone(&backend.diagnostics_publish);
             let pending = Arc::clone(&backend.pending_workspace_invalidation);
+            let count = Arc::clone(&backend.project_file_count);
             let client = backend.client.clone();
             let file = file.to_path_buf();
             async move {
@@ -2995,10 +3086,12 @@ mod tests {
                         diagnostics: &diagnostics,
                         diagnostics_publish: &publish,
                         pending_workspace_invalidation: &pending,
+                        project_file_count: &count,
                         client: &client,
                     },
                     &file,
                     None,
+                    RecomputeScope::Full,
                 )
                 .await;
             }

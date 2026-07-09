@@ -509,7 +509,9 @@ fn changed_buffer_diagnostics_publish_after_editor_idle() {
         }),
     );
 
-    std::thread::sleep(Duration::from_millis(300));
+    // Request an outline immediately: it is served live from the buffer, so its
+    // response arrives well inside even the adaptive minimum debounce window. No
+    // diagnostics should have published yet — the recompute is still debounced.
     send(
         &mut stdin,
         &json!({

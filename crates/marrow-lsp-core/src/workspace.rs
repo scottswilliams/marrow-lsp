@@ -170,6 +170,26 @@ pub enum ReadSource {
     LastGood,
 }
 
+/// Why a recompute was triggered, choosing whether it may skip test-module checking.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RecomputeScope {
+    /// An edit keystroke: latency-sensitive, so it may check source only when doing so
+    /// changes nothing observable.
+    Interactive,
+    /// An open, close, config or watcher change, or an explicit recompute: always a
+    /// full check including test modules.
+    Full,
+}
+
+/// Whether any open buffer is a test module of `project`, in which case an interactive
+/// recompute must stay full so that buffer's diagnostics still refresh.
+fn any_open_test_module(project: &Project, documents: &DocumentAnalysisSnapshot) -> bool {
+    documents
+        .open_documents()
+        .iter()
+        .any(|document| test_module_file(&project.root, &project.config, &document.path).is_some())
+}
+
 /// A parse-clean, non-empty analysis: the checker kept every module (no file has a
 /// parse error) and the program has content. Only such an analysis is a sound source
 /// for hover and navigation reads or for last-good retention.
@@ -194,12 +214,23 @@ pub struct PreparedRecompute {
     lock: Option<CatalogLock>,
     documents_generation: u64,
     invalidation_epoch: u64,
+    /// Skip test-module checking for this run. Set only on the interactive keystroke
+    /// path when no test buffer is open, where eliding tests cannot change any
+    /// observable diagnostic (see [`Workspace::prepare_recompute`]).
+    source_only: bool,
 }
 
 impl PreparedRecompute {
     /// Run the project checker. Pure CPU work with no shared state, safe to run on
     /// a blocking thread while read handlers serve last-good facts.
-    pub fn analyze(self) -> Result<AnalysisSnapshot, marrow_project::DiscoverError> {
+    ///
+    /// On the source-only interactive path the configured test roots are dropped so
+    /// the checker discovers no test modules — test checking never alters source
+    /// diagnostics, so the shorter run publishes the same source facts.
+    pub fn analyze(mut self) -> Result<AnalysisSnapshot, marrow_project::DiscoverError> {
+        if self.source_only {
+            self.config.tests.clear();
+        }
         analyze_project(
             &self.root,
             &self.config,
@@ -363,7 +394,7 @@ impl Workspace {
         file: &Path,
         documents: &DocumentAnalysisSnapshot,
     ) -> Result<&AnalysisSnapshot, WorkspaceError> {
-        let prepared = self.prepare_recompute(file, documents)?;
+        let prepared = self.prepare_recompute(file, documents, RecomputeScope::Full)?;
         let generation = prepared.documents_generation();
         let epoch = prepared.invalidation_epoch();
         let snapshot = prepared.analyze().map_err(WorkspaceError::Discover)?;
@@ -374,10 +405,17 @@ impl Workspace {
     /// Resolve the project, bind its committed catalog, and overlay the open
     /// buffers into an owned analysis job the caller runs off the lock. The project
     /// and catalog-binding cache are updated here, under the caller's lock.
+    ///
+    /// [`RecomputeScope::Interactive`] elides test-module checking, but only when no
+    /// test buffer is open: test checking never changes source diagnostics, and a
+    /// closed test file publishes none, so skipping it on the keystroke path is
+    /// observably a no-op there while shortening the recompute. With a test buffer
+    /// open the run stays full so that buffer's diagnostics still refresh.
     pub fn prepare_recompute(
         &mut self,
         file: &Path,
         documents: &DocumentAnalysisSnapshot,
+        scope: RecomputeScope,
     ) -> Result<PreparedRecompute, WorkspaceError> {
         if !self
             .project
@@ -388,6 +426,8 @@ impl Workspace {
             self.catalog_binding = CatalogBindingCache::new();
         }
         let project = self.project.as_ref().expect("project resolved just above");
+        let source_only =
+            scope == RecomputeScope::Interactive && !any_open_test_module(project, documents);
         let sources = overlay_snapshot(&project.root, documents);
         let binding = self
             .catalog_binding
@@ -401,6 +441,7 @@ impl Workspace {
             lock: binding.lock,
             documents_generation: documents.generation(),
             invalidation_epoch: self.invalidation_epoch,
+            source_only,
         })
     }
 
@@ -914,6 +955,84 @@ mod tests {
         assert!(
             workspace.last_good_facts().is_some(),
             "the demoted analysis and its index remain readable as a coherent pair"
+        );
+    }
+
+    /// The interactive keystroke path checks source only — it drops the configured test
+    /// roots so no test module is discovered — but only when no test buffer is open. A
+    /// full recompute always includes tests, and an open test buffer forces the
+    /// interactive path back to a full check so that buffer's diagnostics still refresh.
+    #[test]
+    fn an_interactive_recompute_skips_test_modules_unless_a_test_buffer_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "tests": ["tests"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        let tests = root.join("tests");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&tests).unwrap();
+        let app = src.join("app.mw");
+        let app_test = tests.join("app_test.mw");
+        let app_source = "module app\n\npub fn answer(): int\n    return 1\n";
+        let test_source = "module app_test\n\npub fn checks(): int\n    return 1\n";
+        std::fs::write(&app, app_source).unwrap();
+        std::fs::write(&app_test, test_source).unwrap();
+
+        let app_url = path_to_url(&app).unwrap();
+        let mut documents = Documents::new();
+        documents.open(app_url, app_source.to_string());
+
+        let mut workspace = Workspace::new();
+
+        // A full recompute discovers and checks the test module.
+        let full = workspace
+            .prepare_recompute(&app, &documents.analysis_snapshot(), RecomputeScope::Full)
+            .unwrap()
+            .analyze()
+            .unwrap();
+        assert!(
+            full.files.iter().any(|file| file.path == app_test),
+            "a full recompute includes test modules"
+        );
+
+        // The interactive keystroke path, with no test buffer open, checks source only.
+        let interactive = workspace
+            .prepare_recompute(
+                &app,
+                &documents.analysis_snapshot(),
+                RecomputeScope::Interactive,
+            )
+            .unwrap()
+            .analyze()
+            .unwrap();
+        assert!(
+            !interactive.files.iter().any(|file| file.path == app_test),
+            "the interactive keystroke path skips test modules"
+        );
+        assert!(
+            interactive.files.iter().any(|file| file.path == app),
+            "the interactive path still checks source files"
+        );
+
+        // Opening the test buffer forces the interactive path back to a full check so
+        // its diagnostics keep refreshing on edits.
+        documents.open(path_to_url(&app_test).unwrap(), test_source.to_string());
+        let guarded = workspace
+            .prepare_recompute(
+                &app,
+                &documents.analysis_snapshot(),
+                RecomputeScope::Interactive,
+            )
+            .unwrap()
+            .analyze()
+            .unwrap();
+        assert!(
+            guarded.files.iter().any(|file| file.path == app_test),
+            "an open test buffer keeps the interactive path a full check"
         );
     }
 
