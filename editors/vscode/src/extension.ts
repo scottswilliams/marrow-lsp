@@ -162,12 +162,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         dataProvider.refresh();
       },
     },
-    synchronize: {
-      fileEvents: [
-        vscode.workspace.createFileSystemWatcher("**/marrow.json"),
-        vscode.workspace.createFileSystemWatcher("**/*.mw"),
-      ],
-    },
   };
 
   client = new LanguageClient(
