@@ -1,5 +1,16 @@
 use super::*;
 
+/// The read grant for a data-tool test that is not exercising the root-confinement
+/// boundary itself. Confinement tests build their own grant against a chosen root.
+fn granted_read() -> Option<ReadAccess> {
+    Some(ReadAccess::granted())
+}
+
+/// The write grant for a surface-write test.
+fn granted_write() -> Option<WriteAccess> {
+    Some(WriteAccess::granted())
+}
+
 use marrow_check::test_support::{member_catalog_id, root_place, store_id_of};
 use marrow_check::{
     CheckedProgram, check_project, check_project_against, project_store_lock, read_committed_lock,
@@ -1628,7 +1639,7 @@ fn surface_read_refuses_before_project_loading_when_data_access_is_disabled() {
         "request": { "kind": "singleton_read" }
     });
 
-    let result = surface_read(Path::new("/nope/project/src/main.mw"), request, false)
+    let result = surface_read(Path::new("/nope/project/src/main.mw"), request, None)
         .expect("valid operation request");
 
     assert_eq!(result["available"], false, "{result}");
@@ -1657,7 +1668,7 @@ fn surface_write_refuses_before_project_loading_when_data_access_is_disabled() {
         }
     });
 
-    let result = surface_write(Path::new("/nope/project/src/main.mw"), request, false)
+    let result = surface_write(Path::new("/nope/project/src/main.mw"), request, None)
         .expect("valid operation request");
 
     assert_eq!(result["available"], false, "{result}");
@@ -1677,13 +1688,17 @@ fn surface_write_refuses_before_project_loading_when_data_access_is_disabled() {
 #[test]
 fn surface_write_executes_canonical_point_update_request() {
     let (_dir, file) = native_surface_project();
-    let before =
-        surface_read(&file, point_read_operation(&file), true).expect("valid read operation");
+    let before = surface_read(&file, point_read_operation(&file), granted_read())
+        .expect("valid read operation");
 
-    let result = surface_write(&file, update_author_operation(&file, "Brian Herbert"), true)
-        .expect("valid update operation");
-    let after =
-        surface_read(&file, point_read_operation(&file), true).expect("valid read operation");
+    let result = surface_write(
+        &file,
+        update_author_operation(&file, "Brian Herbert"),
+        granted_write(),
+    )
+    .expect("valid update operation");
+    let after = surface_read(&file, point_read_operation(&file), granted_read())
+        .expect("valid read operation");
 
     assert_eq!(result["available"], true, "{result}");
     assert_eq!(result["response"]["result"]["kind"], "updated", "{result}");
@@ -1704,13 +1719,78 @@ fn surface_write_executes_canonical_point_update_request() {
 }
 
 #[test]
+fn every_surface_write_appends_an_audit_record() {
+    let (dir, file) = native_surface_project();
+    let audit_path = dir.path().join("marrow-mcp-write-audit.jsonl");
+    assert!(
+        !audit_path.exists(),
+        "no audit trail should exist before any write"
+    );
+
+    let result = surface_write(
+        &file,
+        update_author_operation(&file, "Frank Herbert"),
+        granted_write(),
+    )
+    .expect("valid update operation");
+
+    // The write envelope carries the audit record the trail persisted, so an agent
+    // sees exactly what was recorded about its own mutation.
+    let audit = &result["audit"];
+    assert_eq!(audit["request_kind"], "point_update", "{result}");
+    assert!(
+        audit["operation_tag"]
+            .as_str()
+            .is_some_and(|tag| !tag.is_empty()),
+        "the audit record names the operation tag: {result}"
+    );
+    assert_eq!(audit["file"], file.to_str().unwrap(), "{result}");
+    assert!(
+        audit["store_after"]["commit_id"].as_u64() > audit["store_before"]["commit_id"].as_u64(),
+        "the audit record must show the write advanced the store: {result}"
+    );
+    assert!(result.get("audit_error").is_none(), "{result}");
+
+    // The trail is a durable, append-only JSONL file beside the project: one line
+    // per write, so it grows rather than being overwritten.
+    let first = std::fs::read_to_string(&audit_path).expect("audit trail was written");
+    assert_eq!(
+        first.lines().count(),
+        1,
+        "one record after one write: {first}"
+    );
+    let recorded: Json = serde_json::from_str(first.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        recorded, *audit,
+        "the persisted record matches the envelope"
+    );
+
+    surface_write(
+        &file,
+        update_author_operation(&file, "Brian Herbert"),
+        granted_write(),
+    )
+    .expect("second write");
+    let both = std::fs::read_to_string(&audit_path).expect("audit trail still present");
+    assert_eq!(
+        both.lines().count(),
+        2,
+        "a second write appends rather than replacing: {both}"
+    );
+}
+
+#[test]
 fn surface_write_executes_canonical_action_request_and_returns_canonical_errors() {
     let (_dir, file) = native_surface_project();
 
-    let result = surface_write(&file, retitle_action_operation(&file, "Dune MCP"), true)
-        .expect("valid action operation");
-    let after =
-        surface_read(&file, point_read_operation(&file), true).expect("valid read operation");
+    let result = surface_write(
+        &file,
+        retitle_action_operation(&file, "Dune MCP"),
+        granted_write(),
+    )
+    .expect("valid action operation");
+    let after = surface_read(&file, point_read_operation(&file), granted_read())
+        .expect("valid read operation");
 
     assert_eq!(result["available"], true, "{result}");
     assert_eq!(result["response"]["result"]["kind"], "action", "{result}");
@@ -1728,7 +1808,7 @@ fn surface_write_executes_canonical_action_request_and_returns_canonical_errors(
     let action_request = retitle_action_operation(&file, "unused");
     let mut wrong_body = update_author_operation(&file, "Wrong Body");
     wrong_body["operation_tag"] = action_request["operation_tag"].clone();
-    let mismatch = surface_write(&file, wrong_body, true).expect("valid operation DTO");
+    let mismatch = surface_write(&file, wrong_body, granted_write()).expect("valid operation DTO");
     assert_eq!(mismatch["available"], true, "{mismatch}");
     assert_eq!(mismatch["error"]["code"], "surface.request", "{mismatch}");
     assert_eq!(
@@ -1743,8 +1823,8 @@ fn surface_write_executes_canonical_action_request_and_returns_canonical_errors(
 fn surface_read_executes_canonical_point_read_request() {
     let (_dir, file) = native_surface_project();
 
-    let result =
-        surface_read(&file, point_read_operation(&file), true).expect("valid operation request");
+    let result = surface_read(&file, point_read_operation(&file), granted_read())
+        .expect("valid operation request");
 
     assert_eq!(result["available"], true, "{result}");
     assert_eq!(
@@ -1809,7 +1889,8 @@ fn surface_read_returns_canonical_error_for_write_bodies() {
         }
     });
 
-    let result = surface_read(&file, request, true).expect("write operation request decodes");
+    let result =
+        surface_read(&file, request, granted_read()).expect("write operation request decodes");
 
     assert_eq!(result["available"], true, "{result}");
     assert!(
@@ -2561,7 +2642,7 @@ fn run_test_mode_rejects_args() {
 #[test]
 fn data_tools_refuse_when_not_enabled() {
     let (_dir, file) = project();
-    let roots = saved_roots(&file, false);
+    let roots = saved_roots(&file, None);
     assert_eq!(roots["available"], false);
     assert_eq!(roots["dataAccess"], "disabled");
     assert!(
@@ -2576,7 +2657,7 @@ fn data_tools_refuse_when_not_enabled() {
             limit: 1,
             cursor: None,
         },
-        false,
+        None,
     );
     assert_eq!(children["dataAccess"], "disabled");
     assert!(
@@ -2591,7 +2672,7 @@ fn data_tools_refuse_when_not_enabled() {
             segments: vec![sample_root_segment()],
             preview_limit: None,
         },
-        false,
+        None,
     );
     assert_eq!(read["dataAccess"], "disabled");
     assert!(
@@ -2604,7 +2685,7 @@ fn data_tools_refuse_when_not_enabled() {
 #[test]
 fn saved_roots_return_snapshot_metadata_when_enabled() {
     let (_dir, file) = native_counter_project(1..=1);
-    let result = saved_roots(&file, true);
+    let result = saved_roots(&file, granted_read());
     let counter_root = saved_data_root_segment(&file, "counter");
 
     assert_eq!(result["available"], true, "{result}");
@@ -2627,7 +2708,7 @@ fn saved_roots_return_snapshot_metadata_when_enabled() {
 fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
     let (_dir, file) = native_counter_project_with_unstamped_records(1..=1);
 
-    let roots = saved_roots(&file, true);
+    let roots = saved_roots(&file, granted_read());
     assert_eq!(roots["available"], false, "{roots}");
     assert_eq!(roots["roots"], json!([]), "{roots}");
     assert!(
@@ -2643,7 +2724,7 @@ fn data_tools_refuse_unstamped_records_even_with_committed_lock() {
             limit: 10,
             cursor: None,
         },
-        true,
+        granted_read(),
     );
 
     assert_eq!(children["available"], false, "{children}");
@@ -2670,7 +2751,7 @@ fn data_children_returns_paged_typed_segments_when_enabled() {
             limit: 2,
             cursor: None,
         },
-        true,
+        granted_read(),
     );
 
     assert_eq!(
@@ -2716,7 +2797,7 @@ fn data_read_returns_bounded_value_preview_when_enabled() {
             ],
             preview_limit: Some(32),
         },
-        true,
+        granted_read(),
     );
 
     assert_eq!(result["available"], true, "{result}");
@@ -2745,7 +2826,7 @@ fn data_children_returns_empty_page_for_absent_members() {
             limit: 1,
             cursor: None,
         },
-        true,
+        granted_read(),
     );
 
     assert_eq!(result["available"], true, "{result}");
@@ -2768,7 +2849,7 @@ fn data_children_returns_empty_page_for_absent_keyless_root() {
             limit: 1,
             cursor: None,
         },
-        true,
+        granted_read(),
     );
 
     assert_eq!(result["available"], true, "{result}");

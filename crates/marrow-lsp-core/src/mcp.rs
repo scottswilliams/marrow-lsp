@@ -9,11 +9,14 @@
 //!
 //! Two boundaries are enforced here, not in the transport:
 //!
-//! - **Data access** ([`saved_roots`], [`surface_read`], [`surface_write`]) reads
-//!   a project's real stored tree, so the transport gates it behind an explicit
-//!   opt-in and passes `allow_data = false` otherwise; the function then returns
-//!   a clear refusal envelope and never touches the store. [`surface_routes`]
-//!   reads only source/catalog facts and stays outside this gate.
+//! - **Data access** reads a project's real stored tree. Reads
+//!   ([`saved_roots`], [`surface_read`], data children/read) take a [`ReadAccess`]
+//!   grant and writes ([`surface_write`]) take a distinct [`WriteAccess`] grant, so
+//!   read and write are opted into separately and a read-only session cannot reach
+//!   the writable executor. Without the matching grant the function returns a clear
+//!   refusal envelope and never touches the store; every granted write appends a
+//!   record to the project's append-only audit trail. [`surface_routes`] reads only
+//!   source/catalog facts and stays outside this gate.
 //! - **Execution** ([`run`]) evaluates a function through Marrow's fresh-memory
 //!   project session — never the project's real store — under a locked-down
 //!   [`Host`] that grants only a deterministic clock and a captured log: no
@@ -137,6 +140,10 @@ fn surface_write_contract() -> Json {
     let mut contract = production_contract("surface write operation");
     contract["basis"] = json!("Marrow surface operation writable executor");
     contract["dataAccess"] = json!("gated");
+    // The write opt-in is a separate gate from read data access: a read-only
+    // session cannot reach this executor, so the contract names the two grants
+    // apart rather than folding them into one "data access" bit.
+    contract["writeOptIn"] = json!("gated");
     contract["operations"] = json!("read/update/action");
     contract
 }
@@ -212,6 +219,84 @@ fn tool_error(mut result: Json) -> Json {
         object.insert("tool_error".to_string(), json!(true));
     }
     result
+}
+
+/// Proof that the operator opted this session into reading a project's real stored
+/// data. A read-only data tool takes one, so the read path is entered only with an
+/// explicit read grant — never a shared bit that also authorizes writes.
+#[derive(Clone, Copy)]
+pub struct ReadAccess(());
+
+/// Proof that the operator opted this session into writing a project's real stored
+/// data. Distinct from [`ReadAccess`]: [`surface_write`] takes a `WriteAccess`, so
+/// a read-only grant cannot reach the writable executor — the single shared
+/// "data access" bit that once authorized both is now unrepresentable in the type
+/// system, not merely unset at runtime.
+#[derive(Clone, Copy)]
+pub struct WriteAccess(());
+
+impl ReadAccess {
+    /// The read grant the transport hands a data read when the operator opted in.
+    pub fn granted() -> Self {
+        Self(())
+    }
+}
+
+impl WriteAccess {
+    /// The write grant the transport hands [`surface_write`] when the operator
+    /// opted into writes specifically, separately from reads.
+    pub fn granted() -> Self {
+        Self(())
+    }
+}
+
+/// The append-only file, at the project root, that records every granted surface
+/// write. A data-enabled server that mutates the real store leaves a durable trail
+/// beside it, so an operator can reconstruct exactly what an agent changed.
+const WRITE_AUDIT_FILE: &str = "marrow-mcp-write-audit.jsonl";
+
+/// One entry in the write-audit trail: which operation ran against which entry
+/// file, and the store's identity immediately before and after, so a reader can
+/// tell whether the write advanced the store and by how much.
+#[derive(Clone, serde::Serialize)]
+struct WriteAuditRecord {
+    operation_tag: String,
+    file: PathBuf,
+    request_kind: String,
+    store_before: Option<AuditStoreStamp>,
+    store_after: Option<AuditStoreStamp>,
+}
+
+/// The store identity captured in an audit record: the durable store id and its
+/// commit counter, enough to prove a write moved the store forward.
+#[derive(Clone, serde::Serialize)]
+struct AuditStoreStamp {
+    store_uid: String,
+    commit_id: u64,
+}
+
+impl From<&StoreStamp> for AuditStoreStamp {
+    fn from(stamp: &StoreStamp) -> Self {
+        Self {
+            store_uid: stamp.store_uid.clone(),
+            commit_id: stamp.commit_id,
+        }
+    }
+}
+
+/// Append one JSON line to the project's write-audit trail. Best-effort: the store
+/// mutation is already durable by the time we record it, so a failed append is
+/// surfaced to the caller rather than pretended away, but it cannot roll the write
+/// back.
+fn append_write_audit(root: &Path, record: &WriteAuditRecord) -> Result<(), String> {
+    use std::io::Write as _;
+    let line = serde_json::to_string(record).map_err(|error| error.to_string())?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join(WRITE_AUDIT_FILE))
+        .map_err(|error| error.to_string())?;
+    writeln!(file, "{line}").map_err(|error| error.to_string())
 }
 
 thread_local! {
@@ -720,10 +805,14 @@ fn empty_surface_route_manifest(error: impl Into<String>) -> Json {
 /// through Marrow's read-only project surface executor. The MCP data-access gate
 /// is checked before project or store opening; operation bodies are admitted only
 /// by the Marrow JSON DTO and executor.
-pub fn surface_read(file: &Path, operation: Json, allow_data: bool) -> Result<Json, String> {
+pub fn surface_read(
+    file: &Path,
+    operation: Json,
+    access: Option<ReadAccess>,
+) -> Result<Json, String> {
     let contract = surface_read_contract();
-    if !allow_data {
-        return Ok(data_disabled(contract));
+    if access.is_none() {
+        return Ok(read_disabled(contract));
     }
     let request: SurfaceOperationRequestJson = serde_json::from_value(operation)
         .map_err(|error| format!("invalid mw_surface_read operation: {error}"))?;
@@ -759,14 +848,26 @@ pub fn surface_read(file: &Path, operation: Json, allow_data: bool) -> Result<Js
 /// through Marrow's writable project surface executor. The MCP data-access gate
 /// is checked before project or store opening; operation bodies are admitted only
 /// by the Marrow JSON DTO and executor.
-pub fn surface_write(file: &Path, operation: Json, allow_data: bool) -> Result<Json, String> {
+pub fn surface_write(
+    file: &Path,
+    operation: Json,
+    access: Option<WriteAccess>,
+) -> Result<Json, String> {
     let contract = surface_write_contract();
-    if !allow_data {
-        return Ok(data_disabled(contract));
+    if access.is_none() {
+        return Ok(write_disabled(contract));
     }
+    // The operation tag and request kind name what this write does; read them off
+    // the raw envelope before it is consumed by the DTO, so the audit record can
+    // describe the write even when the DTO's internals are opaque here.
+    let operation_tag = json_str(&operation, "operation_tag");
+    let request_kind = operation
+        .get("request")
+        .map(|request| json_str(request, "kind"))
+        .unwrap_or_default();
     let request: SurfaceOperationRequestJson = serde_json::from_value(operation)
         .map_err(|error| format!("invalid mw_surface_write operation: {error}"))?;
-    let result = with_loaded_project(file, None, |workspace, _| {
+    let result = with_loaded_project(file, None, |workspace, resolved_file| {
         let Some(project) = workspace.project() else {
             return json!({ "available": false, "error": "no project resolved for the file" });
         };
@@ -774,17 +875,33 @@ pub fn surface_write(file: &Path, operation: Json, allow_data: bool) -> Result<J
             Ok(session) => session,
             Err(error) => return json!({ "available": false, "error": error.message() }),
         };
+        let store_before = session.store_stamp().ok();
         let operation_result = execute_project_surface_operation(&session, &request);
-        let store_stamp = match session.store_stamp() {
-            Ok(stamp) => store_stamp_json(stamp),
+        let store_after = match session.store_stamp() {
+            Ok(stamp) => stamp,
             Err(error) => return json!({ "available": false, "error": error.message() }),
         };
-        match operation_result {
+        let record = WriteAuditRecord {
+            operation_tag: operation_tag.clone(),
+            file: resolved_file.to_path_buf(),
+            request_kind: request_kind.clone(),
+            store_before: store_before.as_ref().map(AuditStoreStamp::from),
+            store_after: Some(AuditStoreStamp::from(&store_after)),
+        };
+        let audit_error = append_write_audit(&project.root, &record).err();
+        let audit = serde_json::to_value(&record).expect("write-audit record serializes");
+        let store_stamp = store_stamp_json(store_after);
+        let mut value = match operation_result {
             Ok(response) => {
                 json!({ "available": true, "store_stamp": store_stamp, "response": response })
             }
             Err(error) => json!({ "available": true, "store_stamp": store_stamp, "error": error }),
+        };
+        value["audit"] = audit;
+        if let Some(error) = audit_error {
+            value["audit_error"] = json!(error);
         }
+        value
     });
     Ok(match result {
         Ok(result) => with_contract(result, contract),
@@ -793,6 +910,16 @@ pub fn surface_write(file: &Path, operation: Json, allow_data: bool) -> Result<J
             contract,
         ),
     })
+}
+
+/// A string field read off a JSON object, or the empty string when it is missing
+/// or not a string. Used to describe a surface operation in the audit trail.
+fn json_str(value: &Json, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Json::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn store_stamp_json(stamp: StoreStamp) -> Json {
@@ -808,10 +935,10 @@ fn store_stamp_json(stamp: StoreStamp) -> Json {
 /// function returns a refusal envelope and never opens the store. A project with
 /// no native store, or a store that cannot be read right now, answers
 /// `available: false`.
-pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
+pub fn saved_roots(file: &Path, access: Option<ReadAccess>) -> Json {
     let contract = saved_roots_contract();
-    if !allow_data {
-        return data_disabled(contract);
+    if access.is_none() {
+        return read_disabled(contract);
     }
     let result = with_loaded_project(file, None, |workspace, _| {
         let session = match data_session(workspace) {
@@ -837,10 +964,14 @@ pub fn saved_roots(file: &Path, allow_data: bool) -> Json {
 /// path. Gated like [`saved_roots`]: disabled data access refuses before project
 /// loading, while enabled access checks the project and opens the native store
 /// read-only for one shared Marrow session read.
-pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool) -> Json {
+pub fn data_children(
+    file: &Path,
+    request: DataChildrenRequest,
+    access: Option<ReadAccess>,
+) -> Json {
     let contract = data_children_contract();
-    if !allow_data {
-        return data_disabled(contract);
+    if access.is_none() {
+        return read_disabled(contract);
     }
     let unavailable = json!({
         "available": false,
@@ -892,10 +1023,10 @@ pub fn data_children(file: &Path, request: DataChildrenRequest, allow_data: bool
 /// Gated like [`data_children`]: disabled data access refuses before project
 /// loading, while enabled access checks the project and opens the native store
 /// read-only for one shared Marrow session read.
-pub fn data_read(file: &Path, request: DataReadRequest, allow_data: bool) -> Json {
+pub fn data_read(file: &Path, request: DataReadRequest, access: Option<ReadAccess>) -> Json {
     let contract = data_read_contract();
-    if !allow_data {
-        return data_disabled(contract);
+    if access.is_none() {
+        return read_disabled(contract);
     }
     let unavailable = json!({
         "available": false,
@@ -950,16 +1081,32 @@ fn data_session(workspace: &Workspace) -> Result<Option<SavedDataSession>, Strin
     open_saved_data_session(project)
 }
 
-/// The refusal a data tool returns when data access is not enabled: a clear,
+/// The refusal a read data tool returns when read access is not enabled: a clear,
 /// machine-readable envelope that carries no stored data. The transport sets the
 /// opt-in (an env var / launch flag); the boundary itself lives here so a missing
 /// opt-in can never leak a byte regardless of transport.
-fn data_disabled(contract: Json) -> Json {
+fn read_disabled(contract: Json) -> Json {
     with_contract(
         json!({
             "available": false,
             "dataAccess": "disabled",
             "message": "data access not enabled; relaunch marrow-mcp with MARROW_MCP_ALLOW_DATA=1 (or --allow-data) to read stored data",
+        }),
+        contract,
+    )
+}
+
+/// The refusal [`surface_write`] returns when the write opt-in is not set. Write
+/// access is a separate grant from read: a session may read stored data yet still
+/// refuse to mutate it, so the write refusal names its own opt-in and never opens
+/// the writable executor.
+fn write_disabled(contract: Json) -> Json {
+    with_contract(
+        json!({
+            "available": false,
+            "dataAccess": "disabled",
+            "writeOptIn": "disabled",
+            "message": "write access not enabled; relaunch marrow-mcp with MARROW_MCP_ALLOW_WRITE=1 (or --allow-write) to mutate stored data",
         }),
         contract,
     )

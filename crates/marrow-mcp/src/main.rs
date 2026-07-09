@@ -10,12 +10,15 @@
 //!
 //! ## Data-access gate
 //! Saved-root, data-inspection, and surface operation tools read a project's real
-//! stored data, so they are a data-exfiltration boundary. They are disabled
-//! unless the operator opts in at launch with `MARROW_MCP_ALLOW_DATA=1` (or the
-//! `--allow-data` flag). When disabled, those tools return a clear refusal and
-//! read nothing. Surface route listing reads only source/catalog facts and stays
-//! outside this gate. Execution (`mw_run`) is always sandboxed (a fresh in-memory
-//! store, a locked-down host), so it needs no gate.
+//! stored data, so they are a data-exfiltration boundary. Reads are disabled unless
+//! the operator opts in at launch with `MARROW_MCP_ALLOW_DATA=1` (or `--allow-data`).
+//! Writing stored data is a separate, stronger opt-in: `mw_surface_write` mutates the
+//! real store, so it stays refused until `MARROW_MCP_ALLOW_WRITE=1` (or `--allow-write`)
+//! is set, and enabling writes implies read access. Every granted write appends a
+//! record to an append-only audit trail beside the project. When a grant is missing,
+//! the tool returns a clear refusal and touches nothing. Surface route listing reads
+//! only source/catalog facts and stays outside this gate. Execution (`mw_run`) is
+//! always sandboxed (a fresh in-memory store, a locked-down host), so it needs no gate.
 
 mod server;
 
@@ -42,14 +45,24 @@ const INVALID_PARAMS: i64 = -32602;
 const METHOD_NOT_FOUND: i64 = -32601;
 
 fn main() {
-    let policy = Policy::new(data_access_enabled(), run_budget());
+    // Enabling writes implies read access: a writable session must be able to read
+    // the store it mutates, and a write-only grant would be a confusing half-state.
+    let allow_write = write_access_enabled();
+    let allow_read = read_access_enabled() || allow_write;
+    let policy = Policy::new(allow_read, allow_write, run_budget());
     // Startup is observable in the agent's stderr/output channel; note whether the
-    // data tools are armed so an operator can confirm the gate's state at a glance.
+    // data tools are armed — and separately whether writes are — so an operator can
+    // confirm the gate's state at a glance.
     eprintln!(
-        "{} starting (version {}, data tools {})",
+        "{} starting (version {}, data reads {}, data writes {})",
         stderr_notice("marrow-mcp:"),
         env!("CARGO_PKG_VERSION"),
-        if policy.allow_data {
+        if policy.allow_read {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if policy.allow_write {
             "enabled"
         } else {
             "disabled"
@@ -77,13 +90,26 @@ fn run_budget() -> Duration {
 
 /// Whether the data tools may read real stored data: enabled by `--allow-data` on
 /// the command line or a truthy `MARROW_MCP_ALLOW_DATA` in the environment.
-/// Anything else (the default) keeps data access off.
-fn data_access_enabled() -> bool {
-    if std::env::args().any(|arg| arg == "--allow-data") {
+/// Anything else (the default) keeps read access off.
+fn read_access_enabled() -> bool {
+    flag_enabled("--allow-data", "MARROW_MCP_ALLOW_DATA")
+}
+
+/// Whether `mw_surface_write` may mutate real stored data: enabled by
+/// `--allow-write` or a truthy `MARROW_MCP_ALLOW_WRITE`. This is a separate,
+/// stronger opt-in than read access, so a read-only deployment cannot be talked
+/// into a destructive write.
+fn write_access_enabled() -> bool {
+    flag_enabled("--allow-write", "MARROW_MCP_ALLOW_WRITE")
+}
+
+/// Whether an opt-in is set, by its command-line flag or a truthy env var.
+fn flag_enabled(flag: &str, env_var: &str) -> bool {
+    if std::env::args().any(|arg| arg == flag) {
         return true;
     }
     matches!(
-        std::env::var("MARROW_MCP_ALLOW_DATA").as_deref(),
+        std::env::var(env_var).as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     )
 }
@@ -587,10 +613,7 @@ mod tests {
         // With a run budget the looping call must fault at the deadline and the
         // very next tool call must still be answered on the same server loop.
         let (_dir, file) = looping_project();
-        let policy = Policy {
-            allow_data: false,
-            run_budget: std::time::Duration::from_millis(300),
-        };
+        let policy = Policy::new(false, false, std::time::Duration::from_millis(300));
         let replies = drive(
             &[
                 json!({
@@ -628,7 +651,7 @@ mod tests {
 
     #[test]
     fn initialize_negotiates_the_requested_protocol_version() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[
                 // A supported version is echoed back.
@@ -647,7 +670,7 @@ mod tests {
 
     #[test]
     fn is_error_flags_a_tool_fault_but_not_a_check_failure() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[
                 // An unreadable project (no marrow.json anywhere up the path) is a
@@ -700,7 +723,7 @@ mod tests {
 
     #[test]
     fn initialize_then_list_tools_returns_the_catalog() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[
                 json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
@@ -719,7 +742,7 @@ mod tests {
 
     #[test]
     fn tools_call_to_surface_write_refuses_when_data_access_is_disabled() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({
                 "jsonrpc": "2.0",
@@ -764,7 +787,7 @@ mod tests {
 
     #[test]
     fn a_tools_call_to_mw_check_returns_a_diagnostic_envelope() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({
                 "jsonrpc": "2.0",
@@ -1100,7 +1123,7 @@ mod tests {
 
     #[test]
     fn supported_methods_reject_concrete_non_object_params() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let cases = [
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [] }),
             json!({ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": "bad" }),
@@ -1125,7 +1148,7 @@ mod tests {
 
     #[test]
     fn request_params_null_absent_and_precedence_guards() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[
                 json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
@@ -1162,7 +1185,7 @@ mod tests {
 
     #[test]
     fn tools_call_rejects_concrete_non_object_params_and_arguments() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let request = |params: Json| json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
         let mw_check = |arguments: Json| json!({ "name": "mw_check", "arguments": arguments });
         let cases = [
@@ -1189,7 +1212,7 @@ mod tests {
 
     #[test]
     fn tools_call_null_params_and_arguments_remain_absent() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
 
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": null })],
@@ -1239,7 +1262,7 @@ mod tests {
 
     #[test]
     fn an_unknown_method_is_a_method_not_found_error() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "id": 7, "method": "frobnicate" })],
             policy,
@@ -1249,7 +1272,7 @@ mod tests {
 
     #[test]
     fn a_notification_draws_no_reply() {
-        let policy = Policy::new(false, DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, DEFAULT_RUN_BUDGET);
         let replies = drive(
             &[json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })],
             policy,

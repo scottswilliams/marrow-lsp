@@ -40,22 +40,41 @@ pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
     }
 }
 
-/// The server's runtime policy: whether the data tools may read real stored data
-/// and how long a single `mw_run` may execute. Set once at launch from the
-/// environment / flags and never mutated, so a tool can never escalate its own
-/// access or budget mid-session.
+/// The server's runtime policy: whether the data tools may read real stored data,
+/// whether they may write it (a separate opt-in from read), and how long a single
+/// `mw_run` may execute. Set once at launch from the environment / flags and never
+/// mutated, so a tool can never escalate its own access or budget mid-session.
+///
+/// Read and write are separate grants rather than one "data access" bit: the read
+/// tools receive a [`ReadAccess`](mcp::ReadAccess) and `mw_surface_write` receives a
+/// distinct [`WriteAccess`](mcp::WriteAccess), so a read-only policy yields no write
+/// grant and the writable executor is unreachable — not merely gated at runtime.
 #[derive(Clone, Copy)]
 pub struct Policy {
-    pub allow_data: bool,
+    pub allow_read: bool,
+    pub allow_write: bool,
     pub run_budget: Duration,
 }
 
 impl Policy {
-    pub fn new(allow_data: bool, run_budget: Duration) -> Self {
+    pub fn new(allow_read: bool, allow_write: bool, run_budget: Duration) -> Self {
         Self {
-            allow_data,
+            allow_read,
+            allow_write,
             run_budget,
         }
+    }
+
+    /// The read grant to hand a data read, present only when read access is on.
+    fn read_access(&self) -> Option<mcp::ReadAccess> {
+        self.allow_read.then(mcp::ReadAccess::granted)
+    }
+
+    /// The write grant to hand `mw_surface_write`, present only when the write
+    /// opt-in is on. A read-only policy returns `None` here, so the write path is
+    /// never entered — the read grant is a different type and cannot substitute.
+    fn write_access(&self) -> Option<mcp::WriteAccess> {
+        self.allow_write.then(mcp::WriteAccess::granted)
     }
 }
 
@@ -304,6 +323,7 @@ pub fn tools() -> Json {
                 "basis": "Marrow surface operation writable executor",
                 "missingFacts": [],
                 "dataAccess": "gated",
+                "writeOptIn": "gated",
                 "operations": "read/update/action",
             })),
             "inputSchema": {
@@ -447,26 +467,26 @@ pub fn call(name: &str, arguments: &Json, policy: Policy) -> Result<Json, String
         "mw_surface_read" => {
             let file = required_path(arguments, "file")?;
             let operation = required_object(arguments, "operation")?;
-            mcp::surface_read(&file, operation, policy.allow_data)
+            mcp::surface_read(&file, operation, policy.read_access())
         }
         "mw_surface_write" => {
             let file = required_path(arguments, "file")?;
             let operation = required_object(arguments, "operation")?;
-            mcp::surface_write(&file, operation, policy.allow_data)
+            mcp::surface_write(&file, operation, policy.write_access())
         }
         "mw_saved_roots" => {
             let file = required_path(arguments, "file")?;
-            Ok(mcp::saved_roots(&file, policy.allow_data))
+            Ok(mcp::saved_roots(&file, policy.read_access()))
         }
         "mw_data_children" => {
             let file = required_path(arguments, "file")?;
             let request = data_children_request(arguments)?;
-            Ok(mcp::data_children(&file, request, policy.allow_data))
+            Ok(mcp::data_children(&file, request, policy.read_access()))
         }
         "mw_data_read" => {
             let file = required_path(arguments, "file")?;
             let request = data_read_request(arguments)?;
-            Ok(mcp::data_read(&file, request, policy.allow_data))
+            Ok(mcp::data_read(&file, request, policy.read_access()))
         }
         "mw_run" => {
             let file = required_path(arguments, "file")?;
@@ -757,6 +777,10 @@ mod tests {
             Vec::<String>::new()
         );
         assert_eq!(surface_write["dataAccess"], "gated");
+        // The write opt-in is declared distinct from read data access, so an agent
+        // reading the contract can tell that writing needs its own grant.
+        assert_eq!(surface_write["writeOptIn"], "gated");
+        assert_eq!(surface_read.get("writeOptIn"), None);
         assert_eq!(surface_write["operations"], "read/update/action");
     }
 
@@ -957,13 +981,13 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_is_an_error() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         assert!(call("mw_nope", &json!({}), policy).is_err());
     }
 
     #[test]
     fn retired_data_integrity_tool_is_not_callable() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_data_integrity",
             &json!({ "file": "/nope/x.mw" }),
@@ -977,7 +1001,7 @@ mod tests {
 
     #[test]
     fn a_data_tool_refuses_when_the_policy_disallows_it() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         // A nonexistent file is fine: the gate is checked before any project load,
         // so the refusal envelope comes back without touching the filesystem.
         let result = call("mw_saved_roots", &json!({ "file": "/nope/x.mw" }), policy).unwrap();
@@ -1048,14 +1072,64 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_policy_refuses_a_surface_write() {
+        // The trust-critical case the read/write split exists for: reads are opted
+        // in, writes are not. Under the old shared "data access" bit this exact
+        // policy would have authorized a destructive write; now `write_access()`
+        // yields `None` for a read-only policy, so `mw_surface_write` refuses before
+        // opening the store, while a read stays permitted.
+        let read_only = Policy::new(true, false, mcp::DEFAULT_RUN_BUDGET);
+
+        let write = call(
+            "mw_surface_write",
+            &json!({
+                "file": "/nope/x.mw",
+                "operation": {
+                    "profile_version": "surface.operation.v1",
+                    "operation_tag": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "request": {
+                        "kind": "point_update",
+                        "request": {
+                            "identity": {
+                                "store_catalog_id": "cat_00000000000000000000000000000000",
+                                "keys": [{ "kind": "int", "value": "1" }]
+                            },
+                            "fields": []
+                        }
+                    }
+                }
+            }),
+            read_only,
+        )
+        .unwrap();
+        assert_eq!(write["dataAccess"], "disabled", "{write}");
+        assert_eq!(write["writeOptIn"], "disabled", "{write}");
+        assert!(
+            write.get("audit").is_none() && write.get("store_stamp").is_none(),
+            "a refused write must not open the store or emit an audit record: {write}"
+        );
+
+        // The same policy still permits a read: read and write are independent
+        // grants. With the read grant present the call gets past the access gate to
+        // operation parsing / project loading, so it is never a data-access refusal.
+        let read = call(
+            "mw_saved_roots",
+            &json!({ "file": "/nope/x.mw" }),
+            read_only,
+        )
+        .unwrap();
+        assert_ne!(read["dataAccess"], "disabled", "{read}");
+    }
+
+    #[test]
     fn a_missing_required_argument_is_an_error() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         assert!(call("mw_type_at", &json!({ "file": "/x.mw", "line": 0 }), policy).is_err());
     }
 
     #[test]
     fn mw_resource_schema_requires_a_named_resource() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         let error = call("mw_resource_schema", &json!({ "file": "/x.mw" }), policy)
             .expect_err("mw_resource_schema must require a resource name");
         assert!(
@@ -1066,7 +1140,7 @@ mod tests {
 
     #[test]
     fn mw_namespace_complete_rejects_malformed_qualifier_before_project_loading() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         for arguments in [
             json!({ "file": "/nope/project/src/main.mw" }),
             json!({ "file": "/nope/project/src/main.mw", "qualifier": null }),
@@ -1090,7 +1164,7 @@ mod tests {
 
     #[test]
     fn mw_data_children_rejects_invalid_typed_arguments() {
-        let policy = Policy::new(true, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(true, false, mcp::DEFAULT_RUN_BUDGET);
         for arguments in [
             json!({
                 "file": "/nope/project/src/main.mw",
@@ -1124,7 +1198,7 @@ mod tests {
 
     #[test]
     fn mw_data_read_rejects_invalid_typed_arguments() {
-        let policy = Policy::new(true, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(true, false, mcp::DEFAULT_RUN_BUDGET);
         for arguments in [
             json!({
                 "file": "/nope/project/src/main.mw",
@@ -1155,7 +1229,7 @@ mod tests {
 
     #[test]
     fn tool_arguments_reject_non_array_run_args() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         let error = call(
             "mw_run",
             &json!({
@@ -1174,7 +1248,7 @@ mod tests {
 
     #[test]
     fn optional_string_arguments_reject_concrete_non_strings() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         let cases = [
             (
                 "mw_check",
@@ -1202,7 +1276,7 @@ mod tests {
 
     #[test]
     fn optional_string_nulls_remain_absent() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
 
         let result = call(
             "mw_run",
@@ -1235,7 +1309,7 @@ mod tests {
 
     #[test]
     fn mw_run_rejects_numeric_typed_int_args() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_run",
             &json!({
@@ -1256,7 +1330,7 @@ mod tests {
 
     #[test]
     fn mw_run_rejects_malformed_typed_args() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_run",
             &json!({
@@ -1275,7 +1349,7 @@ mod tests {
 
     #[test]
     fn mw_run_rejects_test_mode_args() {
-        let policy = Policy::new(false, mcp::DEFAULT_RUN_BUDGET);
+        let policy = Policy::new(false, false, mcp::DEFAULT_RUN_BUDGET);
         let result = call(
             "mw_run",
             &json!({
