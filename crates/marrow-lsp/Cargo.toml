@@ -24,6 +24,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "syn
 serde_json = "1"
 
 [dev-dependencies]
+# `test-util` enables tokio's paused virtual clock for the deterministic
+# non-blocking harness; it stays test-only so the shipped binary never links it.
+tokio = { version = "1", features = ["test-util"] }
 marrow-check = { workspace = true, features = ["test-support"] }
 marrow-project.workspace = true
 marrow-run.workspace = true

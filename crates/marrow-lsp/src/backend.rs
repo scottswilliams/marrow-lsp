@@ -2101,6 +2101,39 @@ fn snapshot_has_document_text(
 mod tests {
     use super::*;
 
+    /// Deadline for the non-blocking assertions. These tests run under
+    /// `start_paused`, so this is virtual time, not wall-clock: a handler that returns
+    /// without blocking resolves at ~0 virtual ms and never trips it, while one parked
+    /// on a held lock deterministically hits it. The magnitude is therefore irrelevant;
+    /// naming it keeps a bare wall-clock literal — the old source of load-sensitive
+    /// flakiness — out of every timeout deadline.
+    const NONBLOCKING_DEADLINE: Duration = Duration::from_millis(50);
+
+    /// Upper bound for a scheduled recompute to drain its pending invalidation. The
+    /// poll loop advances the paused clock in small steps until the bit clears, so this
+    /// is a virtual-time ceiling that fails deterministically if the drain never lands.
+    const SCHEDULED_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
+
+    /// Every non-blocking assertion must express its deadline through the named
+    /// virtual-time constant, never a bare `Duration::from_*` literal. Under
+    /// `start_paused` the timeout resolves in virtual time; a wall-clock literal in a
+    /// timeout is precisely the flaky pattern this harness replaced, so a reader can
+    /// trust that a red timeout means a real deadlock, not a slow machine.
+    #[test]
+    fn non_blocking_timeouts_use_the_virtual_deadline_not_a_wall_clock_literal() {
+        let source = include_str!("backend.rs");
+        let needle = "time::timeout(";
+        for (index, _) in source.match_indices(needle) {
+            let after = &source[index + needle.len()..];
+            let deadline = &after[..after.find(',').unwrap_or(after.len())];
+            assert!(
+                !deadline.contains("Duration::from_"),
+                "a timeout deadline must be the named virtual constant, not the \
+                 wall-clock literal `{deadline}`"
+            );
+        }
+    }
+
     /// A full request hands back a `result_id`; a follow-up delta request that echoes
     /// it must return incremental edits against the previously returned stream — not a
     /// full re-encode — and an unrecognized base id must degrade to a full response.
@@ -2800,7 +2833,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn live_document_access_does_not_wait_for_analysis_state_lock() {
         let url = Url::parse("file:///tmp/project/src/app.mw").unwrap();
         let mut documents = Documents::new();
@@ -2813,7 +2846,7 @@ mod tests {
 
         let analysis_guard = analysis.lock().await;
         let documents_for_request = Arc::clone(&documents);
-        let result = tokio::time::timeout(std::time::Duration::from_millis(20), async move {
+        let result = tokio::time::timeout(NONBLOCKING_DEADLINE, async move {
             documents_for_request
                 .lock()
                 .await
@@ -2830,7 +2863,7 @@ mod tests {
         assert_eq!(result.unwrap(), Some(Some(1)));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn live_document_notifications_and_outline_do_not_wait_for_recompute() {
         let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
         let backend = service.inner();
@@ -2888,7 +2921,7 @@ mod tests {
         });
         gate.wait_until_entered().await;
 
-        let changed = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        let changed = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
             <Backend as LanguageServer>::did_change(
                 backend,
                 DidChangeTextDocumentParams {
@@ -2911,7 +2944,7 @@ mod tests {
             "didChange must update live documents without waiting for project recompute"
         );
 
-        let symbols = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        let symbols = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
             <Backend as LanguageServer>::document_symbol(
                 backend,
                 DocumentSymbolParams {
@@ -2931,7 +2964,7 @@ mod tests {
         );
 
         let unrelated_url = Url::from_file_path(dir.path().join("scratch.mw")).unwrap();
-        let watched = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        let watched = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
             <Backend as LanguageServer>::did_change_watched_files(
                 backend,
                 DidChangeWatchedFilesParams {
@@ -2967,7 +3000,7 @@ mod tests {
             "an off-pump recompute leaves the data lock free, so a tracked watched-file change applies directly"
         );
 
-        let hover = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        let hover = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
             <Backend as LanguageServer>::hover(
                 backend,
                 HoverParams {
@@ -2991,7 +3024,7 @@ mod tests {
             "analysis-backed hover should return null while fresh analysis is unavailable"
         );
 
-        let closed = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        let closed = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
             <Backend as LanguageServer>::did_close(
                 backend,
                 DidCloseTextDocumentParams {
@@ -3484,7 +3517,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn busy_watcher_config_delete_clear_waits_for_publish_order() {
         let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
         let backend = service.inner();
@@ -3518,7 +3551,7 @@ mod tests {
         );
         tokio::pin!(clear);
 
-        let blocked = tokio::time::timeout(std::time::Duration::from_millis(20), &mut clear).await;
+        let blocked = tokio::time::timeout(NONBLOCKING_DEADLINE, &mut clear).await;
         assert!(
             blocked.is_err(),
             "config-delete clears must wait for diagnostic publish ordering"
@@ -3534,7 +3567,7 @@ mod tests {
         assert!(backend.diagnostics.lock().await.is_tracked(&root, &bad_url));
 
         drop(publish_guard);
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut clear)
+        tokio::time::timeout(NONBLOCKING_DEADLINE, &mut clear)
             .await
             .expect("clear should publish after the publish ordering lock is released");
         assert_ne!(
@@ -3564,7 +3597,7 @@ mod tests {
             0,
             "duplicate normal config-delete events must drain pending invalidation before they can stale the busy drain epoch"
         );
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(SCHEDULED_DRAIN_DEADLINE, async {
             loop {
                 if backend
                     .pending_workspace_invalidation
@@ -3581,7 +3614,7 @@ mod tests {
         .expect("busy config delete should schedule a recompute to drain pending invalidation");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn busy_watcher_sets_pending_before_waiting_on_diagnostics() {
         let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
         let backend = service.inner();
@@ -3611,7 +3644,7 @@ mod tests {
         tokio::pin!(watched);
 
         let blocked =
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut watched).await;
+            tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched).await;
         assert!(
             blocked.is_err(),
             "test setup should leave the busy watcher queued on diagnostics"
@@ -3626,13 +3659,13 @@ mod tests {
         );
 
         drop(diagnostics_guard);
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut watched)
+        tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched)
             .await
             .expect("watcher should finish once diagnostics lock is released");
         drop(analysis_guard);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn busy_watcher_holds_publish_before_first_await() {
         let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
         let backend = service.inner();
@@ -3662,7 +3695,7 @@ mod tests {
         tokio::pin!(watched);
 
         let blocked =
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut watched).await;
+            tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched).await;
         assert!(
             blocked.is_err(),
             "test setup should leave the watcher queued on the document snapshot"
@@ -3673,7 +3706,7 @@ mod tests {
         );
 
         drop(documents_guard);
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut watched)
+        tokio::time::timeout(NONBLOCKING_DEADLINE, &mut watched)
             .await
             .expect("watcher should finish once the document lock is released");
         assert_ne!(
@@ -3687,14 +3720,14 @@ mod tests {
         drop(analysis_guard);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn saved_data_requests_do_not_wait_for_recompute() {
         let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
         let backend = service.inner();
         let analysis_guard = backend.analysis.lock().await;
 
         let roots =
-            tokio::time::timeout(std::time::Duration::from_millis(50), backend.saved_roots()).await;
+            tokio::time::timeout(NONBLOCKING_DEADLINE, backend.saved_roots()).await;
         assert!(
             roots.is_ok(),
             "savedRoots must return unavailable instead of waiting for analysis"
@@ -3702,7 +3735,7 @@ mod tests {
         assert!(!roots.unwrap().unwrap().available);
 
         let children = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
+            NONBLOCKING_DEADLINE,
             backend.data_children(DataChildrenRequest {
                 segments: vec![marrow_lsp_core::data_explorer::DataPathSegmentDto::Root {
                     store_catalog_id: "cat_00000000000000000000000000000001".into(),
@@ -3719,7 +3752,7 @@ mod tests {
         assert!(!children.unwrap().unwrap().available);
 
         let read = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
+            NONBLOCKING_DEADLINE,
             backend.data_read(DataReadRequest {
                 segments: vec![marrow_lsp_core::data_explorer::DataPathSegmentDto::Root {
                     store_catalog_id: "cat_00000000000000000000000000000001".into(),
@@ -3735,7 +3768,7 @@ mod tests {
         assert!(!read.unwrap().unwrap().available);
 
         let watch_targets = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
+            NONBLOCKING_DEADLINE,
             backend.data_watch_targets(),
         )
         .await;
