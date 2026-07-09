@@ -12,6 +12,7 @@ import {
   SavedResourceProvider,
   type SavedResourceNode,
 } from "./savedResourceInspector";
+import { type LauncherHost, type LauncherMode, resolveBinaryPath } from "./launcher";
 
 let client: LanguageClient | undefined;
 
@@ -262,49 +263,29 @@ export async function deactivate(): Promise<void> {
   client = undefined;
 }
 
+function launcherHost(context: vscode.ExtensionContext): LauncherHost {
+  const mode: LauncherMode =
+    context.extensionMode === vscode.ExtensionMode.Production ? "production" : "development";
+  return {
+    configuredPath: (setting) => vscode.workspace.getConfiguration("marrow").get<string>(setting),
+    extensionPath: context.extensionPath,
+    mode,
+    isFile: (candidate) => {
+      try {
+        return fs.statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
 function resolveServerPath(context: vscode.ExtensionContext): string | undefined {
-  return resolveBinaryPath(context, "server.path", SERVER_BINARY);
+  return resolveBinaryPath(launcherHost(context), "server.path", SERVER_BINARY);
 }
 
 function resolveDapPath(context: vscode.ExtensionContext): string | undefined {
-  return resolveBinaryPath(context, "dap.path", DAP_BINARY);
-}
-
-function resolveBinaryPath(
-  context: vscode.ExtensionContext,
-  setting: string,
-  binary: string,
-): string | undefined {
-  const configured = vscode.workspace
-    .getConfiguration("marrow")
-    .get<string>(setting)
-    ?.trim();
-  if (configured) {
-    return isUsableBinary(configured) ? configured : undefined;
-  }
-
-  const bundled = path.join(context.extensionPath, "server", binary);
-  if (isUsableBinary(bundled)) {
-    return bundled;
-  }
-
-  const dev = path.join(context.extensionPath, "..", "..", "target", "debug", binary);
-  if (context.extensionMode !== vscode.ExtensionMode.Production && isUsableBinary(dev)) {
-    return dev;
-  }
-
-  return undefined;
-}
-
-function isUsableBinary(file: string): boolean {
-  if (!path.isAbsolute(file)) {
-    return false;
-  }
-  try {
-    return fs.statSync(file).isFile();
-  } catch {
-    return false;
-  }
+  return resolveBinaryPath(launcherHost(context), "dap.path", DAP_BINARY);
 }
 
 function watchTargetFsPath(target: string): string | undefined {
