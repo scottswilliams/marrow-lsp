@@ -15,6 +15,11 @@ import {
 
 let client: LanguageClient | undefined;
 
+// A hung or wrong-arch server binary must not leave activation stuck forever with no
+// visible signal. If the handshake does not complete within this budget, activation
+// surfaces an error and tears the client down instead of silently hanging.
+const SERVER_START_TIMEOUT_MS = 15_000;
+
 const EXE_SUFFIX = process.platform === "win32" ? ".exe" : "";
 const SERVER_BINARY = `marrow-lsp${EXE_SUFFIX}`;
 const DAP_BINARY = `marrow-dap${EXE_SUFFIX}`;
@@ -171,27 +176,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     clientOptions,
   );
 
-  try {
-    await client.start();
-  } catch (error) {
+  if (!(await startClientWithWatchdog(client))) {
     client = undefined;
-    void vscode.window.showErrorMessage(`Marrow: failed to start language server: ${error}`);
     return;
   }
 
   dataProvider.setClient(client);
 
   dataWatchTargets = new SavedDataWatchTargetRegistry(client, dataProvider);
-  await dataWatchTargets.refresh();
 
   const projectConfigWatcher = vscode.workspace.createFileSystemWatcher("**/marrow.json");
   projectConfigWatcher.onDidChange(refreshWatchTargets);
   projectConfigWatcher.onDidCreate(refreshWatchTargets);
   projectConfigWatcher.onDidDelete(refreshWatchTargets);
 
+  // Defer the first watch-target round-trip past activation: cold start already
+  // pays for the server handshake, and serializing this request behind it delays
+  // when the editor becomes responsive. Scheduling it lets activation return first.
+  const initialRefresh = setTimeout(refreshWatchTargets, 0);
+
   context.subscriptions.push(
     dataWatchTargets,
     projectConfigWatcher,
+    { dispose: () => clearTimeout(initialRefresh) },
     vscode.window.onDidChangeActiveTextEditor(refreshWatchTargets),
     vscode.workspace.onDidOpenTextDocument((document) => {
       if (document.languageId === "marrow") {
@@ -199,6 +206,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
   );
+}
+
+// Race the language client's start against a watchdog timer. On success the client
+// is live; on timeout or a start error the failure is surfaced and the client is
+// stopped so a half-started server is never wired into the editor. Returns whether
+// the client started.
+async function startClientWithWatchdog(languageClient: LanguageClient): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const watchdog = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`server did not start within ${SERVER_START_TIMEOUT_MS} ms`)),
+      SERVER_START_TIMEOUT_MS,
+    );
+  });
+
+  try {
+    await Promise.race([languageClient.start(), watchdog]);
+    return true;
+  } catch (error) {
+    void vscode.window.showErrorMessage(`Marrow: the language server failed to start: ${error}`);
+    await languageClient.stop().catch(() => undefined);
+    return false;
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function revealSavedResource(
