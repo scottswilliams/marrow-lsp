@@ -200,10 +200,22 @@ check("package command is portable", () => {
   assert.doesNotMatch(packageJson.scripts.package, /\$\(/, "package script must not use POSIX substitution");
   assert.match(
     packageScript,
-    /run\("npm", \["run", "package:vsix", "--", "--target", target\], env\)/,
+    /run\("npm", \["run", "package:vsix", "--", "--target", vscodeTarget\], env\)/,
     "package helper must use the locally installed VSIX packager",
   );
   assert.doesNotMatch(packageScript, /\bnpx\b/, "package helper must not invoke network-backed npx");
+});
+
+check("package guards reproducibility of a published VSIX", () => {
+  assert.match(
+    packageScript,
+    /assertReproducibleUpstream/,
+    "package helper must refuse a publishable VSIX built against upstream path dependencies",
+  );
+  assert.ok(
+    packageScript.includes('path\\s*=\\s*"\\.\\.\\/marrow'),
+    "the reproducibility guard must detect local ../marrow path dependencies",
+  );
 });
 
 check("package contribution titles are bounded", () => {

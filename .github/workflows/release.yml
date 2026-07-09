@@ -1,0 +1,216 @@
+name: Release
+
+# Builds one signed-by-provenance .vsix per supported platform when a version tag is
+# pushed, then publishes them together. Five platforms are a release promise, so the
+# matrix is fixed at five and a downstream job fails the release if fewer than five
+# artifacts arrive. Every build resolves marrow at the single pinned git revision
+# (pins/marrow-rev.toml) so the artifacts are reproducible from source.
+#
+# Untrusted input (the tag ref) is never interpolated into a run: body; it is passed
+# through an env var and referenced as "$RELEASE_TAG".
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v0.1.0). Used for the version-stamp gate."
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+      - name: Version-stamp gate (fail closed)
+        working-directory: editors/vscode
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: node ./scripts/checkVersionStamp.mjs
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      # Five platforms, each its own runner + Rust triple + vsce target. Changing the
+      # count here must move in lockstep with the CHANGELOG platform promise and the
+      # exactly-five assertion in verify-artifacts.
+      matrix:
+        include:
+          - os: macos-14
+            rust_target: aarch64-apple-darwin
+            vsce_target: darwin-arm64
+          - os: macos-13
+            rust_target: x86_64-apple-darwin
+            vsce_target: darwin-x64
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            vsce_target: linux-x64
+          - os: ubuntu-latest
+            rust_target: aarch64-unknown-linux-gnu
+            vsce_target: linux-arm64
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            vsce_target: win32-x64
+    runs-on: ${{ matrix.os }}
+    env:
+      # bundle.mjs reads this to emit and read target/<triple>/release/.
+      CARGO_BUILD_TARGET: ${{ matrix.rust_target }}
+      # Build output outside the checkout so nothing contends over ./target.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+    steps:
+      - name: Check out marrow-lsp
+        uses: actions/checkout@v4
+        with:
+          path: marrow-lsp
+
+      - name: Read the pinned marrow revision
+        id: pin
+        shell: bash
+        run: |
+          rev=$(grep -E '^rev[[:space:]]*=' marrow-lsp/pins/marrow-rev.toml | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          # The pin is a repo file; only a bare 40-hex commit is allowed so it cannot
+          # smuggle shell into later steps or point checkout at a crafted ref.
+          if ! printf '%s' "$rev" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "pinned marrow rev is not a 40-hex commit: '$rev'"; exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Check out marrow at the pin (sibling ../marrow)
+        uses: actions/checkout@v4
+        with:
+          repository: scottswilliams/marrow
+          ref: ${{ steps.pin.outputs.rev }}
+          path: marrow
+
+      - name: Assert the checked-out marrow matches the pin (fail closed)
+        shell: bash
+        env:
+          PIN_REV: ${{ steps.pin.outputs.rev }}
+        run: |
+          got=$(git -C marrow rev-parse HEAD)
+          if [ "$got" != "$PIN_REV" ]; then
+            echo "marrow checkout $got does not match pin $PIN_REV"
+            exit 1
+          fi
+
+      - name: Install the pinned toolchain and target
+        shell: bash
+        run: |
+          rustup toolchain install 1.89 --profile minimal
+          rustup default 1.89
+          rustup target add "$CARGO_BUILD_TARGET"
+
+      - name: Install linux-arm64 cross linker
+        if: matrix.vsce_target == 'linux-arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p "$HOME/.cargo"
+          {
+            echo '[target.aarch64-unknown-linux-gnu]'
+            echo 'linker = "aarch64-linux-gnu-gcc"'
+          } >> "$HOME/.cargo/config.toml"
+
+      - name: Install extension dependencies
+        working-directory: marrow-lsp/editors/vscode
+        run: npm ci
+
+      - name: Pin upstream marrow crates to the release git revision
+        working-directory: marrow-lsp/editors/vscode
+        run: node ./scripts/useGitUpstream.mjs
+
+      - name: Package the .vsix
+        working-directory: marrow-lsp/editors/vscode
+        env:
+          VSCE_TARGET: ${{ matrix.vsce_target }}
+        shell: bash
+        run: node ./scripts/package.mjs --target "$VSCE_TARGET"
+
+      - name: Upload the .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.vsce_target }}
+          path: marrow-lsp/editors/vscode/*.vsix
+          if-no-files-found: error
+
+  verify-artifacts:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all VSIX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: vsix
+      - name: Assert exactly five VSIX artifacts (fail if fewer)
+        shell: bash
+        run: |
+          count=$(find vsix -name '*.vsix' | wc -l | tr -d ' ')
+          echo "found $count VSIX artifacts"
+          find vsix -name '*.vsix' -print
+          if [ "$count" -ne 5 ]; then
+            echo "expected exactly 5 per-platform VSIX artifacts, got $count"
+            exit 1
+          fi
+
+  publish:
+    needs: verify-artifacts
+    runs-on: ubuntu-latest
+    # A protected environment gates the marketplace PAT so a publish is a deliberate,
+    # reviewed action rather than an automatic side effect of any tag push.
+    environment: marketplace
+    permissions:
+      contents: read
+      # Provenance attestation for the published artifacts.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+      - name: Download all VSIX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: vsix
+      - name: Attest build provenance for the VSIX artifacts
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "vsix/**/*.vsix"
+      - name: Publish every VSIX to the marketplace
+        working-directory: editors/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          ARTIFACT_ROOT: ${{ github.workspace }}/vsix
+        shell: bash
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "VSCE_PAT secret is not set"; exit 1
+          fi
+          shopt -s globstar nullglob
+          published=0
+          for vsix in "$ARTIFACT_ROOT"/**/*.vsix; do
+            echo "publishing $vsix"
+            npx --no-install vsce publish --no-dependencies --packagePath "$vsix"
+            published=$((published + 1))
+          done
+          if [ "$published" -ne 5 ]; then
+            echo "expected to publish 5 VSIX artifacts, published $published"; exit 1
+          fi
