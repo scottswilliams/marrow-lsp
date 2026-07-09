@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod navigation;
 pub mod positions;
 pub mod semantic_tokens;
+pub mod session_cache;
 pub mod signature_help;
 pub mod store;
 mod store_view;

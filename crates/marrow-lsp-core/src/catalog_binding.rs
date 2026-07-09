@@ -27,13 +27,12 @@
 //! removes that caveat is tracked upstream.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use marrow_catalog::{CatalogLock, CatalogMetadata};
 use marrow_check::{ProjectIoError, native_store_path, read_committed_lock};
 use marrow_project::ProjectConfig;
 
-use crate::store_view::{CommitMetadata, ReadOnlyStoreView, StoreUid};
+use crate::store_view::{CommitMetadata, ReadOnlyStoreView, StoreFileStat, StoreUid};
 
 /// The accepted catalog and the first-run lock to drive a source check: the store's
 /// snapshot when a valid stamped store is present, otherwise the first-run `None`
@@ -84,32 +83,6 @@ impl StoreCommitIdentity {
             commit_id: commit.as_ref().map(|commit| commit.commit_id),
             catalog_epoch: commit.map(|commit| commit.catalog_epoch),
         }
-    }
-}
-
-/// A cheap filesystem fingerprint of the store file, used only to skip re-opening redb when the
-/// store has not changed since the last probe. This is a change *detector*, never an identity
-/// *key*: an in-place commit that leaves the file's `(mtime, len)` unchanged on a coarse-mtime
-/// filesystem is not distinguishable here, which is why the durable lock-free store-epoch fact is
-/// tracked upstream. On the fine-grained-mtime filesystems the editor runs against, every commit
-/// moves the file's mtime, so an unchanged fingerprint is a sound "no store write since the last
-/// probe" and lets a pure source edit skip the integrity-checked open entirely. A missing mtime
-/// yields `None`, which never matches, so the probe falls back to always opening.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StoreFileStat {
-    modified: SystemTime,
-    len: u64,
-}
-
-impl StoreFileStat {
-    /// Read the store file's fingerprint, or `None` when it cannot be stat'd or the platform does
-    /// not report a modification time — in which case the caller must not skip the open.
-    fn read(path: &Path) -> Option<Self> {
-        let metadata = std::fs::metadata(path).ok()?;
-        Some(Self {
-            modified: metadata.modified().ok()?,
-            len: metadata.len(),
-        })
     }
 }
 

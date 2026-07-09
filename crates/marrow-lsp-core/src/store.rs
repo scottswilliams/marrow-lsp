@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use marrow_check::CheckedProgram;
 use marrow_run::{
-    DataViewBoundary, ProjectSurfaceReadSession, data_view_unavailable_reason_for_config,
-    data_view_watch_targets,
+    DataViewBoundary, ProjectSurfaceReadSession, ProjectSurfaceSnapshot,
+    data_view_unavailable_reason_for_config, data_view_watch_targets,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,10 @@ pub struct SavedDataSession {
 }
 
 impl SavedDataSession {
+    pub(crate) fn from_read_session(session: ProjectSurfaceReadSession) -> Self {
+        Self { session }
+    }
+
     pub(crate) fn surface_read(&self) -> &ProjectSurfaceReadSession {
         &self.session
     }
@@ -44,6 +48,20 @@ pub fn open_saved_data_session(project: &Project) -> Result<Option<SavedDataSess
     ProjectSurfaceReadSession::open(&project.root)
         .map(|session| Some(SavedDataSession { session }))
         .map_err(|error| error.message())
+}
+
+/// Open the checked project surface for saved-data reads without acquiring a store handle,
+/// or `None` when the project exposes no inspectable native store. The returned snapshot
+/// holds the checked program but no store lock, so it can be cached across reads; a live
+/// read handle is acquired per read from [`ProjectSurfaceSnapshot::open_read_only`].
+pub(crate) fn open_saved_data_snapshot(project: &Project) -> Option<ProjectSurfaceSnapshot> {
+    if data_view_unavailable_reason_for_config(&project.root, &project.config)
+        .ok()?
+        .is_some()
+    {
+        return None;
+    }
+    ProjectSurfaceSnapshot::open(&project.root).ok()
 }
 
 pub fn saved_data_watch_targets(

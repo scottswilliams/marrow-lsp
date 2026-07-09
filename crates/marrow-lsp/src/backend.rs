@@ -17,9 +17,8 @@ use marrow_lsp_core::diagnostics::snapshot_to_diagnostics;
 use marrow_lsp_core::documents::{DocumentAnalysisSnapshot, DocumentSnapshot, Documents};
 use marrow_lsp_core::navigation::{RenameError, SnapshotIndices};
 use marrow_lsp_core::positions::Position as CorePosition;
-use marrow_lsp_core::store::{
-    SavedDataSession, SavedDataWatchTargets, open_saved_data_session, saved_data_watch_targets,
-};
+use marrow_lsp_core::session_cache::SavedDataSessionCache;
+use marrow_lsp_core::store::{SavedDataSession, SavedDataWatchTargets, saved_data_watch_targets};
 use marrow_lsp_core::workspace::{
     AnalysisSnapshot, Project, RecomputeScope, Workspace, url_to_path,
 };
@@ -153,8 +152,63 @@ impl SemanticTokensCache {
 
 struct AnalysisState {
     workspace: Workspace,
+    /// Reuses the read-only saved-data session across data-view reads so the editor's
+    /// per-publish refresh does not re-check the project or storm store opens while neither
+    /// source nor store advanced.
+    data_cache: SavedDataSessionCache,
     #[cfg(test)]
     recompute_gate: Option<Arc<TestRecomputeGate>>,
+}
+
+impl AnalysisState {
+    /// The saved roots for the inspector, served from the session cache. Answers the typed
+    /// unavailable roots while live data is off, the workspace is mid-invalidation, or no fresh
+    /// analysis covers the editor-visible source.
+    fn saved_data_roots(
+        &mut self,
+        live_data: bool,
+        invalidation_pending: bool,
+        documents: &DocumentAnalysisSnapshot,
+    ) -> SavedRootsResult {
+        if !live_data || invalidation_pending {
+            return saved_roots(None);
+        }
+        let AnalysisState {
+            workspace,
+            data_cache,
+            ..
+        } = self;
+        let Some(program) = workspace.fresh_program_from_snapshot(documents) else {
+            return saved_roots(None);
+        };
+        let Some(project) = workspace.project() else {
+            return saved_roots(None);
+        };
+        data_cache.saved_roots(project, program)
+    }
+
+    /// A live read-only session for a bounded saved-data read, reusing the cached checked
+    /// snapshot when neither source nor store advanced. `None` while live data is off, the
+    /// workspace is mid-invalidation, no fresh analysis covers the editor-visible source, or the
+    /// store is unavailable.
+    fn data_read_session(
+        &mut self,
+        live_data: bool,
+        invalidation_pending: bool,
+        documents: &DocumentAnalysisSnapshot,
+    ) -> Option<SavedDataSession> {
+        if !live_data || invalidation_pending {
+            return None;
+        }
+        let AnalysisState {
+            workspace,
+            data_cache,
+            ..
+        } = self;
+        let program = workspace.fresh_program_from_snapshot(documents)?;
+        let project = workspace.project()?;
+        data_cache.read_session(project, program)
+    }
 }
 
 #[cfg(test)]
@@ -442,6 +496,7 @@ impl Backend {
             documents: Arc::new(Mutex::new(Documents::new())),
             analysis: Arc::new(Mutex::new(AnalysisState {
                 workspace: Workspace::new(),
+                data_cache: SavedDataSessionCache::new(),
                 #[cfg(test)]
                 recompute_gate: None,
             })),
@@ -490,26 +545,6 @@ impl Backend {
         }
     }
 
-    /// The Marrow read session for saved-data inspection, only when the cached
-    /// analysis still matches the editor-visible source.
-    fn data_session(
-        &self,
-        analysis: &AnalysisState,
-        documents: &DocumentAnalysisSnapshot,
-    ) -> Option<SavedDataSession> {
-        if !self.live_data.load(Ordering::Relaxed) {
-            return None;
-        }
-        if self.workspace_invalidation_pending() {
-            return None;
-        }
-        let fresh_program = analysis.workspace.fresh_program_from_snapshot(documents)?;
-        open_saved_data_session(analysis.workspace.project()?)
-            .ok()
-            .flatten()
-            .filter(|session| session.matches_checked_program(fresh_program))
-    }
-
     fn workspace_invalidation_pending(&self) -> bool {
         self.pending_workspace_invalidation.load(Ordering::SeqCst) != 0
     }
@@ -553,11 +588,12 @@ impl Backend {
     /// checked program and never recomputes the project.
     pub async fn saved_roots(&self) -> jsonrpc::Result<SavedRootsResult> {
         let documents = snapshot_documents(&self.documents).await;
-        let Ok(analysis) = self.analysis.try_lock() else {
+        let live_data = self.live_data.load(Ordering::Relaxed);
+        let invalidation_pending = self.workspace_invalidation_pending();
+        let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(saved_roots(None));
         };
-        let session = self.data_session(&analysis, &documents);
-        Ok(saved_roots(session.as_ref()))
+        Ok(analysis.saved_data_roots(live_data, invalidation_pending, &documents))
     }
 
     /// `marrow/dataChildren`: a bounded page of saved-data children for the
@@ -570,10 +606,13 @@ impl Backend {
         let request = validate_data_children_request(request)
             .map_err(|error| invalid_data_request("marrow/dataChildren", error))?;
         let documents = snapshot_documents(&self.documents).await;
-        let Ok(analysis) = self.analysis.try_lock() else {
+        let live_data = self.live_data.load(Ordering::Relaxed);
+        let invalidation_pending = self.workspace_invalidation_pending();
+        let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(unavailable_data_children());
         };
-        let Some(session) = self.data_session(&analysis, &documents) else {
+        let Some(session) = analysis.data_read_session(live_data, invalidation_pending, &documents)
+        else {
             return Ok(unavailable_data_children());
         };
         Ok(match session_data_child_views_page(&session, request) {
@@ -596,10 +635,13 @@ impl Backend {
         let request = validate_data_read_request(request)
             .map_err(|error| invalid_data_request("marrow/dataRead", error))?;
         let documents = snapshot_documents(&self.documents).await;
-        let Ok(analysis) = self.analysis.try_lock() else {
+        let live_data = self.live_data.load(Ordering::Relaxed);
+        let invalidation_pending = self.workspace_invalidation_pending();
+        let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(unavailable_data_read());
         };
-        let Some(session) = self.data_session(&analysis, &documents) else {
+        let Some(session) = analysis.data_read_session(live_data, invalidation_pending, &documents)
+        else {
             return Ok(unavailable_data_read());
         };
         Ok(match session_data_read(&session, request) {
@@ -720,6 +762,7 @@ impl Backend {
             let mut analysis = context.analysis.lock().await;
             let AnalysisState {
                 workspace,
+                data_cache: _,
                 #[cfg(test)]
                 recompute_gate,
             } = &mut *analysis;
@@ -3032,6 +3075,7 @@ mod tests {
         let documents = Arc::new(Mutex::new(documents));
         let analysis = Arc::new(Mutex::new(AnalysisState {
             workspace: Workspace::new(),
+            data_cache: SavedDataSessionCache::new(),
             recompute_gate: None,
         }));
 

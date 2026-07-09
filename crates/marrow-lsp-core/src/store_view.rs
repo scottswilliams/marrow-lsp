@@ -12,6 +12,7 @@
 //! never an error shown to the user.
 
 use std::path::Path;
+use std::time::SystemTime;
 
 use marrow_catalog::CatalogMetadata;
 use marrow_check::{ProjectIoError, read_accepted_catalog_with_store_read_only};
@@ -19,6 +20,35 @@ use marrow_store::tree::ReadSnapshot;
 use marrow_store::{AccessMode, SealedStore};
 
 pub(crate) use marrow_store::tree::{CommitMetadata, StoreUid};
+
+/// A cheap filesystem fingerprint of the native store file — its modification time and
+/// length — used only to detect whether the store changed since a prior read so a cached
+/// read can be reused without re-opening redb.
+///
+/// This is a change *detector*, never an identity *key*: an in-place commit that leaves the
+/// file's `(mtime, len)` unchanged on a coarse-mtime filesystem is indistinguishable here,
+/// which is why identity keys on the store's own commit fact and a lock-free store-epoch
+/// fact is tracked upstream. On the fine-grained-mtime filesystems the editor runs against,
+/// every commit moves the file's mtime, so an unchanged fingerprint is a sound "no store
+/// write since the last read". A path that cannot be stat'd or reports no mtime yields
+/// `None`, which never matches a recorded fingerprint, so the caller always re-opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreFileStat {
+    modified: SystemTime,
+    len: u64,
+}
+
+impl StoreFileStat {
+    /// Read the store file's fingerprint, or `None` when it cannot be stat'd or the platform
+    /// does not report a modification time — in which case the caller must not skip the open.
+    pub(crate) fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok()?,
+            len: metadata.len(),
+        })
+    }
+}
 
 /// A short-lived read-only handle onto a project's native store.
 ///
