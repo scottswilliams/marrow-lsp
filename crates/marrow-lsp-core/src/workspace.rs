@@ -482,11 +482,10 @@ impl Workspace {
             .map(|good| (&good.snapshot, &good.index))
     }
 
-    /// Drop cached checked facts while keeping the resolved project config. The
-    /// last-good fallback is kept: it is a valid prior-generation analysis, so a watcher
-    /// invalidation refreshes on the next recompute without blanking reads meanwhile.
-    pub fn invalidate_analysis(&mut self) {
-        self.invalidation_epoch += 1;
+    /// Clear the cached latest analysis and its derived indices. Each invalidation
+    /// entry point decides separately what to do with the project and last-good
+    /// fallback; this only drops the latest.
+    fn clear_latest(&mut self) {
         self.latest = None;
         self.last_program = None;
         self.binding_index = None;
@@ -494,12 +493,38 @@ impl Workspace {
         self.latest_documents_generation = None;
     }
 
+    /// Move a currently-good latest analysis into the last-good slot, paired with its
+    /// binding index, so a following clear still leaves a coherent prior-generation
+    /// snapshot for hover and navigation to fall back to.
+    fn demote_latest_to_last_good(&mut self) {
+        let Some(snapshot) = self.latest.take_if(|snapshot| snapshot_is_good(snapshot)) else {
+            return;
+        };
+        let index = self
+            .binding_index
+            .take()
+            .unwrap_or_else(|| build_binding_index(&snapshot));
+        self.last_good = Some(LastGoodAnalysis { snapshot, index });
+    }
+
+    /// Drop cached checked facts while keeping the resolved project config. A currently
+    /// good analysis is demoted to the last-good fallback, so a watcher-driven
+    /// invalidation (a branch switch, a lock touch) keeps serving prior-generation
+    /// hover and navigation facts instead of blanking until the next recompute lands,
+    /// matching what the edit path already does through a parse error.
+    pub fn invalidate_analysis(&mut self) {
+        self.invalidation_epoch += 1;
+        self.demote_latest_to_last_good();
+        self.clear_latest();
+    }
+
     /// Drop cached checked facts and force the next recompute to re-read config. A config
     /// change can reshape every fact, so the last-good fallback is dropped too.
     pub fn invalidate_project(&mut self) {
+        self.invalidation_epoch += 1;
         self.project = None;
         self.last_good = None;
-        self.invalidate_analysis();
+        self.clear_latest();
     }
 }
 
@@ -814,6 +839,50 @@ mod tests {
         assert!(
             !workspace.latest_matches_sources(&documents),
             "invalidation from the file watcher refreshes external changes"
+        );
+    }
+
+    /// A watcher-driven analysis invalidation (a branch switch or lock touch) must serve
+    /// last-good facts across the gap, not blank, mirroring the edit path through a parse
+    /// error. It demotes the good latest to last-good rather than dropping it.
+    #[test]
+    fn invalidate_analysis_demotes_good_latest_to_last_good() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        std::fs::write(&file, "module app\n\npub fn answer(): int\n    return 1\n").unwrap();
+
+        let mut workspace = Workspace::new();
+        let documents = Documents::new();
+        workspace.recompute(&file, &documents).unwrap();
+        assert!(matches!(
+            workspace.choose_read_source(&file),
+            Some(ReadSource::Latest)
+        ));
+
+        workspace.invalidate_analysis();
+
+        assert!(
+            workspace.latest().is_none(),
+            "invalidation clears the latest analysis"
+        );
+        assert!(
+            matches!(
+                workspace.choose_read_source(&file),
+                Some(ReadSource::LastGood)
+            ),
+            "a watcher analysis invalidation should serve the demoted last-good analysis, not blank"
+        );
+        assert!(
+            workspace.last_good_facts().is_some(),
+            "the demoted analysis and its index remain readable as a coherent pair"
         );
     }
 
