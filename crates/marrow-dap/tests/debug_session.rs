@@ -4147,3 +4147,43 @@ fn assert_terminates_without_stopping(client: &mut Client) {
     }
     panic!("run did not terminate within the bounded message loop");
 }
+
+/// Two debug sessions run concurrently without interfering. Each adapter is its own
+/// process, so isolation is the contract: driving one to termination must leave the
+/// other parked at its own entry, answering as a live session, until it is itself
+/// continued. A crossed run-thread flag or a shared store would surface here as a
+/// terminated event on the wrong session or a dead second adapter.
+#[test]
+fn two_concurrent_sessions_stay_isolated() {
+    let dir_a = tempfile::tempdir().unwrap();
+    write_fixture(dir_a.path());
+    let dir_b = tempfile::tempdir().unwrap();
+    write_fixture(dir_b.path());
+
+    let mut a = initialized_client();
+    let mut b = initialized_client();
+
+    for (client, dir) in [(&mut a, &dir_a), (&mut b, &dir_b)] {
+        let launch = client.request(
+            "launch",
+            json!({ "project": dir.path().display().to_string(), "stopOnEntry": true }),
+        );
+        assert_launch_success(&client.response_for(launch));
+        let done = client.request("configurationDone", json!({}));
+        assert_eq!(client.response_for(done)["success"], true);
+        assert_eq!(client.event("stopped")["body"]["reason"], "entry");
+    }
+
+    // Drive A to termination; B must remain parked at its own entry throughout.
+    let cont = a.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(a.response_for(cont)["success"], true);
+    a.event("terminated");
+
+    // B still answers as a live, stopped session and terminates only on its own
+    // continue — A's teardown left it untouched.
+    let threads = b.request_without_arguments("threads");
+    assert_eq!(b.response_for(threads)["success"], true);
+    let cont = b.request("continue", json!({ "threadId": 1 }));
+    assert_eq!(b.response_for(cont)["success"], true);
+    b.event("terminated");
+}
