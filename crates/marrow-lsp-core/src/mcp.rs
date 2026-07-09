@@ -42,8 +42,9 @@ use marrow_json::resource_schema::{
 };
 use marrow_json::surface::{
     SURFACE_OPERATION_PROFILE_VERSION, SURFACE_ROUTE_PROFILE_VERSION, SurfaceAbiJson,
-    SurfaceOperationKind, SurfaceOperationRequestJson, SurfaceRouteManifestJson,
-    execute_project_surface_operation, execute_project_surface_operation_read_only,
+    SurfaceIdentityJson, SurfaceOperationKind, SurfaceOperationRequestBodyJson,
+    SurfaceOperationRequestJson, SurfaceRouteManifestJson, execute_project_surface_operation,
+    execute_project_surface_operation_read_only,
 };
 use marrow_run::{
     CheckedEntryCall, EntryArgument, EntryDescriptor, EntryInvocation, Host, ProjectInvokeError,
@@ -228,10 +229,9 @@ fn tool_error(mut result: Json) -> Json {
 pub struct ReadAccess(());
 
 /// Proof that the operator opted this session into writing a project's real stored
-/// data. Distinct from [`ReadAccess`]: [`surface_write`] takes a `WriteAccess`, so
-/// a read-only grant cannot reach the writable executor — the single shared
-/// "data access" bit that once authorized both is now unrepresentable in the type
-/// system, not merely unset at runtime.
+/// data. Distinct from [`ReadAccess`]: [`surface_write`] takes a `WriteAccess` and
+/// nothing coerces a read grant into one, so a read grant cannot reach the writable
+/// executor. The operator's launch policy is the sole minter of either grant.
 #[derive(Clone, Copy)]
 pub struct WriteAccess(());
 
@@ -255,16 +255,78 @@ impl WriteAccess {
 /// beside it, so an operator can reconstruct exactly what an agent changed.
 const WRITE_AUDIT_FILE: &str = "marrow-mcp-write-audit.jsonl";
 
-/// One entry in the write-audit trail: which operation ran against which entry
-/// file, and the store's identity immediately before and after, so a reader can
-/// tell whether the write advanced the store and by how much.
+/// One entry in the write-audit trail: when the write ran, which operation ran
+/// against which entry file, the record the operation targeted, whether it
+/// succeeded, and the store's identity immediately before and after — so a reader
+/// can tell what an agent aimed at and whether the store advanced. The target is
+/// the operation's identity (its store and keys), never the field values written,
+/// so the trail names what was touched without copying stored data into itself.
 #[derive(Clone, serde::Serialize)]
 struct WriteAuditRecord {
+    /// Milliseconds since the Unix epoch when the write was recorded.
+    timestamp_ms: u64,
     operation_tag: String,
     file: PathBuf,
     request_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<SurfaceIdentityJson>,
+    outcome: WriteOutcome,
     store_before: Option<AuditStoreStamp>,
     store_after: Option<AuditStoreStamp>,
+}
+
+/// Whether the audited operation reported success or an error. The store may have
+/// been mutated before an error surfaced, so the outcome records how the operation
+/// answered, not whether the store is unchanged.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WriteOutcome {
+    Ok,
+    Error,
+}
+
+/// Milliseconds since the Unix epoch, saturating a pre-epoch clock to zero and an
+/// implausibly far-future clock to the `u64` ceiling. Dependency-free so the audit
+/// trail carries a timestamp without pulling in a date library.
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// The identity a surface operation targets — its store and keys — read off the
+/// typed request body. Only the record-addressing operations carry an identity;
+/// singleton and action operations target no specific keyed record, so they audit
+/// with no target rather than a fabricated one.
+fn audit_target(body: &SurfaceOperationRequestBodyJson) -> Option<SurfaceIdentityJson> {
+    match body {
+        SurfaceOperationRequestBodyJson::PointRead { request } => Some(request.identity.clone()),
+        SurfaceOperationRequestBodyJson::PointUpdate { request } => Some(request.identity.clone()),
+        SurfaceOperationRequestBodyJson::PointCreate { request } => Some(request.identity.clone()),
+        SurfaceOperationRequestBodyJson::PointDelete { request } => Some(request.identity.clone()),
+        _ => None,
+    }
+}
+
+/// The stable snake_case name of a surface request body's kind, taken from the
+/// typed variant rather than re-read off raw JSON, so the checker and the audit
+/// agree on one spelling per operation.
+fn request_kind_name(body: &SurfaceOperationRequestBodyJson) -> &'static str {
+    match body {
+        SurfaceOperationRequestBodyJson::SingletonRead { .. } => "singleton_read",
+        SurfaceOperationRequestBodyJson::PointRead { .. } => "point_read",
+        SurfaceOperationRequestBodyJson::Page { .. } => "page",
+        SurfaceOperationRequestBodyJson::UniqueLookup { .. } => "unique_lookup",
+        SurfaceOperationRequestBodyJson::SingletonUpdate { .. } => "singleton_update",
+        SurfaceOperationRequestBodyJson::PointUpdate { .. } => "point_update",
+        SurfaceOperationRequestBodyJson::SingletonCreate { .. } => "singleton_create",
+        SurfaceOperationRequestBodyJson::PointCreate { .. } => "point_create",
+        SurfaceOperationRequestBodyJson::SingletonDelete { .. } => "singleton_delete",
+        SurfaceOperationRequestBodyJson::PointDelete { .. } => "point_delete",
+        SurfaceOperationRequestBodyJson::Action { .. } => "action",
+        SurfaceOperationRequestBodyJson::ComputedRead { .. } => "computed_read",
+    }
 }
 
 /// The store identity captured in an audit record: the durable store id and its
@@ -857,16 +919,14 @@ pub fn surface_write(
     if access.is_none() {
         return Ok(write_disabled(contract));
     }
-    // The operation tag and request kind name what this write does; read them off
-    // the raw envelope before it is consumed by the DTO, so the audit record can
-    // describe the write even when the DTO's internals are opaque here.
-    let operation_tag = json_str(&operation, "operation_tag");
-    let request_kind = operation
-        .get("request")
-        .map(|request| json_str(request, "kind"))
-        .unwrap_or_default();
+    // Decode the canonical DTO first, then read the operation tag, kind, and target
+    // off the typed request. One deserialize is the single owner of what the write
+    // is, so the audit never re-parses the raw envelope for a second opinion.
     let request: SurfaceOperationRequestJson = serde_json::from_value(operation)
         .map_err(|error| format!("invalid mw_surface_write operation: {error}"))?;
+    let operation_tag = request.operation_tag.clone();
+    let request_kind = request_kind_name(&request.request);
+    let target = audit_target(&request.request);
     let result = with_loaded_project(file, None, |workspace, resolved_file| {
         let Some(project) = workspace.project() else {
             return json!({ "available": false, "error": "no project resolved for the file" });
@@ -877,20 +937,30 @@ pub fn surface_write(
         };
         let store_before = session.store_stamp().ok();
         let operation_result = execute_project_surface_operation(&session, &request);
-        let store_after = match session.store_stamp() {
-            Ok(stamp) => stamp,
-            Err(error) => return json!({ "available": false, "error": error.message() }),
+        // A durably-committed write must always be audited, so the after-stamp is
+        // best-effort: if the store cannot be re-read here the mutation may still
+        // have landed, and the record captures that with a missing after-stamp
+        // rather than dropping the entry entirely.
+        let store_after = session.store_stamp().ok();
+        let outcome = match &operation_result {
+            Ok(_) => WriteOutcome::Ok,
+            Err(_) => WriteOutcome::Error,
         };
         let record = WriteAuditRecord {
+            timestamp_ms: unix_millis_now(),
             operation_tag: operation_tag.clone(),
             file: resolved_file.to_path_buf(),
-            request_kind: request_kind.clone(),
+            request_kind: request_kind.to_string(),
+            target: target.clone(),
+            outcome,
             store_before: store_before.as_ref().map(AuditStoreStamp::from),
-            store_after: Some(AuditStoreStamp::from(&store_after)),
+            store_after: store_after.as_ref().map(AuditStoreStamp::from),
         };
         let audit_error = append_write_audit(&project.root, &record).err();
         let audit = serde_json::to_value(&record).expect("write-audit record serializes");
-        let store_stamp = store_stamp_json(store_after);
+        let store_stamp = store_after
+            .as_ref()
+            .map(|stamp| store_stamp_json(stamp.clone()));
         let mut value = match operation_result {
             Ok(response) => {
                 json!({ "available": true, "store_stamp": store_stamp, "response": response })
@@ -910,16 +980,6 @@ pub fn surface_write(
             contract,
         ),
     })
-}
-
-/// A string field read off a JSON object, or the empty string when it is missing
-/// or not a string. Used to describe a surface operation in the audit trail.
-fn json_str(value: &Json, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Json::as_str)
-        .unwrap_or_default()
-        .to_string()
 }
 
 fn store_stamp_json(stamp: StoreStamp) -> Json {

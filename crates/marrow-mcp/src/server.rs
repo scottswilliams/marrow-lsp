@@ -1074,10 +1074,9 @@ mod tests {
     #[test]
     fn a_read_only_policy_refuses_a_surface_write() {
         // The trust-critical case the read/write split exists for: reads are opted
-        // in, writes are not. Under the old shared "data access" bit this exact
-        // policy would have authorized a destructive write; now `write_access()`
-        // yields `None` for a read-only policy, so `mw_surface_write` refuses before
-        // opening the store, while a read stays permitted.
+        // in, writes are not. `write_access()` yields `None` for a read-only policy,
+        // so `mw_surface_write` refuses before opening the store, while a read stays
+        // permitted.
         let read_only = Policy::new(true, false, mcp::DEFAULT_RUN_BUDGET);
 
         let write = call(

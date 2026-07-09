@@ -1,12 +1,12 @@
 use super::*;
 
-/// The read grant for a data-tool test that is not exercising the root-confinement
-/// boundary itself. Confinement tests build their own grant against a chosen root.
+/// The read grant a data-tool test hands to a read tool, standing in for the
+/// operator opt-in the transport would supply.
 fn granted_read() -> Option<ReadAccess> {
     Some(ReadAccess::granted())
 }
 
-/// The write grant for a surface-write test.
+/// The write grant a surface-write test hands to [`surface_write`].
 fn granted_write() -> Option<WriteAccess> {
     Some(WriteAccess::granted())
 }
@@ -1745,6 +1745,35 @@ fn every_surface_write_appends_an_audit_record() {
         "the audit record names the operation tag: {result}"
     );
     assert_eq!(audit["file"], file.to_str().unwrap(), "{result}");
+    assert!(
+        audit["timestamp_ms"].as_u64().is_some_and(|ms| ms > 0),
+        "the audit record stamps the write with an epoch-millis timestamp: {result}"
+    );
+    assert_eq!(
+        audit["outcome"], "ok",
+        "a committed write audits ok: {result}"
+    );
+    // The target is the operation's identity — its store and keys — never the
+    // written field values, so the trail names the record touched without copying
+    // stored data into itself.
+    assert!(
+        audit["target"]["store_catalog_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("cat_")),
+        "the audit target carries the operation's store identity: {result}"
+    );
+    assert_eq!(
+        audit["target"]["keys"],
+        json!([{ "kind": "int", "value": "1" }]),
+        "the audit target carries the operation's keys, not the written value: {result}"
+    );
+    assert!(
+        audit
+            .get("target")
+            .and_then(|target| target.get("fields"))
+            .is_none(),
+        "the audit target must not carry the written field values: {result}"
+    );
     assert!(
         audit["store_after"]["commit_id"].as_u64() > audit["store_before"]["commit_id"].as_u64(),
         "the audit record must show the write advanced the store: {result}"
