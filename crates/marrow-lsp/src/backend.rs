@@ -94,6 +94,11 @@ pub struct Backend {
     /// request drops. Never set in production.
     #[cfg(test)]
     request_gate: Arc<Mutex<Option<Arc<TestRecomputeGate>>>>,
+    /// Arms a one-shot panic inside the next guarded read handler, so a test can prove
+    /// the per-handler panic boundary turns an unwinding hot-path invariant failure
+    /// into a JSON-RPC error while the server keeps answering. Never set in production.
+    #[cfg(test)]
+    inject_read_panic: Arc<AtomicBool>,
 }
 
 /// Per-document semantic-token streams retained so a delta request can diff against
@@ -441,6 +446,8 @@ impl Backend {
             project_file_count: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             request_gate: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            inject_read_panic: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -458,6 +465,16 @@ impl Backend {
         let gate = self.request_gate.lock().await.clone();
         if let Some(gate) = gate {
             gate.hold().await;
+        }
+    }
+
+    /// One-shot: if a test armed panic injection, panic inside the guarded read so the
+    /// per-handler boundary is exercised on the real compute path. Disarms itself so
+    /// the next request runs normally, proving the server still answers.
+    #[cfg(test)]
+    fn maybe_inject_read_panic(&self, handler: &str) {
+        if self.inject_read_panic.swap(false, Ordering::SeqCst) {
+            panic!("injected hot-path panic in {handler}");
         }
     }
 
@@ -968,6 +985,37 @@ fn invalid_data_request(method: &str, error: DataRequestValidationError) -> json
     jsonrpc::Error::invalid_params(format!("invalid {method} params: {}", error.message()))
 }
 
+/// Run a read handler's synchronous compute behind a panic boundary. The hot-path
+/// reads assert invariants an upstream analysis change or a malformed edit could
+/// violate; without this boundary such a panic unwinds the shared transport task and
+/// kills every open editor, not just the one request. The tokio mutex guards the
+/// closure may hold do not poison on panic, so a caught unwind leaves no half-updated
+/// state behind — `AssertUnwindSafe` records that we answer with an error rather than
+/// go on to observe data a panic left inconsistent.
+fn guard_read<T>(
+    handler: &str,
+    compute: impl FnOnce() -> jsonrpc::Result<T>,
+) -> jsonrpc::Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(compute)) {
+        Ok(result) => result,
+        Err(_) => Err(handler_panicked(handler)),
+    }
+}
+
+/// The JSON-RPC error a caught handler panic becomes: an internal error naming the
+/// handler, so the client sees a failed request instead of a dropped connection.
+fn handler_panicked(handler: &str) -> jsonrpc::Error {
+    eprintln!(
+        "{} the {handler} handler panicked; answering with an error and continuing",
+        crate::stderr_error("marrow-lsp:")
+    );
+    jsonrpc::Error {
+        code: jsonrpc::ErrorCode::InternalError,
+        message: format!("the {handler} request failed").into(),
+        data: None,
+    }
+}
+
 /// The LSP `ContentModified` error: the document changed after the request was
 /// issued, so answering against the source it named would report stale facts. The
 /// client drops the result and re-requests against the current content.
@@ -1290,17 +1338,21 @@ impl LanguageServer for Backend {
         if self.request_superseded(&entry).await {
             return Err(content_modified());
         }
-        let Ok(mut analysis) = self.analysis.try_lock() else {
-            return Ok(None);
-        };
-        if self.workspace_invalidation_pending() {
-            return Ok(None);
-        }
-        let Some(source) = analysis.workspace.choose_read_source(&path) else {
-            return Ok(None);
-        };
-        let (snapshot, index) = read_facts(&analysis.workspace, source);
-        Ok(hover::hover_with_index(snapshot, index, &path, offset))
+        guard_read("hover", || {
+            #[cfg(test)]
+            self.maybe_inject_read_panic("hover");
+            let Ok(mut analysis) = self.analysis.try_lock() else {
+                return Ok(None);
+            };
+            if self.workspace_invalidation_pending() {
+                return Ok(None);
+            }
+            let Some(source) = analysis.workspace.choose_read_source(&path) else {
+                return Ok(None);
+            };
+            let (snapshot, index) = read_facts(&analysis.workspace, source);
+            Ok(hover::hover_with_index(snapshot, index, &path, offset))
+        })
     }
 
     /// Go to the definition under the cursor. Reads the cached snapshot plus
@@ -1329,21 +1381,23 @@ impl LanguageServer for Backend {
         if self.request_superseded(&documents).await {
             return Err(content_modified());
         }
-        let Ok(mut analysis) = self.analysis.try_lock() else {
-            return Ok(None);
-        };
-        if self.workspace_invalidation_pending() {
-            return Ok(None);
-        }
-        let Some(source) = analysis.workspace.choose_read_source(&path) else {
-            return Ok(None);
-        };
-        let (snapshot, index) = read_facts(&analysis.workspace, source);
-        let indices = snapshot_indices(snapshot, &documents);
-        Ok(
-            navigation::definition(snapshot, index, &indices, &path, offset)
-                .map(GotoDefinitionResponse::Scalar),
-        )
+        guard_read("goto_definition", || {
+            #[cfg(test)]
+            self.maybe_inject_read_panic("goto_definition");
+            let Ok(mut analysis) = self.analysis.try_lock() else {
+                return Ok(None);
+            };
+            if self.workspace_invalidation_pending() {
+                return Ok(None);
+            }
+            let Some(source) = analysis.workspace.choose_read_source(&path) else {
+                return Ok(None);
+            };
+            let (snapshot, index) = read_facts(&analysis.workspace, source);
+            let indices = snapshot_indices(snapshot, &documents);
+            Ok(navigation::definition(snapshot, index, &indices, &path, offset)
+                .map(GotoDefinitionResponse::Scalar))
+        })
     }
 
     /// Every reference to the symbol under the cursor, keeping or dropping the
@@ -1370,25 +1424,29 @@ impl LanguageServer for Backend {
         if self.request_superseded(&documents).await {
             return Err(content_modified());
         }
-        let Ok(mut analysis) = self.analysis.try_lock() else {
-            return Ok(None);
-        };
-        if self.workspace_invalidation_pending() {
-            return Ok(None);
-        }
-        let Some(source) = analysis.workspace.choose_read_source(&path) else {
-            return Ok(None);
-        };
-        let (snapshot, index) = read_facts(&analysis.workspace, source);
-        let indices = snapshot_indices(snapshot, &documents);
-        Ok(navigation::references(
-            snapshot,
-            index,
-            &indices,
-            &path,
-            offset,
-            include_declaration,
-        ))
+        guard_read("references", || {
+            #[cfg(test)]
+            self.maybe_inject_read_panic("references");
+            let Ok(mut analysis) = self.analysis.try_lock() else {
+                return Ok(None);
+            };
+            if self.workspace_invalidation_pending() {
+                return Ok(None);
+            }
+            let Some(source) = analysis.workspace.choose_read_source(&path) else {
+                return Ok(None);
+            };
+            let (snapshot, index) = read_facts(&analysis.workspace, source);
+            let indices = snapshot_indices(snapshot, &documents);
+            Ok(navigation::references(
+                snapshot,
+                index,
+                &indices,
+                &path,
+                offset,
+                include_declaration,
+            ))
+        })
     }
 
     /// Pre-select the identifier for a rename, or refuse when the cursor is not on a
@@ -1416,19 +1474,23 @@ impl LanguageServer for Backend {
         if self.request_superseded(&documents).await {
             return Err(content_modified());
         }
-        let Ok(mut analysis) = self.analysis.try_lock() else {
-            return Ok(None);
-        };
-        if self.workspace_invalidation_pending() {
-            return Ok(None);
-        }
-        let Some(source) = analysis.workspace.choose_read_source(&path) else {
-            return Ok(None);
-        };
-        let (snapshot, index) = read_facts(&analysis.workspace, source);
-        let indices = snapshot_indices(snapshot, &documents);
-        Ok(navigation::prepare_rename(index, &indices, &path, offset)
-            .map(PrepareRenameResponse::Range))
+        guard_read("prepare_rename", || {
+            #[cfg(test)]
+            self.maybe_inject_read_panic("prepare_rename");
+            let Ok(mut analysis) = self.analysis.try_lock() else {
+                return Ok(None);
+            };
+            if self.workspace_invalidation_pending() {
+                return Ok(None);
+            }
+            let Some(source) = analysis.workspace.choose_read_source(&path) else {
+                return Ok(None);
+            };
+            let (snapshot, index) = read_facts(&analysis.workspace, source);
+            let indices = snapshot_indices(snapshot, &documents);
+            Ok(navigation::prepare_rename(index, &indices, &path, offset)
+                .map(PrepareRenameResponse::Range))
+        })
     }
 
     /// Rename the symbol under the cursor across every reference. Refused with a
@@ -1456,29 +1518,33 @@ impl LanguageServer for Backend {
         if self.request_superseded(&documents).await {
             return Err(content_modified());
         }
-        let Ok(mut analysis) = self.analysis.try_lock() else {
-            return Ok(None);
-        };
-        if self.workspace_invalidation_pending() {
-            return Ok(None);
-        }
-        let Some(source) = analysis.workspace.choose_read_source(&path) else {
-            return Ok(None);
-        };
-        let (snapshot, index) = read_facts(&analysis.workspace, source);
-        let indices = snapshot_indices(snapshot, &documents);
-        match navigation::rename(index, &indices, &path, offset, &new_name) {
-            Ok(edit) => Ok(Some(edit)),
-            // No symbol under the cursor is not an error — the editor simply does
-            // nothing. Known symbols that Marrow cannot rename are refused with a
-            // clear message.
-            Err(RenameError::NoSymbol) => Ok(None),
-            Err(
-                error @ (RenameError::NotRenameable
-                | RenameError::SavedDataBacked
-                | RenameError::InvalidName),
-            ) => Err(jsonrpc::Error::invalid_params(error.message())),
-        }
+        guard_read("rename", || {
+            #[cfg(test)]
+            self.maybe_inject_read_panic("rename");
+            let Ok(mut analysis) = self.analysis.try_lock() else {
+                return Ok(None);
+            };
+            if self.workspace_invalidation_pending() {
+                return Ok(None);
+            }
+            let Some(source) = analysis.workspace.choose_read_source(&path) else {
+                return Ok(None);
+            };
+            let (snapshot, index) = read_facts(&analysis.workspace, source);
+            let indices = snapshot_indices(snapshot, &documents);
+            match navigation::rename(index, &indices, &path, offset, &new_name) {
+                Ok(edit) => Ok(Some(edit)),
+                // No symbol under the cursor is not an error — the editor simply does
+                // nothing. Known symbols that Marrow cannot rename are refused with a
+                // clear message.
+                Err(RenameError::NoSymbol) => Ok(None),
+                Err(
+                    error @ (RenameError::NotRenameable
+                    | RenameError::SavedDataBacked
+                    | RenameError::InvalidName),
+                ) => Err(jsonrpc::Error::invalid_params(error.message())),
+            }
+        })
     }
 
     async fn document_symbol(
@@ -3188,6 +3254,90 @@ mod tests {
 
         gate.release().await;
         recompute.await.unwrap();
+    }
+
+    /// A hot-path read handler that panics must not kill the editing session: the
+    /// per-handler boundary turns the panic into a JSON-RPC error for that one request,
+    /// and the very next request is still answered with correct facts. Runs under the
+    /// virtual-time harness so a hung server (rather than an answered one) trips the
+    /// deadline deterministically.
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_read_handler_returns_an_error_and_the_next_request_is_answered() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        let source = "module app\n\npub fn answer(): int\n    return 42\n\n\
+                      pub fn caller(): int\n    return answer()\n";
+        std::fs::write(&file, source).unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(url.clone(), source.to_string(), Some(1));
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+        Backend::recompute_and_publish(
+            RecomputeContext {
+                documents: &backend.documents,
+                analysis: &backend.analysis,
+                analysis_run: &backend.analysis_run,
+                diagnostics: &backend.diagnostics,
+                diagnostics_publish: &backend.diagnostics_publish,
+                pending_workspace_invalidation: &backend.pending_workspace_invalidation,
+                project_file_count: &backend.project_file_count,
+                client: &backend.client,
+            },
+            &file,
+            None,
+            RecomputeScope::Full,
+        )
+        .await;
+
+        let hover_params = || HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: url.clone() },
+                position: Position {
+                    line: 6,
+                    character: 11,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+
+        // Arm a one-shot panic on the next hover, then confirm the handler answers with
+        // a JSON-RPC error instead of unwinding the shared transport task.
+        backend.inject_read_panic.store(true, Ordering::SeqCst);
+        let panicked = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
+            <Backend as LanguageServer>::hover(backend, hover_params()).await
+        })
+        .await
+        .expect("a panicking handler must return promptly, not hang the transport");
+        let error = panicked.expect_err("a panicking handler must surface a JSON-RPC error");
+        assert_eq!(error.code, jsonrpc::ErrorCode::InternalError);
+
+        // The very next request is answered normally: the panic was isolated to the one
+        // bad request and left the server healthy.
+        let recovered = tokio::time::timeout(NONBLOCKING_DEADLINE, async {
+            <Backend as LanguageServer>::hover(backend, hover_params()).await
+        })
+        .await
+        .expect("the server must keep answering after an isolated handler panic")
+        .expect("the follow-up hover must succeed");
+        assert!(
+            recovered.is_some(),
+            "the request after a panicking one must resolve real hover facts, proving isolation"
+        );
     }
 
     /// A watcher invalidation that lands while a recompute runs off the pump must
