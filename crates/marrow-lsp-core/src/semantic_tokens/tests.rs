@@ -1824,6 +1824,121 @@ fn multi_line_tokens_are_clamped_to_the_first_line_remainder() {
     assert_eq!(decoded[0].2, 6, "token covers `\"first` only");
 }
 
+/// Splice one delta edit into the flattened uint array the client holds, the way
+/// an editor applies a `semanticTokens/full/delta` response, and re-inflate tokens.
+fn apply_edits(previous: &[SemanticToken], edits: &[SemanticTokensEdit]) -> Vec<SemanticToken> {
+    let mut data: Vec<u32> = previous.iter().flat_map(flatten_token).collect();
+    // Edits reference the pre-edit array, so applying from the back keeps earlier
+    // offsets valid.
+    for edit in edits.iter().rev() {
+        let start = edit.start as usize;
+        let end = start + edit.delete_count as usize;
+        let inserted: Vec<u32> = edit.data.iter().flatten().flat_map(flatten_token).collect();
+        data.splice(start..end, inserted);
+    }
+    data.chunks_exact(5)
+        .map(|chunk| SemanticToken {
+            delta_line: chunk[0],
+            delta_start: chunk[1],
+            length: chunk[2],
+            token_type: chunk[3],
+            token_modifiers_bitset: chunk[4],
+        })
+        .collect()
+}
+
+fn flatten_token(token: &SemanticToken) -> [u32; 5] {
+    [
+        token.delta_line,
+        token.delta_start,
+        token.length,
+        token.token_type,
+        token.token_modifiers_bitset,
+    ]
+}
+
+#[test]
+fn delta_edits_are_empty_for_identical_token_streams() {
+    let source = "module m\n\nfn f(): int\n    return 1\n";
+    let tokens = semantic_tokens(
+        &lex_source(source),
+        &parse_source(source),
+        &LineIndex::new(source),
+    );
+    assert!(
+        semantic_tokens_delta_edits(&tokens, &tokens).is_empty(),
+        "an unchanged document must produce no edits"
+    );
+}
+
+#[test]
+fn delta_edits_replace_only_the_changed_middle_of_a_large_file() {
+    // A large document so a one-line change proves the edit is a real diff, not a
+    // full re-encode: the edit's replaced span must be a tiny fraction of the file.
+    let mut lines = String::from("module big\n\n");
+    for i in 0..400 {
+        lines.push_str(&format!("fn f{i}(): int\n    return {i}\n"));
+    }
+    let previous = semantic_tokens(
+        &lex_source(&lines),
+        &parse_source(&lines),
+        &LineIndex::new(&lines),
+    );
+
+    // Change a single literal deep in the file.
+    let edited = lines.replace("return 200\n", "return 999999\n");
+    let current = semantic_tokens(
+        &lex_source(&edited),
+        &parse_source(&edited),
+        &LineIndex::new(&edited),
+    );
+
+    let edits = semantic_tokens_delta_edits(&previous, &current);
+    assert_eq!(edits.len(), 1, "a single-region change yields one edit");
+    let replaced_tokens = edits[0].delete_count / 5;
+    assert!(
+        replaced_tokens <= 4,
+        "the edit must touch only the changed line's tokens, not re-encode the file \
+         (replaced {replaced_tokens} tokens of {})",
+        previous.len()
+    );
+    assert!(
+        (edits[0].data.as_ref().map(Vec::len).unwrap_or(0)) < current.len(),
+        "the inserted token slice must be smaller than a full re-encode"
+    );
+
+    // Applying the edit to the client's held tokens must reproduce the new stream.
+    assert_eq!(
+        apply_edits(&previous, &edits),
+        current,
+        "applying the delta edits must reconstruct the current tokens exactly"
+    );
+}
+
+#[test]
+fn delta_edits_reconstruct_the_current_tokens_after_an_insertion() {
+    let previous_source = "module m\n\nfn f(): int\n    return 1\n";
+    let current_source = "module m\n\nconst K: int = 7\n\nfn f(): int\n    return 1\n";
+    let previous = semantic_tokens(
+        &lex_source(previous_source),
+        &parse_source(previous_source),
+        &LineIndex::new(previous_source),
+    );
+    let current = semantic_tokens(
+        &lex_source(current_source),
+        &parse_source(current_source),
+        &LineIndex::new(current_source),
+    );
+
+    let edits = semantic_tokens_delta_edits(&previous, &current);
+    assert!(!edits.is_empty(), "an insertion produces at least one edit");
+    assert_eq!(
+        apply_edits(&previous, &edits),
+        current,
+        "applying the delta edits must reconstruct the current tokens exactly"
+    );
+}
+
 #[test]
 fn the_legend_lists_the_saved_root_type() {
     let legend = legend();

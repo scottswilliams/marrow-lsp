@@ -61,6 +61,50 @@ pub struct Backend {
     /// server registers the project watchers itself so freshness is client-agnostic;
     /// a client without it (or a bare test harness) is left to any static config.
     dynamic_watch_registration: Arc<AtomicBool>,
+    /// The last semantic-token stream returned per document, keyed by the `result_id`
+    /// the client echoes on a `semanticTokens/full/delta` request. Lets a delta reply
+    /// with only the edits against that stream instead of a full re-encode.
+    semantic_tokens_cache: Arc<Mutex<SemanticTokensCache>>,
+}
+
+/// Per-document semantic-token streams retained so a delta request can diff against
+/// the exact stream the client last received. A monotonic counter mints each
+/// `result_id`, so an id uniquely identifies one returned stream.
+#[derive(Default)]
+struct SemanticTokensCache {
+    next_id: u64,
+    entries: HashMap<Url, CachedSemanticTokens>,
+}
+
+struct CachedSemanticTokens {
+    result_id: String,
+    tokens: Vec<SemanticToken>,
+}
+
+impl SemanticTokensCache {
+    /// Record `tokens` as the latest stream for `url` under a fresh `result_id`, and
+    /// return that id for the client to echo on its next delta request.
+    fn store(&mut self, url: Url, tokens: Vec<SemanticToken>) -> String {
+        self.next_id += 1;
+        let result_id = self.next_id.to_string();
+        self.entries.insert(
+            url,
+            CachedSemanticTokens {
+                result_id: result_id.clone(),
+                tokens,
+            },
+        );
+        result_id
+    }
+
+    /// The tokens last returned for `url`, only when they carry `result_id` — a
+    /// delta whose base the cache no longer holds falls back to a full response.
+    fn previous(&self, url: &Url, result_id: &str) -> Option<&[SemanticToken]> {
+        self.entries
+            .get(url)
+            .filter(|entry| entry.result_id == result_id)
+            .map(|entry| entry.tokens.as_slice())
+    }
 }
 
 struct AnalysisState {
@@ -311,6 +355,7 @@ impl Backend {
             live_data: Arc::new(AtomicBool::new(false)),
             pending_workspace_invalidation: Arc::new(AtomicU8::new(0)),
             dynamic_watch_registration: Arc::new(AtomicBool::new(false)),
+            semantic_tokens_cache: Arc::new(Mutex::new(SemanticTokensCache::default())),
         }
     }
 
@@ -336,6 +381,41 @@ impl Backend {
 
     fn workspace_invalidation_pending(&self) -> bool {
         self.pending_workspace_invalidation.load(Ordering::SeqCst) != 0
+    }
+
+    /// The semantic tokens for a document, preferring analyzed binding facts when a
+    /// fresh checked snapshot covers the editor-visible text. The parse-only
+    /// classification is computed only as the fallback, so the fresh-analysis path
+    /// never pays for a classification it would discard.
+    fn compute_semantic_tokens(
+        &self,
+        document: &DocumentSnapshot,
+        documents: &DocumentAnalysisSnapshot,
+        path: &Path,
+    ) -> Vec<SemanticToken> {
+        if !self.workspace_invalidation_pending()
+            && let Ok(mut analysis) = self.analysis.try_lock()
+        {
+            let has_fresh_analysis =
+                snapshot_has_document_text(analysis.workspace.latest(), path, &document.text)
+                    && analysis.workspace.latest_matches_snapshot(documents);
+            if has_fresh_analysis {
+                analysis.workspace.binding_index();
+                let workspace = &analysis.workspace;
+                if let (Some(snapshot), Some(binding_index)) =
+                    (workspace.latest(), workspace.binding_index_cached())
+                    && let Some(semantic) = semantic_tokens::semantic_tokens_for_file(
+                        snapshot,
+                        binding_index,
+                        path,
+                        &document.index,
+                    )
+                {
+                    return semantic;
+                }
+            }
+        }
+        semantic_tokens::semantic_tokens(&document.lexed, &document.parsed, &document.index)
     }
 
     /// `marrow/savedRoots`: the project's saved root views. Requires a fresh
@@ -802,7 +882,10 @@ impl LanguageServer for Backend {
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
                             legend: semantic_tokens::legend(),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            // Advertise delta so the editor can request only the tokens
+                            // that changed since the `result_id` it last received; the
+                            // server keys its per-document token cache on that id.
+                            full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
                             ..SemanticTokensOptions::default()
                         },
                     ),
@@ -1329,7 +1412,8 @@ impl LanguageServer for Backend {
 
     /// Classify the document's cached lex into semantic tokens. Reads only the
     /// cached lex, parse, position index, and cached analysis facts — no project
-    /// recompute.
+    /// recompute. The returned `result_id` lets the client follow up with a delta
+    /// request that receives only the tokens that changed.
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
@@ -1343,37 +1427,51 @@ impl LanguageServer for Backend {
         else {
             return Ok(None);
         };
-        let mut data =
-            semantic_tokens::semantic_tokens(&document.lexed, &document.parsed, &document.index);
-        if !self.workspace_invalidation_pending()
-            && let Ok(mut analysis) = self.analysis.try_lock()
-        {
-            let has_fresh_analysis =
-                snapshot_has_document_text(analysis.workspace.latest(), &path, &document.text)
-                    && analysis.workspace.latest_matches_snapshot(&documents);
-            if has_fresh_analysis {
-                let _ = analysis.workspace.binding_index();
-            }
-            if let (Some(snapshot), Some(binding_index)) = (
-                has_fresh_analysis
-                    .then(|| analysis.workspace.latest())
-                    .flatten(),
-                has_fresh_analysis
-                    .then(|| analysis.workspace.binding_index_cached())
-                    .flatten(),
-            ) && let Some(semantic) = semantic_tokens::semantic_tokens_for_file(
-                snapshot,
-                binding_index,
-                path.as_path(),
-                &document.index,
-            ) {
-                data = semantic;
-            }
-        }
+        let data = self.compute_semantic_tokens(&document, &documents, &path);
+        let result_id = self
+            .semantic_tokens_cache
+            .lock()
+            .await
+            .store(url, data.clone());
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
+            result_id: Some(result_id),
             data,
         })))
+    }
+
+    /// Answer `semanticTokens/full/delta`: recompute the document's tokens and, when
+    /// the client's `previous_result_id` still names a cached stream, return only the
+    /// edits against it rather than the whole stream. A stale or unknown base falls
+    /// back to a full token response, as the LSP permits.
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> jsonrpc::Result<Option<SemanticTokensFullDeltaResult>> {
+        let url = params.text_document.uri;
+        let Some(path) = url_to_path(&url) else {
+            return Ok(None);
+        };
+        let Some((document, documents)) =
+            snapshot_document_and_analysis(&self.documents, &url).await
+        else {
+            return Ok(None);
+        };
+        let data = self.compute_semantic_tokens(&document, &documents, &path);
+        let mut cache = self.semantic_tokens_cache.lock().await;
+        let edits = cache
+            .previous(&url, &params.previous_result_id)
+            .map(|previous| semantic_tokens::semantic_tokens_delta_edits(previous, &data));
+        let result_id = cache.store(url, data.clone());
+        Ok(Some(match edits {
+            Some(edits) => SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
+                result_id: Some(result_id),
+                edits,
+            }),
+            None => SemanticTokensFullDeltaResult::Tokens(SemanticTokens {
+                result_id: Some(result_id),
+                data,
+            }),
+        }))
     }
 
     /// Format the whole document. Reads only the cached parse and text, calling the
@@ -1772,6 +1870,97 @@ fn snapshot_has_document_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full request hands back a `result_id`; a follow-up delta request that echoes
+    /// it must return incremental edits against the previously returned stream — not a
+    /// full re-encode — and an unrecognized base id must degrade to a full response.
+    #[tokio::test]
+    async fn semantic_tokens_delta_returns_edits_against_the_prior_result_id() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let file = std::path::PathBuf::from("/tmp/delta-project/src/app.mw");
+        let url = Url::from_file_path(&file).unwrap();
+        let v1 = "module app\n\nfn f(): int\n    return 1\n";
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(url.clone(), v1.to_string(), Some(1));
+        }
+
+        let full = <Backend as LanguageServer>::semantic_tokens_full(
+            backend,
+            SemanticTokensParams {
+                text_document: TextDocumentIdentifier { uri: url.clone() },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("full tokens");
+        let (result_id, full_len) = match full {
+            SemanticTokensResult::Tokens(tokens) => (
+                tokens.result_id.expect("a result_id for delta follow-up"),
+                tokens.data.len(),
+            ),
+            SemanticTokensResult::Partial(_) => panic!("expected full tokens, not partial"),
+        };
+
+        // A small edit: one added declaration line. The delta must not re-encode the
+        // whole file.
+        let v2 = "module app\n\nconst K: int = 7\n\nfn f(): int\n    return 1\n";
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.change_with_version(&url, v2.to_string(), Some(2));
+        }
+
+        let delta = <Backend as LanguageServer>::semantic_tokens_full_delta(
+            backend,
+            SemanticTokensDeltaParams {
+                text_document: TextDocumentIdentifier { uri: url.clone() },
+                previous_result_id: result_id.clone(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("delta result");
+        let new_result_id = match delta {
+            SemanticTokensFullDeltaResult::TokensDelta(delta) => {
+                assert!(!delta.edits.is_empty(), "an edit must produce delta edits");
+                let inserted = delta
+                    .edits
+                    .iter()
+                    .map(|edit| edit.data.as_ref().map(Vec::len).unwrap_or(0))
+                    .sum::<usize>();
+                assert!(
+                    inserted < full_len,
+                    "a one-line change must send fewer inserted tokens than a full re-encode"
+                );
+                delta.result_id.expect("a delta result_id")
+            }
+            other => panic!("expected a token delta, got {other:?}"),
+        };
+
+        // An unrecognized base id (the cache has advanced past it) degrades to a full
+        // token response rather than a bogus delta.
+        let stale = <Backend as LanguageServer>::semantic_tokens_full_delta(
+            backend,
+            SemanticTokensDeltaParams {
+                text_document: TextDocumentIdentifier { uri: url.clone() },
+                previous_result_id: format!("{new_result_id}-stale"),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("delta result");
+        assert!(
+            matches!(stale, SemanticTokensFullDeltaResult::Tokens(_)),
+            "an unknown previous_result_id must fall back to a full token response"
+        );
+    }
 
     #[test]
     fn snapshot_source_match_rejects_freshly_edited_document_text() {

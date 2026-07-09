@@ -9,7 +9,10 @@ mod encoding;
 use std::path::Path;
 
 use encoding::push;
-use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend};
+use lsp_types::{
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensEdit,
+    SemanticTokensLegend,
+};
 use marrow_check::{
     AnalysisSnapshot, BindingIndex,
     tooling::{
@@ -118,6 +121,57 @@ pub fn semantic_tokens_for_file(
 ) -> Option<Vec<SemanticToken>> {
     source_semantic_token_facts_for_file(snapshot, binding_index, file)
         .map(|facts| encode_facts(facts, index))
+}
+
+/// Each semantic token occupies five consecutive uints on the wire
+/// (`deltaLine`, `deltaStart`, `length`, `tokenType`, `tokenModifiers`). LSP
+/// token edits index into that flattened array, so an edit over whole tokens is
+/// scaled by this factor.
+const UINTS_PER_TOKEN: u32 = 5;
+
+/// The minimal `semanticTokens/full/delta` edits transforming `previous` into
+/// `current`, expressed over the flattened uint array the wire format uses.
+///
+/// A common prefix and suffix of byte-identical encoded tokens are retained and a
+/// single edit replaces only the differing middle, so an unchanged region of a
+/// large open file is neither re-sent nor re-decoded by the editor. Because the
+/// diff runs over the exact encoded uints the client holds, splicing the edit into
+/// that array reproduces `current` regardless of how relative deltas shifted.
+pub fn semantic_tokens_delta_edits(
+    previous: &[SemanticToken],
+    current: &[SemanticToken],
+) -> Vec<SemanticTokensEdit> {
+    let prefix = common_prefix(previous, current);
+    let unmatched = previous.len().min(current.len()) - prefix;
+    let suffix = common_suffix(&previous[prefix..], &current[prefix..], unmatched);
+    let removed = &previous[prefix..previous.len() - suffix];
+    let inserted = &current[prefix..current.len() - suffix];
+    if removed.is_empty() && inserted.is_empty() {
+        return Vec::new();
+    }
+    vec![SemanticTokensEdit {
+        start: prefix as u32 * UINTS_PER_TOKEN,
+        delete_count: removed.len() as u32 * UINTS_PER_TOKEN,
+        data: (!inserted.is_empty()).then(|| inserted.to_vec()),
+    }]
+}
+
+fn common_prefix(previous: &[SemanticToken], current: &[SemanticToken]) -> usize {
+    previous
+        .iter()
+        .zip(current)
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn common_suffix(previous: &[SemanticToken], current: &[SemanticToken], limit: usize) -> usize {
+    previous
+        .iter()
+        .rev()
+        .zip(current.iter().rev())
+        .take(limit)
+        .take_while(|(left, right)| left == right)
+        .count()
 }
 
 fn encode_facts(
