@@ -226,7 +226,12 @@ impl PreparedRecompute {
     ///
     /// On the source-only interactive path the configured test roots are dropped so
     /// the checker discovers no test modules — test checking never alters source
-    /// diagnostics, so the shorter run publishes the same source facts.
+    /// diagnostics, so the shorter run publishes the same source facts. Because the
+    /// resulting snapshot omits test files, it also carries no use-sites for them: a
+    /// find-references or rename over a source symbol may under-report references
+    /// inside closed test modules during a keystroke burst, until the next full
+    /// recompute restores them. Diagnostics for those files are held across the gap
+    /// by scoping the publish reconcile to the analyzed set.
     pub fn analyze(mut self) -> Result<AnalysisSnapshot, marrow_project::DiscoverError> {
         if self.source_only {
             self.config.tests.clear();
@@ -251,6 +256,13 @@ impl PreparedRecompute {
     /// watcher invalidation that landed while the check ran off the lock.
     pub fn invalidation_epoch(&self) -> u64 {
         self.invalidation_epoch
+    }
+
+    /// Whether this run elides test modules. The publish path reads it to scope the
+    /// diagnostics reconcile to the analyzed files, so a closed test module the run
+    /// skipped keeps its published diagnostics rather than being cleared to empty.
+    pub fn source_only(&self) -> bool {
+        self.source_only
     }
 }
 

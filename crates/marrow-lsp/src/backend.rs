@@ -126,6 +126,12 @@ impl SemanticTokensCache {
         result_id
     }
 
+    /// Drop the retained stream for `url`. Called when a document closes so a stale
+    /// token stream does not linger for a buffer the editor no longer shows.
+    fn forget(&mut self, url: &Url) {
+        self.entries.remove(url);
+    }
+
     /// The tokens last returned for `url`, only when they carry `result_id` — a
     /// delta whose base the cache no longer holds falls back to a full response.
     fn previous(&self, url: &Url, result_id: &str) -> Option<&[SemanticToken]> {
@@ -228,21 +234,36 @@ impl DiagnosticsTracker {
         &mut self,
         root: &Path,
         epoch: u64,
+        scope: &ReconcileScope,
         diagnostics: &mut HashMap<Url, Vec<Diagnostic>>,
     ) -> bool {
         if self.is_stale(root, epoch) {
             return false;
         }
+        let mut carried_forward: Vec<Url> = Vec::new();
         if let Some(root_diagnostics) = self.roots.get(root) {
             for url in &root_diagnostics.non_empty_urls {
-                diagnostics.entry(url.clone()).or_default();
+                if scope.covers(url) {
+                    // The run covered this file, so its fresh diagnostics are
+                    // authoritative: a URL now absent gets an empty entry that clears
+                    // whatever problem the edit resolved.
+                    diagnostics.entry(url.clone()).or_default();
+                } else {
+                    // A previously-tracked file the run excluded — a closed test module a
+                    // source-only interactive recompute skipped. The run learned nothing
+                    // about it, so its last-published diagnostics stand until a full
+                    // recompute revisits it; clearing them here would wrongly wipe a real
+                    // on-disk error from the Problems panel.
+                    carried_forward.push(url.clone());
+                }
             }
         }
-        let non_empty_urls = diagnostics
+        let mut non_empty_urls: HashSet<Url> = diagnostics
             .iter()
             .filter(|(_, diagnostics)| !diagnostics.is_empty())
             .map(|(url, _)| url.clone())
             .collect();
+        non_empty_urls.extend(carried_forward);
         self.roots
             .entry(root.to_path_buf())
             .or_default()
@@ -283,6 +304,37 @@ struct PublishedDiagnostics {
     url: Url,
     diagnostics: Vec<Diagnostic>,
     version: Option<i32>,
+}
+
+/// Which tracked URLs a successful recompute's publish may reconcile. A full run
+/// covers the whole project, so every tracked URL is authoritative. A source-only
+/// interactive run analyzed only its source files and skipped closed test modules,
+/// so it may reconcile only those files; a tracked URL outside the analyzed set keeps
+/// its published diagnostics instead of being cleared by a run that never checked it.
+enum ReconcileScope {
+    Whole,
+    SourceOnly { analyzed: HashSet<Url> },
+}
+
+impl ReconcileScope {
+    /// The scope for a source-only run: the URLs of the files it actually analyzed.
+    fn source_only(snapshot: &AnalysisSnapshot) -> Self {
+        let analyzed = snapshot
+            .files
+            .iter()
+            .filter_map(|file| Url::from_file_path(&file.path).ok())
+            .collect();
+        Self::SourceOnly { analyzed }
+    }
+
+    /// Whether this run is authoritative for `url` — a full run always is; a
+    /// source-only run only for a file it analyzed.
+    fn covers(&self, url: &Url) -> bool {
+        match self {
+            Self::Whole => true,
+            Self::SourceOnly { analyzed } => analyzed.contains(url),
+        }
+    }
 }
 
 struct RecomputeContext<'a> {
@@ -675,6 +727,9 @@ impl Backend {
         // read handlers throughout.
         let generation = prepared.documents_generation();
         let captured_epoch = prepared.invalidation_epoch();
+        // A source-only run skipped test modules; the publish reconcile below must not
+        // clear their tracked diagnostics. Captured before `prepared` is consumed.
+        let source_only = prepared.source_only();
         let snapshot = match tokio::task::spawn_blocking(move || prepared.analyze()).await {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => {
@@ -751,6 +806,13 @@ impl Backend {
                 .get(url)
                 .map(|document| document.index.as_ref())
         });
+        // A source-only interactive run analyzed no test modules, so it may reconcile
+        // only the files it checked; a full run is authoritative for the whole project.
+        let reconcile_scope = if source_only {
+            ReconcileScope::source_only(&snapshot)
+        } else {
+            ReconcileScope::Whole
+        };
         drop(analysis);
         if context
             .pending_workspace_invalidation
@@ -772,7 +834,12 @@ impl Backend {
                 .filter(|(scheduled_root, _)| scheduled_root == &root)
                 .map(|(_, epoch)| *epoch)
                 .unwrap_or_else(|| diagnostics.epoch(&root));
-            if !diagnostics.reconcile_success(&root, epoch, &mut diagnostics_by_url) {
+            if !diagnostics.reconcile_success(
+                &root,
+                epoch,
+                &reconcile_scope,
+                &mut diagnostics_by_url,
+            ) {
                 None
             } else {
                 Some(
@@ -1079,6 +1146,9 @@ impl LanguageServer for Backend {
             let mut documents = self.documents.lock().await;
             documents.close(&url);
         }
+        // Drop the per-URL semantic-token stream so a closed buffer does not linger in
+        // the cache; a later reopen re-encodes from scratch under a fresh result_id.
+        self.semantic_tokens_cache.lock().await.forget(&url);
         let root_epoch = {
             let analysis = self.analysis.try_lock().ok();
             let mut diagnostics = self.diagnostics.lock().await;
@@ -1251,6 +1321,14 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = document.index.offset(to_core_position(position.position));
+        #[cfg(test)]
+        self.hold_request_gate().await;
+        // A newer edit superseded the buffer this request captured its offset against,
+        // so that offset no longer names the editor's source; drop rather than answer
+        // for a stale cursor. The client re-requests against the current content.
+        if self.request_superseded(&documents).await {
+            return Err(content_modified());
+        }
         let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(None);
         };
@@ -1284,6 +1362,14 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = document.index.offset(to_core_position(position.position));
+        #[cfg(test)]
+        self.hold_request_gate().await;
+        // A newer edit superseded the buffer this request captured its offset against,
+        // so that offset no longer names the editor's source; drop rather than answer
+        // for a stale cursor. The client re-requests against the current content.
+        if self.request_superseded(&documents).await {
+            return Err(content_modified());
+        }
         let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(None);
         };
@@ -1322,6 +1408,14 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = document.index.offset(to_core_position(params.position));
+        #[cfg(test)]
+        self.hold_request_gate().await;
+        // A newer edit superseded the buffer this request captured its offset against,
+        // so that offset no longer names the editor's source; drop rather than answer
+        // for a stale cursor. The client re-requests against the current content.
+        if self.request_superseded(&documents).await {
+            return Err(content_modified());
+        }
         let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(None);
         };
@@ -1354,6 +1448,14 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let offset = document.index.offset(to_core_position(position.position));
+        #[cfg(test)]
+        self.hold_request_gate().await;
+        // A newer edit superseded the buffer this rename captured its offset against.
+        // Building a WorkspaceEdit from a stale offset could rewrite the wrong text, so
+        // drop rather than answer; the client re-requests against the current content.
+        if self.request_superseded(&documents).await {
+            return Err(content_modified());
+        }
         let Ok(mut analysis) = self.analysis.try_lock() else {
             return Ok(None);
         };
@@ -1491,6 +1593,14 @@ impl LanguageServer for Backend {
         };
         let offset = document.index.offset(to_core_position(position.position));
 
+        #[cfg(test)]
+        self.hold_request_gate().await;
+        // A newer edit superseded the buffer this request captured its offset against,
+        // so that offset no longer names the editor's source; drop rather than answer
+        // for a stale cursor. The client re-requests against the current content.
+        if self.request_superseded(&documents).await {
+            return Err(content_modified());
+        }
         let Ok(analysis) = self.analysis.try_lock() else {
             return Ok(None);
         };
@@ -2339,6 +2449,218 @@ mod tests {
         }
     }
 
+    /// Rename is the sharpest superseded-request case: it builds a WorkspaceEdit from
+    /// the captured cursor offset, so answering against a buffer a newer edit already
+    /// replaced could rewrite the wrong text. A superseded rename must drop with
+    /// `ContentModified` rather than compute an edit from the stale offset.
+    #[tokio::test]
+    async fn rename_drops_a_request_superseded_by_a_newer_edit() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("app.mw");
+        let v1 = "module app\n\npub fn answer(): int\n    return 42\n\n\
+                  pub fn caller(): int\n    return answer()\n";
+        std::fs::write(&file, v1).unwrap();
+        let url = Url::from_file_path(&file).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(url.clone(), v1.to_string(), Some(1));
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+
+        // A completed recompute leaves a good analysis, so rename would otherwise
+        // produce an edit for the `answer` symbol under the cursor.
+        {
+            let documents = Arc::clone(&backend.documents);
+            let analysis = Arc::clone(&backend.analysis);
+            let analysis_run = Arc::clone(&backend.analysis_run);
+            let diagnostics = Arc::clone(&backend.diagnostics);
+            let publish = Arc::clone(&backend.diagnostics_publish);
+            let pending = Arc::clone(&backend.pending_workspace_invalidation);
+            let project_file_count = Arc::clone(&backend.project_file_count);
+            let client = backend.client.clone();
+            Backend::recompute_and_publish(
+                RecomputeContext {
+                    documents: &documents,
+                    analysis: &analysis,
+                    analysis_run: &analysis_run,
+                    diagnostics: &diagnostics,
+                    diagnostics_publish: &publish,
+                    pending_workspace_invalidation: &pending,
+                    project_file_count: &project_file_count,
+                    client: &client,
+                },
+                &file,
+                None,
+                RecomputeScope::Full,
+            )
+            .await;
+        }
+
+        // Park the next rename between capturing its document world and its supersede
+        // check, so an edit can land in that window.
+        let gate = TestRecomputeGate::new();
+        *backend.request_gate.lock().await = Some(Arc::clone(&gate));
+
+        let call_position = Position {
+            line: 6,
+            character: 12,
+        };
+        let rename_future = <Backend as LanguageServer>::rename(
+            backend,
+            RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: url.clone() },
+                    position: call_position,
+                },
+                new_name: "resolved".to_string(),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        );
+        let supersede_future = async {
+            gate.wait_until_entered().await;
+            <Backend as LanguageServer>::did_change(
+                backend,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: url.clone(),
+                        version: 2,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: format!("{v1}\npub fn added(): int\n    return 1\n"),
+                    }],
+                },
+            )
+            .await;
+            gate.release().await;
+        };
+        let (result, ()) = tokio::join!(rename_future, supersede_future);
+        match result {
+            Err(error) => assert_eq!(
+                error.code,
+                jsonrpc::ErrorCode::ServerError(-32801),
+                "a superseded rename must drop with ContentModified, not edit a stale offset"
+            ),
+            Ok(other) => panic!("expected a dropped rename, got {other:?}"),
+        }
+    }
+
+    /// A source-only interactive recompute skips closed test modules, so it has no
+    /// fresh facts for them. It must not clear the diagnostics a prior full run
+    /// published for a closed test file with a real error — carrying them forward until
+    /// the next full recompute revisits the file. Before the reconcile was scoped to the
+    /// analyzed set, the keystroke path wiped that error from the Problems panel.
+    #[tokio::test]
+    async fn a_source_only_recompute_keeps_a_closed_test_files_diagnostics() {
+        let (service, _socket) = tower_lsp::LspService::build(Backend::new).finish();
+        let backend = service.inner();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("marrow.json"),
+            r#"{ "sourceRoots": ["src"], "tests": ["tests"], "store": { "backend": "memory" } }"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        let tests = root.join("tests");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&tests).unwrap();
+        let app = src.join("app.mw");
+        let app_test = tests.join("app_test.mw");
+        let app_source = "module app\n\npub fn answer(): int\n    return 1\n";
+        // A real check error in the closed test module: the body returns a string where
+        // the signature declares an int.
+        let test_source = "module app_test\n\npub fn checks(): int\n    return \"nope\"\n";
+        std::fs::write(&app, app_source).unwrap();
+        std::fs::write(&app_test, test_source).unwrap();
+        let app_url = Url::from_file_path(&app).unwrap();
+        let test_url = Url::from_file_path(&app_test).unwrap();
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.open_with_version(app_url.clone(), app_source.to_string(), Some(1));
+        }
+        {
+            let mut diagnostics = backend.diagnostics.lock().await;
+            diagnostics.bump_root_epoch(root);
+        }
+
+        let run = |backend: &Backend, file: PathBuf, scope: RecomputeScope| {
+            let documents = Arc::clone(&backend.documents);
+            let analysis = Arc::clone(&backend.analysis);
+            let analysis_run = Arc::clone(&backend.analysis_run);
+            let diagnostics = Arc::clone(&backend.diagnostics);
+            let publish = Arc::clone(&backend.diagnostics_publish);
+            let pending = Arc::clone(&backend.pending_workspace_invalidation);
+            let count = Arc::clone(&backend.project_file_count);
+            let client = backend.client.clone();
+            async move {
+                Backend::recompute_and_publish(
+                    RecomputeContext {
+                        documents: &documents,
+                        analysis: &analysis,
+                        analysis_run: &analysis_run,
+                        diagnostics: &diagnostics,
+                        diagnostics_publish: &publish,
+                        pending_workspace_invalidation: &pending,
+                        project_file_count: &count,
+                        client: &client,
+                    },
+                    &file,
+                    None,
+                    scope,
+                )
+                .await;
+            }
+        };
+
+        // A full recompute checks the test module and tracks its real error.
+        run(backend, app.clone(), RecomputeScope::Full).await;
+        assert!(
+            backend.diagnostics.lock().await.is_tracked(root, &test_url),
+            "a full recompute must track the closed test file's real error"
+        );
+
+        // A keystroke edits the source buffer, bumping the document generation.
+        {
+            let mut documents = backend.documents.lock().await;
+            documents.change_with_version(
+                &app_url,
+                "module app\n\npub fn answer(): int\n    return 2\n".to_string(),
+                Some(2),
+            );
+        }
+
+        // The interactive keystroke recompute is source-only (no test buffer open), so
+        // it excludes the closed test module. Its diagnostics must survive.
+        run(backend, app.clone(), RecomputeScope::Interactive).await;
+        assert!(
+            backend.diagnostics.lock().await.is_tracked(root, &test_url),
+            "a source-only interactive recompute must not clear a closed test file's diagnostics"
+        );
+
+        // A later full recompute revisits the test file; its error is still present, so
+        // it remains tracked — the refresh path still works.
+        run(backend, app.clone(), RecomputeScope::Full).await;
+        assert!(
+            backend.diagnostics.lock().await.is_tracked(root, &test_url),
+            "a later full recompute continues to refresh and track the still-present error"
+        );
+    }
+
     #[test]
     fn snapshot_source_match_rejects_freshly_edited_document_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -3175,7 +3497,12 @@ mod tests {
             let mut diagnostics = backend.diagnostics.lock().await;
             let epoch = diagnostics.bump_root_epoch(&root);
             let mut published = std::collections::HashMap::from([(bad_url.clone(), non_empty())]);
-            assert!(diagnostics.reconcile_success(&root, epoch, &mut published));
+            assert!(diagnostics.reconcile_success(
+                &root,
+                epoch,
+                &ReconcileScope::Whole,
+                &mut published
+            ));
         }
 
         let analysis_guard = backend.analysis.lock().await;
@@ -3532,7 +3859,12 @@ mod tests {
         let mut tracker = DiagnosticsTracker::new();
         let epoch_a = tracker.bump_root_epoch(&root_a);
         let mut diagnostics = std::collections::HashMap::from([(bad_a_url.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root_a, epoch_a, &mut diagnostics));
+        assert!(tracker.reconcile_success(
+            &root_a,
+            epoch_a,
+            &ReconcileScope::Whole,
+            &mut diagnostics
+        ));
 
         let project_b = tempfile::tempdir().unwrap();
         let root_b = project_b.path().to_path_buf();
@@ -3697,7 +4029,7 @@ mod tests {
         let mut tracker = DiagnosticsTracker::new();
         let epoch = tracker.bump_root_epoch(&root);
         let mut diagnostics = std::collections::HashMap::from([(bad_url.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root, epoch, &mut diagnostics));
+        assert!(tracker.reconcile_success(&root, epoch, &ReconcileScope::Whole, &mut diagnostics));
 
         let changes = [WatchedPathChange {
             uri: config_url,
@@ -3793,11 +4125,11 @@ mod tests {
 
         let epoch = tracker.bump_root_epoch(&root);
         let mut first = std::collections::HashMap::from([(previous.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root, epoch, &mut first));
+        assert!(tracker.reconcile_success(&root, epoch, &ReconcileScope::Whole, &mut first));
 
         let epoch = tracker.bump_root_epoch(&root);
         let mut next = std::collections::HashMap::from([(current.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root, epoch, &mut next));
+        assert!(tracker.reconcile_success(&root, epoch, &ReconcileScope::Whole, &mut next));
 
         assert!(
             next.get(&previous).is_some_and(Vec::is_empty),
@@ -3817,11 +4149,11 @@ mod tests {
 
         let epoch_a = tracker.bump_root_epoch(&root_a);
         let mut first = std::collections::HashMap::from([(url_a.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root_a, epoch_a, &mut first));
+        assert!(tracker.reconcile_success(&root_a, epoch_a, &ReconcileScope::Whole, &mut first));
 
         let epoch_b = tracker.bump_root_epoch(&root_b);
         let mut second = std::collections::HashMap::from([(url_b.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root_b, epoch_b, &mut second));
+        assert!(tracker.reconcile_success(&root_b, epoch_b, &ReconcileScope::Whole, &mut second));
 
         assert!(
             !second.contains_key(&url_a),
@@ -3839,7 +4171,7 @@ mod tests {
 
         let epoch = tracker.bump_root_epoch(&root);
         let mut diagnostics = std::collections::HashMap::from([(url.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root, epoch, &mut diagnostics));
+        assert!(tracker.reconcile_success(&root, epoch, &ReconcileScope::Whole, &mut diagnostics));
 
         assert_eq!(
             tracker.tracked_root_for_path(std::path::Path::new("/tmp/project-a/src/bad.mw")),
@@ -3864,7 +4196,12 @@ mod tests {
         assert!(!tracker.is_stale(&root, current_epoch));
 
         let mut stale_result = std::collections::HashMap::from([(url.clone(), non_empty())]);
-        assert!(!tracker.reconcile_success(&root, stale_epoch, &mut stale_result));
+        assert!(!tracker.reconcile_success(
+            &root,
+            stale_epoch,
+            &ReconcileScope::Whole,
+            &mut stale_result
+        ));
         assert!(
             !tracker.is_tracked(&root, &url),
             "stale results should not replace current tracked diagnostics"
@@ -3881,10 +4218,10 @@ mod tests {
 
         let epoch_a = tracker.bump_root_epoch(&root_a);
         let mut first = std::collections::HashMap::from([(url_a.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root_a, epoch_a, &mut first));
+        assert!(tracker.reconcile_success(&root_a, epoch_a, &ReconcileScope::Whole, &mut first));
         let epoch_b = tracker.bump_root_epoch(&root_b);
         let mut second = std::collections::HashMap::from([(url_b.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root_b, epoch_b, &mut second));
+        assert!(tracker.reconcile_success(&root_b, epoch_b, &ReconcileScope::Whole, &mut second));
 
         assert_eq!(tracker.clear_root(&root_a), vec![url_a.clone()]);
 
@@ -3900,7 +4237,12 @@ mod tests {
 
         let stale_epoch = tracker.bump_root_epoch(&root);
         let mut diagnostics = std::collections::HashMap::from([(url.clone(), non_empty())]);
-        assert!(tracker.reconcile_success(&root, stale_epoch, &mut diagnostics));
+        assert!(tracker.reconcile_success(
+            &root,
+            stale_epoch,
+            &ReconcileScope::Whole,
+            &mut diagnostics
+        ));
         let current_epoch = tracker.bump_root_epoch(&root);
 
         assert_eq!(tracker.clear_root(&root), vec![url.clone()]);
@@ -3922,7 +4264,7 @@ mod tests {
             (bad.clone(), non_empty()),
             (worse.clone(), non_empty()),
         ]);
-        assert!(tracker.reconcile_success(&root, epoch, &mut first));
+        assert!(tracker.reconcile_success(&root, epoch, &ReconcileScope::Whole, &mut first));
 
         assert!(tracker.clear_url(&root, &bad));
         assert!(!tracker.clear_url(&root, &bad));
