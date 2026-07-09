@@ -1882,7 +1882,7 @@ fn delta_edits_replace_only_the_changed_middle_of_a_large_file() {
     let previous = semantic_tokens(
         &lex_source(&lines),
         &parse_source(&lines),
-        &LineIndex::new(&lines),
+        &LineIndex::new(lines.as_str()),
     );
 
     // Change a single literal deep in the file.
@@ -1890,7 +1890,7 @@ fn delta_edits_replace_only_the_changed_middle_of_a_large_file() {
     let current = semantic_tokens(
         &lex_source(&edited),
         &parse_source(&edited),
-        &LineIndex::new(&edited),
+        &LineIndex::new(edited.as_str()),
     );
 
     let edits = semantic_tokens_delta_edits(&previous, &current);
