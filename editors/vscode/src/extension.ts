@@ -13,6 +13,7 @@ import {
   type SavedResourceNode,
 } from "./savedResourceInspector";
 import { type LauncherHost, type LauncherMode, resolveBinaryPath } from "./launcher";
+import { withStartTimeout } from "./watchdog";
 
 let client: LanguageClient | undefined;
 
@@ -214,25 +215,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 // stopped so a half-started server is never wired into the editor. Returns whether
 // the client started.
 async function startClientWithWatchdog(languageClient: LanguageClient): Promise<boolean> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const watchdog = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`server did not start within ${SERVER_START_TIMEOUT_MS} ms`)),
-      SERVER_START_TIMEOUT_MS,
-    );
-  });
-
   try {
-    await Promise.race([languageClient.start(), watchdog]);
+    await withStartTimeout(languageClient.start(), SERVER_START_TIMEOUT_MS);
     return true;
   } catch (error) {
     void vscode.window.showErrorMessage(`Marrow: the language server failed to start: ${error}`);
     await languageClient.stop().catch(() => undefined);
     return false;
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
   }
 }
 

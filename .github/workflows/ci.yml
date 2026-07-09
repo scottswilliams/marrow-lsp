@@ -107,3 +107,85 @@ jobs:
         run: npm run compile
       - name: Audit
         run: npm audit --audit-level=moderate
+
+  # Packaged-extension end-to-end: build the real host VSIX and the MCP binary against
+  # the pinned marrow, then drive one live request per transport against the real
+  # binaries (LSP hover + DAP stop-on-entry through the installed VSIX under a headless
+  # display; an MCP tools/call against the spawned server). This replaces the former
+  # fake-binary bundle smoke, so a broken activation event, wrong-arch binary, or
+  # transport handshake failure fails CI instead of shipping dead.
+  packaged-e2e:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+    steps:
+      - name: Check out marrow-lsp
+        uses: actions/checkout@v4
+        with:
+          path: marrow-lsp
+
+      - name: Read the pinned marrow revision
+        id: pin
+        run: |
+          rev=$(grep -E '^rev[[:space:]]*=' marrow-lsp/pins/marrow-rev.toml | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          if ! printf '%s' "$rev" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "pinned marrow rev is not a 40-hex commit: '$rev'"; exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Check out marrow at the pin (sibling ../marrow)
+        uses: actions/checkout@v4
+        with:
+          repository: scottswilliams/marrow
+          ref: ${{ steps.pin.outputs.rev }}
+          path: marrow
+
+      - name: Assert the checked-out marrow matches the pin (fail closed)
+        env:
+          PIN_REV: ${{ steps.pin.outputs.rev }}
+        run: |
+          got=$(git -C marrow rev-parse HEAD)
+          if [ "$got" != "$PIN_REV" ]; then
+            echo "marrow checkout $got does not match pin $PIN_REV"
+            exit 1
+          fi
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install 1.89 --profile minimal
+          rustup default 1.89
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install extension dependencies
+        working-directory: marrow-lsp/editors/vscode
+        run: npm ci
+
+      - name: Install e2e test tooling
+        # Kept out of package.json so the shipped dependency tree and `npm audit` stay
+        # lean; the packaged-e2e job installs the electron test harness at job time.
+        working-directory: marrow-lsp/editors/vscode
+        run: npm install --no-save @vscode/test-electron mocha
+
+      - name: Build the host VSIX (dev, against the pinned sibling marrow)
+        working-directory: marrow-lsp/editors/vscode
+        run: node ./scripts/package.mjs --allow-path-deps
+
+      - name: Build the MCP server binary
+        working-directory: marrow-lsp
+        run: cargo build -p marrow-mcp
+
+      - name: Install a headless display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Drive LSP + DAP through the packaged extension
+        working-directory: marrow-lsp/editors/vscode
+        run: xvfb-run -a node ./test/e2e/runTests.mjs
+
+      - name: Drive the MCP transport against the real server
+        working-directory: marrow-lsp/editors/vscode
+        run: node ./test/e2e/mcpTransport.mjs
