@@ -1,13 +1,17 @@
 # marrow-lsp
 
-Editor and agent toolchain for the [Marrow](https://github.com/scottswilliams/marrow) `.mw`
-language: a VSCode extension, a Language Server (LSP), an MCP server for coding agents, and a
-DAP debugger. They are three transports over one Rust brain.
+Editor, debugger, and semantic tooling for the
+[Marrow](https://github.com/scottswilliams/marrow) `.mw` language. The current
+workspace contains a VS Code extension, a Language Server (LSP), a DAP debugger,
+and an optional MCP server for automation.
 
-All language intelligence lives in `marrow-lsp-core`, which reuses the canonical marrow crates
-(`marrow-syntax`, `marrow-check`, `marrow-catalog`, `marrow-json`, `marrow-schema`,
-`marrow-store`, `marrow-run`, `marrow-project`) and never reimplements the parser, checker, or
-type system. The marrow repo's `docs/language/` is the source of truth for `.mw` behavior.
+Language intelligence is currently concentrated in `marrow-lsp-core`, which
+reuses the canonical Marrow crates (`marrow-syntax`, `marrow-check`,
+`marrow-catalog`, `marrow-json`, `marrow-schema`, `marrow-store`, `marrow-run`,
+and `marrow-project`). It does not reimplement the parser, checker, or type
+system. Marrow's
+[`docs/language/`](https://github.com/scottswilliams/marrow/tree/main/docs/language)
+defines `.mw` behavior.
 
 ## Layout
 
@@ -16,11 +20,12 @@ crates/
   marrow-lsp-core/   the transport-free language intelligence
   marrow-lsp/        LSP server over stdio (thin transport)
   marrow-mcp/        MCP server over stdio (thin transport)
-  marrow-dap/        DAP debug adapter (thin transport)
+  marrow-dap/        DAP adapter; currently links runtime/store internals
   marrow-terminal/   terminal styling helpers shared by the transport binaries
 editors/vscode/      VSCode extension: launcher + grammar + views + debug wiring
 fixtures/shelf/      a runnable Marrow project used by tests and manual checks
-xtask/               workspace maintenance (consumed-marrow-surface drift snapshot)
+xtask/               workspace maintenance (including the currently named
+                     consumed-marrow-surface drift snapshot)
 ```
 
 ## Status
@@ -30,13 +35,12 @@ extension. Diagnostics, completion, hover, navigation, semantic tokens, formatti
 indentation, read-only data inspection, MCP tools, and statement-level debugging are
 implemented, with language behavior coming from the canonical marrow crates.
 
-Some surfaces are intentionally absent until Marrow exposes the production facts they need:
-data integrity and repair, live saved-data hover and record counts, saved-data-backed editor
-rename, and attaching to served (running) programs. The
-[production readiness roadmap](docs/roadmaps/production-readiness-roadmap.md) is the plan from
-the current state to production; the [fact-consumption ledger](docs/roadmaps/lsp-fact-consumption-ledger.md)
-records what each surface may treat as semantic authority. See `AGENTS.md` for working
-conventions.
+Some capabilities are intentionally absent until Marrow exposes the typed facts
+they need: data integrity and repair, live durable-data hover and record counts,
+durable-data-backed editor rename, and attaching to served programs. These are
+implementation gaps, not permission for this repository to infer language or
+storage meaning. The Marrow documentation and compiler APIs remain semantic
+authority; see `AGENTS.md` for working conventions.
 
 ## MCP trust boundary
 
@@ -48,8 +52,9 @@ this much:
   root is under the operator's allowed root (`--root <dir>` or `MARROW_MCP_ROOT`, defaulting to
   the launch working directory). A file whose canonical location, or whose project's `marrow.json`,
   resolves outside the root is refused with `path.out_of_root` before any store is opened.
-- **`mw_run` is sandboxed.** It executes project source but only against a fresh in-memory store;
-  the project's real store is never opened.
+- **`mw_run` is isolated from the project store.** It executes project source
+  against a fresh in-memory store, so the project's configured store is never
+  opened. This is not an operating-system process sandbox.
 - **The write grant is coarse.** With `--allow-write`, the grant is as strong as the project's most
   destructive surface action; it is not scoped to individual records.
 - **The audit trail is operational, not tamper-evident.** Every granted write appends a record
@@ -59,6 +64,7 @@ this much:
 - **Grants come only from launch configuration.** Read access, write access, and the allowed root
   are set by launch flags or environment variables and are fixed for the session; no tool call can
   widen them.
+
 ## Releasing
 
 A version tag (`v*`) drives `.github/workflows/release.yml`: it builds one `.vsix` per

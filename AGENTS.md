@@ -1,67 +1,111 @@
-# Agent Instructions
+# marrow-lsp agent instructions
 
-This repository is **marrow-lsp** — the editor and agent toolchain for the Marrow `.mw` language:
-a VSCode extension, a Language Server (LSP), an MCP server for coding agents, and a DAP debugger.
-They are three transports over one Rust brain (`marrow-lsp-core`).
+This repository supplies editor, debugger, and automation tooling for Marrow. Its current products
+are a VS Code extension, an LSP server, an optional MCP server, and a DAP debugger. These are tooling
+clients of the Marrow language; they do not define it.
 
-`docs/language/` **in the marrow repo** is the source of truth for `.mw` behavior. This repository
-never redefines language semantics; it reuses the canonical marrow crates and surfaces them
-through editors and agents.
+## Authority
 
-## Three Transports, One Core
-All language intelligence lives in `marrow-lsp-core`. `marrow-lsp` (LSP/stdio), `marrow-mcp`
-(MCP/stdio), and `marrow-dap` (DAP) are thin transports over it. A new capability lands in the
-core first, then each transport exposes it. No transport carries logic another would duplicate.
+Use the Marrow repository in this order:
 
-## Never Reimplement Language Logic
-Parsing, checking, typing, schema, store access, and execution come only from the canonical
-marrow crates. Zero reimplementation — a TypeScript or hand-rolled re-parse drifts from
-`docs/language/`. If something is missing upstream, the fix is a small, opt-in addition in marrow,
-not a fork in the core.
+1. `docs/language/` for current language behavior;
+2. `docs/vision.md` for product direction and non-goals;
+3. `docs/status.md` for the boundary between implemented, legacy, designed, and research work;
+4. `docs/design/` for explicitly human-approved unimplemented target contracts;
+5. `docs/implementation/` and the canonical Marrow crates for implementation facts.
 
-## Dependency on the marrow Crates
-Depend on the marrow crates via a path dependency during local development, and a single pinned
-git revision for release (`pins/marrow-rev.toml`). Track upstream changes deliberately: pin and
-bump on purpose, never implicitly; a bump is reviewed together with the regenerated
-`pins/consumed-marrow-surface.snapshot`.
+If prose and code disagree about current behavior, establish the discrepancy with a minimal fixture
+and repair the canonical Marrow source. Do not create a local interpretation in marrow-lsp. Old ADRs,
+drafts, and orchestration reports are historical evidence, not authority.
 
-`marrow-lsp-core` is the sole language-intelligence consumer: it links the full set of upstream
-marrow crates (syntax, check, catalog, json, schema, project, store, run) and no other crate
-decides language, catalog, storage, or runtime semantics. In production `[dependencies]` the LSP
-transport (`marrow-lsp`) links no upstream marrow crate at all — it routes everything through the
-core — and `marrow-mcp` links only `marrow-run` for sandboxed execution. The one recorded broad
-exception is `marrow-dap`, which drives runtime/debug/store internals directly
-(`syntax/check/project/store/run`); narrowing it to route through the core is tracked follow-on
-work. That production link set is enforced by the `dependency_shape` architecture test, so a new
-accidental transport→marrow link — or a transport reaching for a language-semantics crate it
-should route through the core — fails the gate. (Test-only `[dev-dependencies]` links are not part
-of the shipped shape and are not tracked.)
+## Current architecture
 
-## DAP & Runtime-Hook Discipline
-The debugger drives a minimal, opt-in step hook in the marrow runtime, gated so normal execution
-is unaffected and carries no overhead. Read-only store access opens the store read-only and treats
-a busy or unreadable store as a soft "unavailable" state, never an error shown to the user.
+Today, language intelligence is concentrated in `marrow-lsp-core`. The `marrow-lsp` LSP transport,
+`marrow-mcp` MCP transport, and `marrow-dap` debugger expose parts of it. Preserve that single-owner
+shape while it is current; do not present the exact transport topology as a permanent language
+contract.
 
-## Dual Rust + TypeScript Stack
-A Rust workspace (one core library plus thin transport binaries) and a thin TypeScript VSCode
-extension that bundles the prebuilt binaries, the grammar, the views, and the debug wiring. The
-extension is a launcher, not a second application: no parsing, position math, or project
-interpretation in TypeScript. No Rust use of `unsafe`.
+Parsing, checking, typing, schemas, catalogs, store access, and execution come from canonical Marrow
+crates. The tooling layer may select, cache, version, and present semantic facts. It must not reparse
+or reconstruct:
 
-## Anti-Bloat Boundaries
-Smallest thing that is genuinely great, then iterate. No feature in a transport that is not backed
-by the core. No vendored copy of marrow types. No speculative surface beyond what an editor or
-agent actually uses. Respect marrow's own non-goals — tooling must not smuggle in capabilities the
-kernel deliberately excludes.
+- types or language constructs;
+- stable schema identity or typed semantic paths;
+- public URI/path projections;
+- authority requirements or durable effects;
+- evolution verdicts;
+- runtime and storage meaning.
 
-## Worktree & Build Harness
-Keep build outputs, throwaway worktrees, and package-manager artifacts outside the tracked tree
-where practical, under this repo's own harness root (separate from marrow's). Set an external
-build-output directory per lane so parallel work does not contend over one target directory.
+When a client needs a missing fact, add the narrow typed fact upstream in Marrow, then consume it
+here. Facts should support selective retrieval and snapshot/version semantics so editors, CI,
+automation, and agents observe one coherent program state. Rendered diagnostic text is output, not a
+semantic API.
 
-## Verification Ladder
-- Rust: the smallest crate or test target that proves the change, then the whole workspace for
-  broad changes, with lints and formatting clean and no `unsafe`.
-- TypeScript: typecheck and lint, then extension tests, then a packaged-extension smoke test.
-- Cross-stack: the extension launches the bundled binary and exercises one real request per
-  transport.
+## Dependency boundary
+
+Use path dependencies for local development and one pinned Marrow Git revision for releases in
+`pins/marrow-rev.toml`. Bump the pin deliberately and review it with the regenerated
+`pins/consumed-marrow-surface.snapshot`. That filename records a current implementation artifact; it
+does not endorse “surface” as Marrow's long-term architecture.
+
+Currently `marrow-lsp-core` is the main consumer of the upstream syntax, checking, catalog, JSON,
+schema, project, store, and runtime crates. The LSP transport routes through the core. MCP also links
+`marrow-run` for project-store-isolated in-memory execution. DAP currently links syntax, checking,
+project, store, and runtime internals directly; this is a known current exception, not a pattern to
+extend. The `dependency_shape` architecture test enforces the shipped dependency boundary. Test-only
+dependencies do not redefine that production shape.
+
+## LSP, MCP, and DAP
+
+Keep transports thin. A transport owns protocol conversion, cancellation, lifecycle, and rendering;
+it does not own language semantics. A capability that applies across clients belongs in the core or,
+when semantic, upstream in Marrow.
+
+MCP is one optional consumer of structured facts and execution controls. Do not make agents the
+product audience or add speculative agent-only semantics. Prefer the same typed facts used by editors
+and CI.
+
+The debugger currently uses an opt-in runtime step hook so ordinary execution does not pay for debug
+events. Read-only inspection currently opens the store read-only and treats a busy or unreadable store
+as unavailable. Document these as present behavior and limitations; do not generalize them into
+durability, concurrency, or security guarantees.
+
+## Rust and TypeScript boundary
+
+Rust owns analysis, semantic state, runtime integration, and transport servers. The TypeScript VS Code
+extension bundles and launches binaries, contributes the grammar and UI, and adapts editor APIs. It
+does not parse Marrow, calculate semantic positions independently, interpret projects, infer schemas,
+or reproduce diagnostics.
+
+Use typed IDs, versioned snapshots, typed facts, and structured errors. Avoid raw paths, rendered-text
+matching, boolean mode flags, broad JSON bags, and duplicate protocol-independent classifiers. No
+Rust `unsafe`.
+
+## Documentation and claims
+
+Write in a neutral reference style. Label behavior as current, legacy, designed, accepted target, or
+research. Use “compiler-enforced,” “runtime-enforced,” “conformance-tested,” “measured,” or “formally
+established” only when the repository contains that evidence. Do not describe future path
+authorization, URI projection, native compilation, scale, safety, or multi-user behavior as
+implemented.
+
+Examples and protocol transcripts presented as complete must pass against the pinned Marrow revision.
+When the pin changes, audit user-facing examples, diagnostics, debugger behavior, and semantic fact
+adapters together.
+
+## Working method
+
+Follow the parent workspace instructions for worktrees, mandatory lane-local Cargo target directories,
+review, and integration. Keep build output, packaged extensions, temporary fixtures, and probe logs
+outside the tracked repository.
+
+Start behavior changes with a failing production-path check and run the narrowest test that
+establishes the invariant first. Every code integration then requires an explicit full Rust workspace
+build, full Rust workspace tests, `fmt --check`, `clippy -D warnings`, and zero `unsafe`. Run
+TypeScript typecheck/lint, extension tests, and packaged-extension smoke tests in proportion to the
+affected TypeScript and cross-stack layers. A cross-stack change must prove that the extension
+launches the bundled binary and completes a real request through every affected transport.
+
+Review semantic changes upstream first, then review adapters for version, cancellation, stale-result,
+and transport-boundary failures. Do not add a fallback parser, vendored Marrow type, compatibility
+branch, or speculative transport feature to preserve an obsolete test.
