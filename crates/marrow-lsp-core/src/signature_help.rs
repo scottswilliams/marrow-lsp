@@ -19,7 +19,7 @@ pub fn signature_help(
     let fact = marrow_check::tooling::source_signature_help_fact_at(
         program, snapshot, file, source, lexed, offset,
     )?;
-    Some(render::help(fact))
+    Some(render::help(program, fact))
 }
 
 #[cfg(test)]

@@ -1664,7 +1664,6 @@ store ^books(id: int): Book
 
 fn f()
     const items = keys(^books)
-    const rev_items = reversed(items)
     const after = next(items)
     const before = prev(items)
 ";
@@ -1673,7 +1672,6 @@ fn f()
     let function = legend_index(&SemanticTokenType::FUNCTION);
 
     for (line, lexeme) in [
-        ("    const rev_items = reversed(items)", "reversed"),
         ("    const after = next(items)", "next"),
         ("    const before = prev(items)", "prev"),
     ] {

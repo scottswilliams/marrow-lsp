@@ -9,10 +9,9 @@
 use std::path::Path;
 
 use lsp_types::Hover;
-use marrow_check::tooling::source_symbol_docs_at;
+use marrow_check::tooling::{source_hover_fact_at, source_symbol_docs_at};
 use marrow_check::{AnalysisSnapshot, BindingIndex, build_binding_index};
 
-mod facts;
 mod render;
 
 /// The hover for byte `offset` in `file`, or `None` when no known symbol or type
@@ -32,7 +31,8 @@ pub fn hover_with_index(
     file: &Path,
     offset: usize,
 ) -> Option<Hover> {
-    facts::collect(snapshot, index, file, offset).map(render::hover)
+    source_hover_fact_at(snapshot, index, file, offset)
+        .map(|fact| render::hover(&snapshot.program, fact))
 }
 
 pub fn symbol_docs(

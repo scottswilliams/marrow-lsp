@@ -1,13 +1,12 @@
-use super::facts::{self, HoverFact};
 use super::*;
 use lsp_types::HoverContents;
 use marrow_check::tooling::{
     CallableSignature, CallableSignatureKind, SavedPlaceHoverFact, SourceCallableHoverFact,
-    SourceEnumMemberStatus, SourceModulePathHoverFact, SourceOperatorHoverFact,
+    SourceEnumMemberStatus, SourceHoverFact, SourceModulePathHoverFact, SourceOperatorHoverFact,
     SourceResourceHoverFact, SourceResourceHoverMemberKind, SourceSchemaHoverFact,
-    SourceTypeHoverFact, StoreRootHoverFact,
+    SourceTypeHoverFact, StoreRootHoverFact, source_hover_fact_at,
 };
-use marrow_check::{ProjectSources, analyze_project};
+use marrow_check::{CheckedProgram, ProjectSources, analyze_project};
 use marrow_project::parse_config;
 
 /// Analyze a one-file project laid out on disk under a temp dir, returning the
@@ -104,8 +103,8 @@ fn callable_fact_from(
     file: &std::path::Path,
     offset: usize,
 ) -> SourceCallableHoverFact {
-    match facts::collect(snapshot, index, file, offset) {
-        Some(HoverFact::SourceCallable { fact, .. }) => fact,
+    match source_hover_fact_at(snapshot, index, file, offset) {
+        Some(SourceHoverFact::Callable(fact)) => fact,
         _ => panic!("expected a source-callable hover fact at offset {offset}"),
     }
 }
@@ -124,8 +123,8 @@ fn module_path_fact_at(
     file: &std::path::Path,
     offset: usize,
 ) -> Option<SourceModulePathHoverFact> {
-    match facts::collect(snapshot, index, file, offset) {
-        Some(HoverFact::SourceModulePath(fact)) => Some(fact),
+    match source_hover_fact_at(snapshot, index, file, offset) {
+        Some(SourceHoverFact::ModulePath(fact)) => Some(fact),
         _ => None,
     }
 }
@@ -136,8 +135,8 @@ fn schema_fact_from(
     file: &std::path::Path,
     offset: usize,
 ) -> SourceSchemaHoverFact {
-    match facts::collect(snapshot, index, file, offset) {
-        Some(HoverFact::SourceSchema(fact)) => fact,
+    match source_hover_fact_at(snapshot, index, file, offset) {
+        Some(SourceHoverFact::Schema(fact)) => fact,
         _ => panic!("expected a schema hover fact at offset {offset}"),
     }
 }
@@ -148,8 +147,8 @@ fn saved_place_fact_from(
     file: &std::path::Path,
     offset: usize,
 ) -> SavedPlaceHoverFact {
-    match facts::collect(snapshot, index, file, offset) {
-        Some(HoverFact::SavedPlace(fact)) => fact,
+    match source_hover_fact_at(snapshot, index, file, offset) {
+        Some(SourceHoverFact::SavedPlace(fact)) => fact,
         _ => panic!("expected a saved-place hover fact at offset {offset}"),
     }
 }
@@ -168,8 +167,8 @@ fn type_fact_from(
     file: &std::path::Path,
     offset: usize,
 ) -> SourceTypeHoverFact {
-    match facts::collect(snapshot, index, file, offset) {
-        Some(HoverFact::Type(fact)) => fact,
+    match source_hover_fact_at(snapshot, index, file, offset) {
+        Some(SourceHoverFact::Type(fact)) => fact,
         _ => panic!("expected a type hover fact at offset {offset}"),
     }
 }
@@ -180,8 +179,8 @@ fn store_root_fact_from(
     file: &std::path::Path,
     offset: usize,
 ) -> StoreRootHoverFact {
-    match facts::collect(snapshot, index, file, offset) {
-        Some(HoverFact::StoreRoot(fact)) => fact,
+    match source_hover_fact_at(snapshot, index, file, offset) {
+        Some(SourceHoverFact::StoreRoot(fact)) => fact,
         _ => panic!("expected a store-root hover fact at offset {offset}"),
     }
 }
@@ -202,8 +201,8 @@ fn operator_fact_from(
     file: &std::path::Path,
     offset: usize,
 ) -> SourceOperatorHoverFact {
-    match facts::collect(snapshot, index, file, offset) {
-        Some(HoverFact::SourceOperator(fact)) => fact,
+    match source_hover_fact_at(snapshot, index, file, offset) {
+        Some(SourceHoverFact::Operator(fact)) => fact,
         _ => panic!("expected an operator hover fact at offset {offset}"),
     }
 }
@@ -217,8 +216,8 @@ fn is_operator_fact(
     offset: usize,
 ) -> bool {
     matches!(
-        facts::collect(snapshot, index, file, offset),
-        Some(HoverFact::SourceOperator(_))
+        source_hover_fact_at(snapshot, index, file, offset),
+        Some(SourceHoverFact::Operator(_))
     )
 }
 
@@ -388,11 +387,10 @@ pub fn get(
     // which is what would leak the parameter's docs.
     assert!(
         !matches!(
-            facts::collect(&snapshot, &index, &file, offset),
-            Some(HoverFact::SourceCallable {
-                fact: SourceCallableHoverFact::Parameter(_),
-                ..
-            })
+            source_hover_fact_at(&snapshot, &index, &file, offset),
+            Some(SourceHoverFact::Callable(
+                SourceCallableHoverFact::Parameter(_)
+            ))
         ),
         "field hover must not resolve to the same-named parameter"
     );
@@ -420,11 +418,10 @@ pub fn make(
     // parameter hover (which would inherit the parameter's docs).
     assert!(
         !matches!(
-            facts::collect(&snapshot, &index, &file, offset),
-            Some(HoverFact::SourceCallable {
-                fact: SourceCallableHoverFact::Parameter(_),
-                ..
-            })
+            source_hover_fact_at(&snapshot, &index, &file, offset),
+            Some(SourceHoverFact::Callable(
+                SourceCallableHoverFact::Parameter(_)
+            ))
         ),
         "named argument label must not resolve to the same-named parameter"
     );
@@ -1079,8 +1076,8 @@ pub fn load(): book::Id
     // only source of the resource's docs.
     assert!(
         !matches!(
-            facts::collect(&snapshot, &index, &file, head + 1),
-            Some(HoverFact::SourceSchema(_))
+            source_hover_fact_at(&snapshot, &index, &file, head + 1),
+            Some(SourceHoverFact::Schema(_))
         ),
         "removed identity path must not inherit resource schema docs"
     );
@@ -2454,8 +2451,8 @@ pub fn set(status: Status)
     // enum schema fact.
     assert!(
         !matches!(
-            facts::collect(&snapshot, &index, &file, offset),
-            Some(HoverFact::SourceSchema(SourceSchemaHoverFact::Enum(_)))
+            source_hover_fact_at(&snapshot, &index, &file, offset),
+            Some(SourceHoverFact::Schema(SourceSchemaHoverFact::Enum(_)))
         ),
         "ambiguous bare enum annotation must not pick a foreign enum"
     );
@@ -2491,8 +2488,8 @@ pub fn set(status: state::Status)
     // A private foreign enum is not visible, so the annotation must not resolve to its enum schema.
     assert!(
         !matches!(
-            facts::collect(&snapshot, &index, &file, offset),
-            Some(HoverFact::SourceSchema(SourceSchemaHoverFact::Enum(_)))
+            source_hover_fact_at(&snapshot, &index, &file, offset),
+            Some(SourceHoverFact::Schema(SourceSchemaHoverFact::Enum(_)))
         ),
         "private foreign enum annotation must not show the enum hover"
     );
@@ -2591,11 +2588,10 @@ pub fn caller(): int
     // The module qualifier must not resolve to the callee function (which would inherit its docs).
     assert!(
         !matches!(
-            facts::collect(&snapshot, &index, &file, call + 1),
-            Some(HoverFact::SourceCallable {
-                fact: SourceCallableHoverFact::Function(_),
-                ..
-            })
+            source_hover_fact_at(&snapshot, &index, &file, call + 1),
+            Some(SourceHoverFact::Callable(
+                SourceCallableHoverFact::Function(_)
+            ))
         ),
         "module qualifier hover must not pretend to be the function"
     );
@@ -2632,16 +2628,69 @@ fn hover_for_an_unknown_file_is_none() {
 
 #[test]
 fn hover_without_docs_is_type_only() {
-    let hover = render::hover(facts::HoverFact::Type(
-        marrow_check::tooling::SourceTypeHoverFact {
+    let hover = render::hover(
+        &CheckedProgram::default(),
+        SourceHoverFact::Type(marrow_check::tooling::SourceTypeHoverFact {
             ty: marrow_check::MarrowType::Primitive(marrow_check::ScalarType::Str),
             docs: Vec::new(),
-        },
-    ));
+        }),
+    );
     let HoverContents::Markup(markup) = hover.contents else {
         panic!("expected markup");
     };
     assert_eq!(markup.value, "```marrow\nstring\n```");
+}
+
+#[test]
+fn explicit_dynamic_local_hover_renders_unknown() {
+    let source = "\
+module a
+
+pub fn f(value: unknown)
+    const copy = value
+    print(copy)
+";
+    let (snapshot, file) = analyze(source);
+    let index = index_for(&snapshot);
+    let offset = source.rfind("copy").unwrap();
+
+    let value = hover_value_at(&snapshot, &index, &file, offset).expect("dynamic local hover");
+    assert_eq!(value, "```marrow\nunknown\n```");
+    assert!(matches!(
+        source_hover_fact_at(&snapshot, &index, &file, offset),
+        Some(SourceHoverFact::Type(SourceTypeHoverFact {
+            ty: marrow_check::MarrowType::Dynamic,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn no_value_call_closing_edge_has_no_hover() {
+    let source = "\
+module a
+
+fn finish()
+    return
+
+pub fn caller()
+    finish()
+";
+    let (snapshot, file) = analyze(source);
+    let index = index_for(&snapshot);
+    let offset = source.rfind("finish()").unwrap() + "finish(".len();
+
+    assert!(hover_value_at(&snapshot, &index, &file, offset).is_none());
+}
+
+#[test]
+fn diagnosed_unresolved_name_has_no_type_hover() {
+    let source = "module a\n\npub fn f(): int\n    return missing\n";
+    let (snapshot, file) = analyze(source);
+    let index = index_for(&snapshot);
+    let offset = source.rfind("missing").unwrap();
+
+    assert!(hover_value_at(&snapshot, &index, &file, offset).is_none());
 }
 
 /// Build the binding index for a snapshot so a docs test can resolve a symbol.

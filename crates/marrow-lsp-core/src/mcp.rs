@@ -28,14 +28,14 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use marrow_check::{
+    CheckedProgram,
     tooling::{
         SOURCE_COMPLETION_PROFILE_VERSION, SourceCompletionItemKind,
         SourceEnumNamespaceCompletionFact, SourceModuleNamespaceCompletionFact,
         SourceNamespaceCompletionFact, SourceNamespaceEnumMemberStatus,
         SourceNamespaceFunctionCompletion, source_completion_fact,
-        source_namespace_completion_file_fact,
+        source_namespace_completion_file_fact, source_type_hover_fact_at,
     },
-    type_at,
 };
 use marrow_json::resource_schema::{
     RESOURCE_SCHEMA_PROFILE_VERSION, resource_schema_for_name as marrow_resource_schema_for_name,
@@ -580,7 +580,7 @@ fn is_within(root: &Path, target: &Path) -> bool {
 fn with_loaded_project<R>(
     file: &Path,
     source: Option<&str>,
-    f: impl FnOnce(&Workspace, &Path) -> R,
+    f: impl FnOnce(&mut Workspace, &Path) -> R,
 ) -> Result<R, ProjectAccessError> {
     confinement_check(file)?;
     let overlay = source.map(|source| (file, source));
@@ -612,7 +612,7 @@ fn with_loaded_project<R>(
             cache.source_fingerprint = source_fp;
             cache.catalog_fingerprint = catalog_fp;
         }
-        Ok(f(&cache.workspace, file))
+        Ok(f(&mut cache.workspace, file))
     })
 }
 
@@ -744,10 +744,11 @@ fn check_snippet(source: &str) -> Json {
     json!({ "diagnostics": diagnostics })
 }
 
-/// `mw_type_at`: the type of the expression at a zero-based UTF-16 line/character
-/// in `file`, via `marrow_check::type_at`. `{ "type": "<spelling>" }`, or
-/// `{ "type": null }` when no expression covers the position (or the file does not
-/// check). The agent uses this to confirm what a sub-expression evaluates to.
+/// `mw_type_at`: the type-hover fact at a zero-based UTF-16 line/character in
+/// `file`. `{ "type": "<spelling>" }`, or `{ "type": null }` when no value type
+/// covers the position (or the file does not check). The agent uses this to
+/// confirm what a sub-expression evaluates to without exposing checker recovery
+/// states as user types.
 pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
     with_profile_version(
         type_at_result(file, line, character),
@@ -757,17 +758,21 @@ pub fn type_at_position(file: &Path, line: u32, character: u32) -> Json {
 
 fn type_at_result(file: &Path, line: u32, character: u32) -> Json {
     match with_loaded_project(file, None, |workspace, file| {
+        workspace.binding_index();
         let snapshot = workspace.latest().expect("recompute stored a snapshot");
-        let Some(analyzed) = snapshot.files.iter().find(|f| f.path.as_path() == file) else {
+        if !snapshot.files.iter().any(|f| f.path.as_path() == file) {
             return json!({ "type": Json::Null });
-        };
+        }
         // The parse was built from the file's on-disk text; index that same text so
         // the position maps to the offset the parse covers.
         let source = read_to_string(file);
         let index = crate::positions::LineIndex::new(source);
         let offset = index.offset(Position { line, character });
-        let ty = type_at(&snapshot.program, file, &analyzed.parsed, offset);
-        json!({ "type": ty.map(|ty| render_type(&ty)) })
+        let bindings = workspace
+            .binding_index_cached()
+            .expect("the latest snapshot has a binding index");
+        let fact = source_type_hover_fact_at(snapshot, bindings, file, offset);
+        json!({ "type": fact.map(|fact| render_type(&snapshot.program, &fact.ty)) })
     }) {
         Ok(result) => result,
         Err(err) => err.render(|error| tool_error(json!({ "type": Json::Null, "error": error }))),
@@ -849,7 +854,9 @@ pub fn namespace_complete(file: &Path, qualifier: &[String]) -> Json {
             &analyzed.parsed.file,
             qualifier,
         ) {
-            Some(SourceNamespaceCompletionFact::Module(fact)) => module_namespace_fact_json(&fact),
+            Some(SourceNamespaceCompletionFact::Module(fact)) => {
+                module_namespace_fact_json(&snapshot.program, &fact)
+            }
             Some(SourceNamespaceCompletionFact::Enum(fact)) => enum_namespace_fact_json(&fact),
             Some(
                 SourceNamespaceCompletionFact::StandardLibraryRoot(_)
@@ -884,7 +891,10 @@ fn empty_namespace_completion_result(error: Option<String>) -> Json {
     result
 }
 
-fn module_namespace_fact_json(fact: &SourceModuleNamespaceCompletionFact) -> Json {
+fn module_namespace_fact_json(
+    program: &CheckedProgram,
+    fact: &SourceModuleNamespaceCompletionFact,
+) -> Json {
     json!({
         "profile_version": SOURCE_NAMESPACE_COMPLETION_PROFILE_VERSION,
         "kind": "module",
@@ -895,23 +905,28 @@ fn module_namespace_fact_json(fact: &SourceModuleNamespaceCompletionFact) -> Jso
         "enums": fact.enums.iter().map(|enum_schema| {
             json!({ "name": &enum_schema.name, "docs": &enum_schema.docs })
         }).collect::<Vec<_>>(),
-        "functions": fact.functions.iter().map(namespace_function_json).collect::<Vec<_>>(),
+        "functions": fact.functions.iter().map(|function| {
+            namespace_function_json(program, function)
+        }).collect::<Vec<_>>(),
         "enum_name": Json::Null,
         "members": [],
     })
 }
 
-fn namespace_function_json(function: &SourceNamespaceFunctionCompletion) -> Json {
+fn namespace_function_json(
+    program: &CheckedProgram,
+    function: &SourceNamespaceFunctionCompletion,
+) -> Json {
     json!({
         "name": &function.name,
         "params": function.params.iter().map(|param| {
             json!({
                 "name": &param.name,
-                "type": render_type(&param.ty),
+                "type": render_type(program, &param.ty),
                 "docs": &param.docs,
             })
         }).collect::<Vec<_>>(),
-        "return_type": function.return_type.as_ref().map(render_type),
+        "return_type": function.return_type.as_ref().map(|ty| render_type(program, ty)),
         "docs": &function.docs,
     })
 }

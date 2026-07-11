@@ -185,6 +185,12 @@ pub fn greet(name: string): string
 
 pub fn shout()
     print(\"loud\")
+
+pub fn callShout()
+    shout()
+
+pub fn preserve(value: unknown): unknown
+    return value
 ",
     )
     .unwrap();
@@ -919,6 +925,32 @@ fn type_at_reports_the_type_of_a_parameter_use() {
 }
 
 #[test]
+fn type_at_reports_explicit_dynamic_without_exposing_internal_recovery() {
+    let (_dir, file) = project();
+    let position = position_after_in_file(
+        &file,
+        "pub fn preserve(value: unknown): unknown\n    return ",
+    );
+    let result = type_at_position(&file, position.line, position.character);
+    assert_eq!(
+        result["type"], "unknown",
+        "explicit dynamic is a value: {result}"
+    );
+}
+
+#[test]
+fn type_at_omits_a_no_value_call_result() {
+    let (_dir, file) = project();
+    let position = position_after_in_file(&file, "pub fn callShout()\n    shout(");
+    let result = type_at_position(&file, position.line, position.character);
+    assert_eq!(
+        result["type"],
+        Json::Null,
+        "a successful no-return call is not a value type: {result}"
+    );
+}
+
+#[test]
 fn complete_in_a_function_body_lists_locals_and_keywords() {
     let (_dir, file) = project();
     let position = position_in_file(&file, "n * 2");
@@ -1398,6 +1430,12 @@ fn namespace_complete_for_imported_module_returns_marrow_fact_shape() {
     assert_eq!(title["params"][1]["name"], "fallback");
     assert_eq!(title["params"][1]["type"], "string");
     assert_eq!(title["params"][1]["docs"], json!([]));
+    let choose_status = functions
+        .iter()
+        .find(|function| function["name"] == "chooseStatus")
+        .unwrap();
+    assert_eq!(choose_status["params"][1]["type"], "shelf::books::Status");
+    assert_eq!(choose_status["return_type"], "shelf::books::Status");
 }
 
 #[test]

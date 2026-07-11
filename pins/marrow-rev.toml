@@ -7,5 +7,5 @@
 # (`cargo run -p xtask -- gen-surface`) so an upstream API change is a visible diff, never
 # a silent compile break.
 
-rev = "f89f30d9db9f3a5fa6ac087619ea36091bcf17a5"
-tree = "3be0a03ef8553931afac4a14d64c31213b241844"
+rev = "31cb698be996edd1f8f983da3c54ff8fd6e27e03"
+tree = "824cb8840d1404c49d3c5f314c8b9ec23171345b"

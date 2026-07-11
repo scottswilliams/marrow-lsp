@@ -268,7 +268,7 @@ fn resource_constructor_signature_help_includes_resource_and_field_docs() {
 
     assert_eq!(
         signature_label(&help),
-        "Book(title: string, pages: int): Book"
+        "Book(title: string, pages: int): shelf::books::Book"
     );
     assert_eq!(
         signature_documentation(&help),
@@ -385,7 +385,7 @@ fn resource_constructor_uses_named_plain_fields() {
 
     assert_eq!(
         signature_label(&help),
-        "Book(title: string, pages: int): Book"
+        "Book(title: string, pages: int): shelf::books::Book"
     );
     assert_eq!(
         parameter_labels(&help),
@@ -404,7 +404,10 @@ fn imported_module_resource_constructor_keeps_signature_help() {
     )
     .expect("signature help");
 
-    assert_eq!(signature_label(&help), "Badge(value: int): Badge");
+    assert_eq!(
+        signature_label(&help),
+        "Badge(value: int): shelf::books::Badge"
+    );
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
 }
@@ -419,7 +422,10 @@ fn fully_qualified_resource_constructor_keeps_signature_help() {
     )
     .expect("signature help");
 
-    assert_eq!(signature_label(&help), "Badge(value: int): Badge");
+    assert_eq!(
+        signature_label(&help),
+        "Badge(value: int): shelf::books::Badge"
+    );
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
 }
@@ -436,7 +442,7 @@ fn resource_constructor_signature_help_uses_checked_field_types() {
 
     assert_eq!(
         signature_label(&help),
-        "Review(status: shelf::books::Status): Review"
+        "Review(status: shelf::books::Status): shelf::books::Review"
     );
     assert_eq!(
         parameter_labels(&help),
@@ -599,11 +605,11 @@ fn collection_builtins_use_canonical_collection_shape() {
     let help = help_at(
         &program,
         &file,
-        "module shelf::app\n\npub fn run(items: unknown): unknown\n    return reversed(|\n",
+        "module shelf::app\n\npub fn run(items: unknown): unknown\n    return values(|\n",
     )
     .expect("signature help");
 
-    assert_eq!(signature_label(&help), "reversed(collection): sequence");
+    assert_eq!(signature_label(&help), "values(collection): sequence");
     assert_eq!(parameter_labels(&help), vec!["collection".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
 }
@@ -929,7 +935,7 @@ resource Badge
     )
     .expect("module resource constructor signature help");
 
-    assert_eq!(signature_label(&help), "Badge(value: int): Badge");
+    assert_eq!(signature_label(&help), "Badge(value: int): Settings::Badge");
     assert_eq!(parameter_labels(&help), vec!["value: int".to_string()]);
     assert_eq!(help.active_parameter, Some(0));
 }

@@ -546,7 +546,7 @@ fn bare_identifier_lists_checker_single_name_builtins() {
         .map(|item| item.label.clone())
         .collect::<Vec<_>>();
 
-    for builtin in ["reversed", "next", "prev", "key", "Error"] {
+    for builtin in ["next", "prev", "key", "Error"] {
         assert!(
             labels.contains(&builtin.to_string()),
             "checker builtin {builtin:?} should be offered, got {labels:?}"

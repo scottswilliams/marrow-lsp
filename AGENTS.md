@@ -106,6 +106,12 @@ TypeScript typecheck/lint, extension tests, and packaged-extension smoke tests i
 affected TypeScript and cross-stack layers. A cross-stack change must prove that the extension
 launches the bundled binary and completes a real request through every affected transport.
 
+Changes that bump the Marrow pin or adapt checker, inference, type, analysis, or hover facts must
+also run the pinned sibling Marrow CLI as `marrow check --compiler-dev <projectdir>` on each affected
+clean conformance project. A `compiler.dev.unknown_type` warning blocks integration: fix the missing
+checker-owned type or fact upstream, or correct audit eligibility at its existing semantic owner.
+Do not add downstream exceptions or warning baselines.
+
 Review semantic changes upstream first, then review adapters for version, cancellation, stale-result,
 and transport-boundary failures. Do not add a fallback parser, vendored Marrow type, compatibility
 branch, or speculative transport feature to preserve an obsolete test.

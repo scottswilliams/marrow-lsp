@@ -186,6 +186,13 @@ const SURFACES: &[Surface] = &[
             "std_operation_call_for_segment",
             "module_path_at_with_position",
             "stdlib::all()",
+            "source_callable_hover_fact_at",
+            "source_module_path_hover_fact_at",
+            "store_root_hover_fact_at",
+            "source_schema_hover_fact_at",
+            "saved_place_hover_fact_at",
+            "source_operator_hover_fact_at",
+            "source_type_hover_fact_at",
         ],
     },
     Surface {
@@ -319,8 +326,8 @@ struct Required {
 const REQUIRED: &[Required] = &[
     Required {
         krate: "marrow-lsp-core",
-        rel: "hover/facts.rs",
-        needles: &[("source_type_hover_fact_at", 1)],
+        rel: "hover.rs",
+        needles: &[("source_hover_fact_at(", 1)],
     },
     Required {
         krate: "marrow-lsp-core",
@@ -357,6 +364,7 @@ const REQUIRED: &[Required] = &[
 /// Classifier modules a surface must not keep as its own file. The absence of the file is the
 /// enforcement; a resurrected `type_context`/`active_call`/per-role token module would fail here.
 const ABSENT_FILES: &[(&str, &str)] = &[
+    ("marrow-lsp-core", "hover/facts.rs"),
     ("marrow-lsp-core", "signature_help/active_call.rs"),
     ("marrow-lsp-core", "signature_help/signatures.rs"),
     ("marrow-lsp-core", "semantic_tokens/builtins.rs"),

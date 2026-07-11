@@ -2,6 +2,7 @@ use lsp_types::{
     Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, SignatureHelp,
     SignatureInformation,
 };
+use marrow_check::CheckedProgram;
 use marrow_check::tooling::{
     CallableArgumentStyle, CallableValueShape, SourceSignatureHelpCallable,
     SourceSignatureHelpFact, SourceSignatureHelpParameter,
@@ -22,8 +23,8 @@ struct Parameter {
     documentation: Option<String>,
 }
 
-pub(super) fn help(fact: SourceSignatureHelpFact) -> SignatureHelp {
-    let signature = render_signature(fact.callable);
+pub(super) fn help(program: &CheckedProgram, fact: SourceSignatureHelpFact) -> SignatureHelp {
+    let signature = render_signature(program, fact.callable);
     let active = active_parameter(
         &signature.params,
         fact.active_argument,
@@ -50,7 +51,7 @@ pub(super) fn help(fact: SourceSignatureHelpFact) -> SignatureHelp {
     }
 }
 
-fn render_signature(callable: SourceSignatureHelpCallable) -> Signature {
+fn render_signature(program: &CheckedProgram, callable: SourceSignatureHelpCallable) -> Signature {
     match callable {
         SourceSignatureHelpCallable::Intrinsic {
             path,
@@ -58,19 +59,24 @@ fn render_signature(callable: SourceSignatureHelpCallable) -> Signature {
             docs,
             params,
             return_shape,
-        } => render_intrinsic(path, argument_style, docs, params, return_shape),
+        } => render_intrinsic(program, path, argument_style, docs, params, return_shape),
         SourceSignatureHelpCallable::ResourceConstructor {
             name,
             docs,
             params,
-            return_type: _,
+            return_type,
         } => {
             let params = params
                 .into_iter()
-                .map(render_typed_parameter)
+                .map(|param| render_typed_parameter(program, param))
                 .collect::<Vec<_>>();
             Signature {
-                label: format!("{}({}): {}", name, joined_param_labels(&params), name),
+                label: format!(
+                    "{}({}): {}",
+                    name,
+                    joined_param_labels(&params),
+                    render_type(program, &return_type)
+                ),
                 documentation: join_docs(&docs),
                 params,
             }
@@ -83,11 +89,11 @@ fn render_signature(callable: SourceSignatureHelpCallable) -> Signature {
         } => {
             let params = params
                 .into_iter()
-                .map(render_typed_parameter)
+                .map(|param| render_typed_parameter(program, param))
                 .collect::<Vec<_>>();
             let params_label = joined_param_labels(&params);
             let label = match return_type {
-                Some(ty) => format!("{}({}): {}", name, params_label, render_type(&ty)),
+                Some(ty) => format!("{}({}): {}", name, params_label, render_type(program, &ty)),
                 None => format!("{}({})", name, params_label),
             };
             Signature {
@@ -100,6 +106,7 @@ fn render_signature(callable: SourceSignatureHelpCallable) -> Signature {
 }
 
 fn render_intrinsic(
+    program: &CheckedProgram,
     path: Vec<String>,
     argument_style: CallableArgumentStyle,
     docs: Vec<String>,
@@ -108,10 +115,13 @@ fn render_intrinsic(
 ) -> Signature {
     let params = params
         .into_iter()
-        .map(|param| render_intrinsic_parameter(param, argument_style))
+        .map(|param| render_intrinsic_parameter(program, param, argument_style))
         .collect::<Vec<_>>();
     let path = path.join("::");
-    let label = match return_shape.as_ref().map(render_callable_shape) {
+    let label = match return_shape
+        .as_ref()
+        .map(|shape| render_callable_shape(program, shape))
+    {
         Some(return_shape) => format!(
             "{}({}): {}",
             path,
@@ -128,6 +138,7 @@ fn render_intrinsic(
 }
 
 fn render_intrinsic_parameter(
+    program: &CheckedProgram,
     param: SourceSignatureHelpParameter,
     style: CallableArgumentStyle,
 ) -> Parameter {
@@ -147,7 +158,7 @@ fn render_intrinsic_parameter(
             let shape = param
                 .shape
                 .as_ref()
-                .map(render_callable_shape)
+                .map(|shape| render_callable_shape(program, shape))
                 .unwrap_or_else(|| "unknown".to_string());
             format!("{}: {}", param.label, shape)
         }
@@ -159,9 +170,12 @@ fn render_intrinsic_parameter(
     }
 }
 
-fn render_typed_parameter(param: SourceSignatureHelpParameter) -> Parameter {
+fn render_typed_parameter(
+    program: &CheckedProgram,
+    param: SourceSignatureHelpParameter,
+) -> Parameter {
     let label = match param.ty {
-        Some(ty) => format!("{}: {}", param.label, render_type(&ty)),
+        Some(ty) => format!("{}: {}", param.label, render_type(program, &ty)),
         None => param.label,
     };
     Parameter {

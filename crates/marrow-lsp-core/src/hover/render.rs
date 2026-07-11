@@ -2,32 +2,29 @@ use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 use marrow_check::tooling::{
     CallableSignature, CallableSignatureKind, SavedPlaceHoverFact, SavedPlaceHoverKeyParam,
     SourceCallableFunctionFact, SourceCallableHoverFact, SourceCallableParamFact,
-    SourceEnumHoverFact, SourceEnumMemberHoverFact, SourceEnumMemberStatus,
+    SourceEnumHoverFact, SourceEnumMemberHoverFact, SourceEnumMemberStatus, SourceHoverFact,
     SourceModulePathHoverFact, SourceOperatorHoverFact, SourceResourceHoverFact,
     SourceResourceHoverMember, SourceResourceHoverMemberKind, SourceResourceHoverPathSegment,
     SourceSchemaHoverFact, SourceSchemaHoverKeyParam, SourceStandardLibraryCapability,
     SourceTypeHoverFact, StoreRootHoverFact, StoreRootHoverMember, StoreRootHoverPathSegment,
 };
-use marrow_check::{CheckedFacts, DirectEffectFacts, HostEffect, MarrowType, SavedPlaceEffect};
+use marrow_check::{
+    CheckedFacts, CheckedProgram, DirectEffectFacts, HostEffect, MarrowType, SavedPlaceEffect,
+};
 use marrow_schema::stdlib;
 
 use crate::callables::render_callable_signature;
 use crate::types::render_type;
 
-use super::facts::HoverFact;
-
-pub(super) fn hover(fact: HoverFact<'_>) -> Hover {
+pub(super) fn hover(program: &CheckedProgram, fact: SourceHoverFact) -> Hover {
     markdown_hover(match fact {
-        HoverFact::SourceCallable {
-            fact,
-            checked_facts,
-        } => source_callable_hover(&fact, checked_facts),
-        HoverFact::SourceModulePath(fact) => source_module_path_hover(&fact),
-        HoverFact::SourceOperator(fact) => source_operator_hover(&fact),
-        HoverFact::StoreRoot(fact) => store_hover(&fact),
-        HoverFact::SourceSchema(fact) => source_schema_hover(&fact),
-        HoverFact::SavedPlace(fact) => saved_place_markdown(&fact),
-        HoverFact::Type(fact) => type_hover(&fact),
+        SourceHoverFact::Callable(fact) => source_callable_hover(program, &fact),
+        SourceHoverFact::ModulePath(fact) => source_module_path_hover(&fact),
+        SourceHoverFact::Operator(fact) => source_operator_hover(&fact),
+        SourceHoverFact::StoreRoot(fact) => store_hover(&fact),
+        SourceHoverFact::Schema(fact) => source_schema_hover(&fact),
+        SourceHoverFact::SavedPlace(fact) => saved_place_markdown(&fact),
+        SourceHoverFact::Type(fact) => type_hover(program, &fact),
     })
 }
 
@@ -41,19 +38,21 @@ fn markdown_hover(value: String) -> Hover {
     }
 }
 
-fn source_callable_hover(fact: &SourceCallableHoverFact, checked_facts: &CheckedFacts) -> String {
+fn source_callable_hover(program: &CheckedProgram, fact: &SourceCallableHoverFact) -> String {
     match fact {
-        SourceCallableHoverFact::Intrinsic(signature) => intrinsic_callable_hover(signature),
-        SourceCallableHoverFact::Function(function) => function_hover(function, checked_facts),
-        SourceCallableHoverFact::Parameter(param) => parameter_hover(param),
+        SourceCallableHoverFact::Intrinsic(signature) => {
+            intrinsic_callable_hover(program, signature)
+        }
+        SourceCallableHoverFact::Function(function) => function_hover(program, function),
+        SourceCallableHoverFact::Parameter(param) => parameter_hover(program, param),
         SourceCallableHoverFact::ModuleConst { name, ty, docs } => {
-            module_const_hover(name, ty.as_ref(), docs)
+            module_const_hover(program, name, ty.as_ref(), docs)
         }
     }
 }
 
-fn intrinsic_callable_hover(signature: &CallableSignature) -> String {
-    let mut value = marrow_code_block(&render_callable_signature(signature));
+fn intrinsic_callable_hover(program: &CheckedProgram, signature: &CallableSignature) -> String {
+    let mut value = marrow_code_block(&render_callable_signature(program, signature));
     append_docs(
         &mut value,
         Some(callable_context(signature.kind).to_string()),
@@ -72,20 +71,20 @@ fn callable_context(kind: CallableSignatureKind) -> &'static str {
     }
 }
 
-fn function_hover(function: &SourceCallableFunctionFact, checked_facts: &CheckedFacts) -> String {
-    let mut value = marrow_code_block(&function_signature(function));
+fn function_hover(program: &CheckedProgram, function: &SourceCallableFunctionFact) -> String {
+    let mut value = marrow_code_block(&function_signature(program, function));
     append_docs(&mut value, join_docs(&function.docs));
     append_docs(&mut value, parameter_docs(&function.params));
     if let Some(effects) = &function.direct_effects
-        && let Some(markdown) = direct_effects_markdown(checked_facts, effects)
+        && let Some(markdown) = direct_effects_markdown(&program.facts, effects)
     {
         append_docs(&mut value, Some(markdown));
     }
     value
 }
 
-fn parameter_hover(param: &SourceCallableParamFact) -> String {
-    let mut value = marrow_code_block(&parameter_signature(param));
+fn parameter_hover(program: &CheckedProgram, param: &SourceCallableParamFact) -> String {
+    let mut value = marrow_code_block(&parameter_signature(program, param));
     if let Some(docs) = join_docs(&param.docs) {
         value.push_str("\n\n");
         value.push_str("**Parameter**\n");
@@ -94,14 +93,19 @@ fn parameter_hover(param: &SourceCallableParamFact) -> String {
     value
 }
 
-fn module_const_hover(name: &str, ty: Option<&MarrowType>, docs: &[String]) -> String {
-    let mut value = marrow_code_block(&module_const_signature(name, ty));
+fn module_const_hover(
+    program: &CheckedProgram,
+    name: &str,
+    ty: Option<&MarrowType>,
+    docs: &[String],
+) -> String {
+    let mut value = marrow_code_block(&module_const_signature(program, name, ty));
     append_docs(&mut value, join_docs(docs));
     value
 }
 
-fn type_hover(fact: &SourceTypeHoverFact) -> String {
-    let mut value = marrow_code_block(&render_type(&fact.ty));
+fn type_hover(program: &CheckedProgram, fact: &SourceTypeHoverFact) -> String {
+    let mut value = marrow_code_block(&render_type(program, &fact.ty));
     append_docs(&mut value, join_docs(&fact.docs));
     value
 }
@@ -336,26 +340,30 @@ fn marrow_code_block(code: &str) -> String {
     format!("```marrow\n{code}\n```")
 }
 
-fn function_signature(function: &SourceCallableFunctionFact) -> String {
+fn function_signature(program: &CheckedProgram, function: &SourceCallableFunctionFact) -> String {
     let params = function
         .params
         .iter()
-        .map(|param| format!("{}: {}", param.name, render_type(&param.ty)))
+        .map(|param| format!("{}: {}", param.name, render_type(program, &param.ty)))
         .collect::<Vec<_>>()
         .join(", ");
     match &function.return_type {
-        Some(ty) => format!("fn {}({params}): {}", function.name, render_type(ty)),
+        Some(ty) => format!(
+            "fn {}({params}): {}",
+            function.name,
+            render_type(program, ty)
+        ),
         None => format!("fn {}({params})", function.name),
     }
 }
 
-fn parameter_signature(param: &SourceCallableParamFact) -> String {
-    format!("{}: {}", param.name, render_type(&param.ty))
+fn parameter_signature(program: &CheckedProgram, param: &SourceCallableParamFact) -> String {
+    format!("{}: {}", param.name, render_type(program, &param.ty))
 }
 
-fn module_const_signature(name: &str, ty: Option<&MarrowType>) -> String {
+fn module_const_signature(program: &CheckedProgram, name: &str, ty: Option<&MarrowType>) -> String {
     match ty {
-        Some(ty) => format!("const {}: {}", name, render_type(ty)),
+        Some(ty) => format!("const {}: {}", name, render_type(program, ty)),
         None => format!("const {}", name),
     }
 }
